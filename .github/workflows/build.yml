@@ -1,6 +1,3 @@
-
-build-paste-version.txt
-100%
 # BoomBap auto-build: compiles the standalone app and the plug-ins on
 # Windows, macOS and Linux, and attaches them to the run as downloads.
 # You never build anything yourself - push the code (or press
