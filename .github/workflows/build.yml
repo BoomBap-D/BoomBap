@@ -1,7 +1,16 @@
+
+build-paste-version.txt
+100%
 # BoomBap auto-build: compiles the standalone app and the plug-ins on
 # Windows, macOS and Linux, and attaches them to the run as downloads.
 # You never build anything yourself - push the code (or press
 # "Run workflow" in the Actions tab) and download the finished files.
+# MACOS FIX TRIAL (Nov 8, 2026) - see MACOS-CONFIGURE-NOTES.md:
+# macOS Configure failed in run 42438963335 while Windows/Linux passed.
+# This file only changes the macOS job: it pins CMake to 3.31.x
+# (the macos-15 image now ships CMake 4.4.x) and prints the toolchain
+# versions before Configure, so the next run either passes or tells
+# us the real error instead of guessing. Windows/Linux steps untouched.
 name: Build BoomBap
 
 on: [push, workflow_dispatch]
@@ -34,8 +43,29 @@ jobs:
             libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
             libglu1-mesa-dev mesa-common-dev xvfb
 
+      - name: Pin CMake 3.31 on macOS
+        if: runner.os == 'macOS'
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: "~3.31.0"
+
+      - name: Show toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cmake --version
+          xcodebuild -version || true
+          xcode-select -p || true
+
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Upload macOS configure log on failure
+        if: failure() && runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoomBap-macOS-configure-log
+          path: build/CMakeFiles/CMakeError.log
+          if-no-files-found: warn
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
