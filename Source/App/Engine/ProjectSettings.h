@@ -25,6 +25,7 @@ struct ProjectSettings
     int   songLength = 0;                            // 0 = no song, pattern mode only
     float trackGain[kTracks];
     bool  trackMute[kTracks];
+    bool  trackSolo[kTracks];
 
     float kickTuneHz = 50.0f, kickDecayMs = 600.0f, snareSnappy = 0.6f,
           openHatDecayMs = 380.0f, clapTailMs = 200.0f;
@@ -75,6 +76,7 @@ struct ProjectSettings
         {
             trackGain[t] = 0.8f;
             trackMute[t] = false;
+            trackSolo[t] = false;
         }
         for (int p = 0; p < kPads; ++p)
         {

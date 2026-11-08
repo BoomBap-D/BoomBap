@@ -73,6 +73,7 @@ void MainComponent::applyProjectToUi (const boombap::ProjectData& d)
     for (int t = 0; t < kTracks; ++t)
     {
         rows[t].mute.setToggleState (s.trackMute[t], dontSendNotification);
+        rows[t].solo.setToggleState (s.trackSolo[t], dontSendNotification);
         rows[t].level.setValue (s.trackGain[t], dontSendNotification);
     }
 
@@ -110,6 +111,7 @@ void MainComponent::newProject()
     currentFile = File();
     savedJson = currentJson();
     updateProjectLabel();
+    clearRecovery(); // the recovered session, if any, has been replaced
     fireMediaChanged();
 }
 
@@ -171,6 +173,7 @@ void MainComponent::openProject (const File& file)
     currentFile = file;
     savedJson = currentJson();
     updateProjectLabel();
+    clearRecovery(); // a saved project on disk now covers the work
     recentProjects.add (file);
 }
 
@@ -297,6 +300,7 @@ bool MainComponent::writeProject (const File& file)
     currentFile = file;
     savedJson = currentJson();
     updateProjectLabel();
+    clearRecovery(); // the manual save supersedes the autosave
     recentProjects.add (file);
     return true;
 }

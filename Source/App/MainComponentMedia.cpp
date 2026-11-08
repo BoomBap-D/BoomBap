@@ -125,7 +125,7 @@ void MainComponent::openPadBank()
         padWindow = std::make_unique<PadWindow> ("BoomBap Pad Bank", boombap::ui::bg());
         padWindow->setLookAndFeel (&lookAndFeel);
         padWindow->setContentNonOwned (padBank.get(), false); // the unique_ptr owns it - the window must not delete it too
-        padWindow->centreWithSize (780, 470);
+        padWindow->centreWithSize (860, 500);
     }
     padBank->refreshAll();
     padWindow->setVisible (true);
@@ -141,7 +141,7 @@ void MainComponent::openPianoRoll()
         pianoWindow = std::make_unique<PianoRollWindow> ("BoomBap Piano Roll", boombap::ui::bg());
         pianoWindow->setLookAndFeel (&lookAndFeel);
         pianoWindow->setContentNonOwned (pianoRoll.get(), false); // the unique_ptr owns it - the window must not delete it too
-        pianoWindow->centreWithSize (716, 566);
+        pianoWindow->centreWithSize (760, 600);
     }
     pianoRoll->refreshFromEngine();
     pianoWindow->setVisible (true);
@@ -157,7 +157,7 @@ void MainComponent::openPlaylist()
         playlistWindow = std::make_unique<PlaylistWindow> ("BoomBap Playlist", boombap::ui::bg());
         playlistWindow->setLookAndFeel (&lookAndFeel);
         playlistWindow->setContentNonOwned (playlist.get(), false); // the unique_ptr owns it - the window must not delete it too
-        playlistWindow->centreWithSize (660, 300);
+        playlistWindow->centreWithSize (700, 320);
     }
     playlist->refreshFromEngine();
     playlistWindow->setVisible (true);

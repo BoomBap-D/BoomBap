@@ -33,6 +33,10 @@ public:
     // Used when opening a file, and by the plugin editor to sync with host state.
     void loadProjectData (const boombap::ProjectData& d, bool reportMissing, bool preserveEngineTake);
 
+    // Pass 1 item 7: called by the standalone app once its window is up. If a
+    // crash-recovery file survived the last session, offers to restore it.
+    void checkForRecovery();
+
     // audio
     void prepareToPlay (int samplesPerBlockExpected, double sampleRate) override;
     void getNextAudioBlock (const juce::AudioSourceChannelInfo& info) override;
@@ -56,6 +60,7 @@ private:
         juce::Label name;
         juce::TextButton load { "Load..." };   // sample rows only
         juce::TextButton mute { "M" };
+        juce::TextButton solo { "S" };
         juce::Slider level;
         LevelMeter meter;
         StepButton steps[kSteps];
@@ -69,6 +74,14 @@ private:
 
     void timerCallback() override;
     void togglePlay();
+    void startTransport();
+    void stopTransport();
+    // audio device setup (Pass 1 item 8) + autosave / recovery (item 7)
+    void showAudioSettings();
+    void saveDeviceState();
+    std::unique_ptr<juce::XmlElement> loadDeviceStateXml();
+    void writeRecovery();
+    void clearRecovery();
     void refreshGrid();
     void pushAllParams();
     void openSampleChooser (int track);
@@ -86,7 +99,7 @@ private:
     void openPlaylist();
     void refreshPatternUi();
     // project files
-    static constexpr int kProjectBar = 36; // height of the project bar; everything else sits below it
+    static constexpr int kProjectBar = 40; // height of the project bar; everything else sits below it
     boombap::ProjectData makeProjectData() const;
     juce::String currentJson() const;
     bool isDirty() const;
@@ -130,7 +143,18 @@ private:
     int dirtyTick = 0;
 
     // transport and master
-    juce::TextButton playButton { "Play" }, clearButton { "Clear" }, resetButton { "Reset" };
+    juce::TextButton playButton { "PLAY" },
+                     stopButton { "STOP" },
+                     clearButton { "Clear" }, resetButton { "Reset" };
+    juce::TextButton audioButton { "Audio..." };
+    juce::TextButton metroButton { "METRO" };
+    LabeledSlider metroVol;
+    PadActivityLight padLight;
+    LevelMeter padMeter;
+    float padShown = 0.0f;
+    bool lastPlayingState = false;
+    int autosaveTicks = 0;
+    std::unique_ptr<juce::DocumentWindow> audioWindow;
     LabeledSlider bpm, swing, master, dustRate, glueThreshold;
     juce::ToggleButton dustToggle { "Dust (S950)" }, glueToggle { "Glue" };
     GrMeter glueBar;

@@ -450,5 +450,73 @@ int main()
         }
     }
 
+    // 9) Pass 1: solo, metronome, pad activity
+    {
+        auto peakRange = [] (const std::vector<float>& v, int from, int to)
+        {
+            float pk = 0.0f;
+            for (int i = from; i < to && i < (int) v.size(); ++i) pk = std::max (pk, std::abs (v[(size_t) i]));
+            return pk;
+        };
+        // at 90 bpm a step is 24 ticks * 306.25 = 7350 samples
+        const int stepSamples = 7350;
+
+        // solo the snare: the kick row falls silent, the snare still sounds
+        auto e = fresh();
+        e->setStep (BoomBapEngine::Kick, 0, 127);
+        e->setStep (BoomBapEngine::Snare, 4, 127);
+        e->setTrackSolo (BoomBapEngine::Snare, true);
+        assert (e->anySoloActive() && e->getTrackSolo (BoomBapEngine::Snare));
+        e->setPlaying (true);
+        const auto soloed = render (*e, stepSamples * 8);
+        assert (peakRange (soloed, 0, stepSamples / 2) < 1.0e-4f);            // kick window: silent
+        assert (peakRange (soloed, stepSamples * 4, stepSamples * 5) > 0.1f); // snare window: sounds
+
+        // solo a row with no steps in it: everything falls silent
+        auto e2 = fresh();
+        e2->setStep (BoomBapEngine::Snare, 4, 127);
+        e2->setTrackSolo (BoomBapEngine::Kick, true);
+        e2->setPlaying (true);
+        assert (peakOf (render (*e2, stepSamples * 8)) < 1.0e-4f);
+
+        // solo survives a settings round trip
+        auto e3 = fresh();
+        e3->setTrackSolo (BoomBapEngine::Clap, true);
+        const auto st = e3->getSettings();
+        assert (st.trackSolo[BoomBapEngine::Clap] && ! st.trackSolo[BoomBapEngine::Kick]);
+        auto e4 = fresh();
+        e4->applySettings (st);
+        assert (e4->getTrackSolo (BoomBapEngine::Clap));
+
+        // metronome: an empty pattern is silent without it, clicks on the beats with it
+        auto m = fresh();
+        m->setPlaying (true);
+        assert (peakOf (render (*m, stepSamples * 8)) < 1.0e-6f);
+        auto m2 = fresh();
+        m2->setMetronomeOn (true);
+        m2->setMetronomeLevel (0.8f);
+        m2->setPlaying (true);
+        const auto clicks = render (*m2, stepSamples * 16);
+        assert (peakRange (clicks, 0, 1500) > 0.05f);                          // downbeat click
+        assert (peakRange (clicks, stepSamples * 4, stepSamples * 4 + 1500) > 0.05f); // beat 2 click
+        assert (peakRange (clicks, stepSamples * 2, stepSamples * 2 + 1500) < 0.01f); // no click off the beat
+
+        // pad activity: a sequencer pad hit and a live pad hit both register
+        auto p = fresh();
+        p->loadSample (BoomBapEngine::Sample1, std::vector<float> (4000, 0.5f), sr);
+        p->setStep (BoomBapEngine::Sample1, 0, 127);
+        p->setPlaying (true);
+        render (*p, 2048);
+        assert (p->consumePadActivityPeak() > 0.05f);
+        assert (p->lastTriggeredPad() == 0);
+        auto p2 = fresh();
+        p2->loadPadSample (5, std::vector<float> (4000, 0.5f), sr);
+        p2->triggerPad (5, 1.0f);
+        render (*p2, 2048);
+        assert (p2->consumePadActivityPeak() > 0.05f);
+        assert (p2->lastTriggeredPad() == 5);
+        std::printf ("Solo, metronome, pad activity: ok\n");
+    }
+
     std::printf ("engine checks passed\n");
 }

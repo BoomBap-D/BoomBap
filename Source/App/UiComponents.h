@@ -53,6 +53,30 @@ private:
     float level = 0.0f;
 };
 
+// Round activity lamp for the pad set: glows while any pad is sounding
+// (Pass 1 item 4b - the main window's pad-activity indicator).
+class PadActivityLight : public juce::Component
+{
+public:
+    void setLevel (float newLevel)
+    {
+        if (std::abs (newLevel - level) > 0.01f) { level = newLevel; repaint(); }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (2.0f);
+        const float t = std::clamp (level, 0.0f, 1.0f);
+        g.setColour (boombap::ui::accent().withAlpha (0.15f + 0.85f * t));
+        g.fillEllipse (b);
+        g.setColour (boombap::ui::border().withAlpha (0.7f));
+        g.drawEllipse (b, 1.0f);
+    }
+
+private:
+    float level = 0.0f;
+};
+
 // Gain-reduction meter for the Glue bus compressor (0 to 15 dB scale).
 class GrMeter : public juce::Component
 {

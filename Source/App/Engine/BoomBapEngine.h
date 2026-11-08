@@ -48,6 +48,7 @@ public:
         for (auto& c : patGrid) c.store (0);
         for (auto& g : trackGain) g.store (0.8f);
         for (auto& m : trackMute) m.store (false);
+        for (auto& s : trackSolo) s.store (false);
         for (auto& p : trackPeak) p.store (0.0f);
         for (auto& h : padHit) h.store (0);
         for (auto& n : patMelody) n.store (0);
@@ -86,6 +87,7 @@ public:
         {
             trackGain[t].store (o.trackGain[t].load());
             trackMute[t].store (o.trackMute[t].load());
+            trackSolo[t].store (o.trackSolo[t].load());
         }
         bpm.store (o.bpm.load());           swing.store (o.swing.load());
         masterDb.store (o.masterDb.load());
@@ -130,6 +132,7 @@ public:
         {
             p.trackGain[t] = trackGain[t].load();
             p.trackMute[t] = trackMute[t].load();
+            p.trackSolo[t] = trackSolo[t].load();
         }
         for (int pt = 0; pt < kPatterns; ++pt)
         {
@@ -180,6 +183,7 @@ public:
         {
             trackGain[t].store (p.trackGain[t]);
             trackMute[t].store (p.trackMute[t]);
+            trackSolo[t].store (p.trackSolo[t]);
         }
         for (int pt = 0; pt < kPatterns; ++pt)
         {
@@ -303,6 +307,24 @@ public:
     void setTrackGain (int t, float linear) { trackGain[t].store (linear); }
     void setTrackMute (int t, bool m)       { trackMute[t].store (m); }
     void setMasterDb (float db)             { masterDb.store (db); }
+
+    // ---- solo (Pass 1 item 6): non-exclusive; while any row is soloed, only
+    // soloed rows sound. Applies to the 8 step rows, exactly like mute. ----
+    void setTrackSolo (int t, bool s)       { if (t >= 0 && t < kTracks) trackSolo[(size_t) t].store (s); }
+    bool getTrackSolo (int t) const         { return t >= 0 && t < kTracks && trackSolo[(size_t) t].load(); }
+    bool anySoloActive() const              { for (const auto& s : trackSolo) if (s.load()) return true; return false; }
+
+    // ---- metronome (Pass 1 item 5): click on every beat (steps 0/4/8/12),
+    // accented on the bar line, in time with the sequencer clock. ----
+    void  setMetronomeOn (bool on)          { metronomeOn.store (on); }
+    bool  isMetronomeOn() const             { return metronomeOn.load(); }
+    void  setMetronomeLevel (float level01) { metronomeLevel.store (std::clamp (level01, 0.0f, 1.0f)); }
+    float getMetronomeLevel() const         { return metronomeLevel.load(); }
+
+    // ---- pad activity (Pass 1 item 4b): peak level of the loudest pad voice
+    // since the last call (consumed by reading), and which pad produced it.
+    float consumePadActivityPeak()          { return padActivityPeak.exchange (0.0f); }
+    int   lastTriggeredPad() const          { return lastPadIndex.load(); }
 
     // ---------------- drum sound controls ----------------
     void setKickTune (float hz)       { kickTune.store (hz);        dirty.store (true); }
@@ -485,11 +507,17 @@ public:
         bool cap = recording.load();
         const float master = std::pow (10.0f, masterDb.load() / 20.0f);
 
+        const bool soloActive = anySoloActive();
         float gains[kTracks];
         for (int t = 0; t < kTracks; ++t)
-            gains[t] = trackMute[t].load() ? 0.0f : trackGain[t].load();
+            gains[t] = (trackMute[t].load() || (soloActive && ! trackSolo[t].load())) ? 0.0f
+                                                                                      : trackGain[t].load();
+        const float clickLvl = metronomeLevel.load();
+        if (! isPlayingNow) clickSamplesLeft = 0;
 
         float pk[kTracks] = {};
+        float padPk = 0.0f;
+        int padPkIdx = -1;
         for (int i = 0; i < numSamples; ++i)
         {
             if (isPlayingNow)
@@ -546,10 +574,15 @@ public:
                     const float pv = pads.processPad (p) * gains[Sample1 + p];
                     mix += pv;
                     pk[Sample1 + p] = std::max (pk[Sample1 + p], std::abs (pv));
+                    if (std::abs (pv) > padPk) { padPk = std::abs (pv); padPkIdx = p; }
                 }
                 // pads 4-16 are live/audition pads: straight into the mix
                 for (int p = 3; p < kPads; ++p)
-                    mix += pads.processPad (p);
+                {
+                    const float pv = pads.processPad (p);
+                    mix += pv;
+                    if (std::abs (pv) > padPk) { padPk = std::abs (pv); padPkIdx = p; }
+                }
             }
 
             if (useDust) mix = dust.process (mix);
@@ -575,11 +608,28 @@ public:
             float l = mix, r = mix;
             if (useGlue) bus.process (l, r);
 
+            if (clickSamplesLeft > 0) // metronome click burst (post-glue, pre-master)
+            {
+                const double dur = 0.03 * sr;
+                const float env = (float) (clickSamplesLeft / dur);
+                const float c = (float) std::sin (clickPhase) * env * env * 0.6f * clickLvl;
+                clickPhase += 6.283185307179586 * clickFreq / sr;
+                if (clickPhase > 6.283185307179586) clickPhase -= 6.283185307179586;
+                l += c; r += c;
+                --clickSamplesLeft;
+            }
+
             outL[i] = std::tanh (l * master);
             outR[i] = std::tanh (r * master);
         }
         for (int t = 0; t < kTracks; ++t)
             if (pk[t] > trackPeak[t].load()) trackPeak[t].store (pk[t]);
+
+        if (padPk > padActivityPeak.load())
+        {
+            padActivityPeak.store (padPk);
+            lastPadIndex.store (padPkIdx);
+        }
 
         if (cap) recPublished.store (recLen);
 
@@ -595,6 +645,12 @@ private:
             const int base = s * kTicksPer16th;
             if (base + swingOffsetTicks (base, kTicksPer16th, swingPercent) != t)
                 continue;
+            if (metronomeOn.load() && (s % 4) == 0) // beat step: fire the click
+            {
+                clickFreq = (s == 0) ? 2000.0 : 1500.0;
+                clickPhase = 0.0;
+                clickSamplesLeft = (int) (0.03 * sr);
+            }
             for (int tr = 0; tr < kTracks; ++tr)
             {
                 const int v = patGrid[(size_t) gIdx (activePattern, tr, s)].load();
@@ -701,6 +757,13 @@ private:
     }
     std::array<std::atomic<float>, kTracks> trackGain;
     std::array<std::atomic<bool>, kTracks> trackMute;
+    std::array<std::atomic<bool>, kTracks> trackSolo;
+    std::atomic<bool> metronomeOn { false };
+    std::atomic<float> metronomeLevel { 0.8f };
+    std::atomic<float> padActivityPeak { 0.0f };
+    std::atomic<int> lastPadIndex { -1 };
+    int clickSamplesLeft = 0;              // audio thread only
+    double clickPhase = 0.0, clickFreq = 1500.0; // audio thread only
     std::array<std::atomic<float>, kTracks> trackPeak;
     std::array<std::atomic<int>, MpcPads::kNumPads> padHit;
     std::array<std::atomic<int>, kPatterns * kSteps> patMelody;

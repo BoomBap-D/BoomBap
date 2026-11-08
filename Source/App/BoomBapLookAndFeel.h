@@ -53,8 +53,12 @@ public:
         return juce::Font (13.5f);
     }
 
-    juce::Font getTextButtonFont (juce::TextButton&, int) override
+    juce::Font getTextButtonFont (juce::TextButton& button, int buttonHeight) override
     {
+        // Pass 1 item 2: the transport buttons are findable from across the room.
+        const auto text = button.getButtonText();
+        if (text.contains ("PLAY") || text.contains ("STOP"))
+            return juce::Font (juce::jmin (24.0f, (float) buttonHeight * 0.5f), juce::Font::bold);
         return juce::Font (13.5f);
     }
 

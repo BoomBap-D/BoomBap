@@ -11,7 +11,14 @@ BoomBapEditor::BoomBapEditor (BoomBapProcessor& p)
     // the UI in line with the project the processor is already holding.
     main.loadProjectData (proc.captureStateData(), false, true);
 
-    setSize (1100, 1082);
+    // Pass 1 item 1: same landscape fit as the standalone - clamped to the
+    // display's usable area, and resizable in the host.
+    const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+    const auto area = display != nullptr ? display->userArea
+                                         : juce::Rectangle<int> (0, 0, 1920, 1080);
+    setResizable (true, true);
+    setResizeLimits (1000, 620, area.getWidth(), area.getHeight());
+    setSize (juce::jmin (1560, area.getWidth()), juce::jmin (900, area.getHeight()));
 }
 
 BoomBapEditor::~BoomBapEditor()

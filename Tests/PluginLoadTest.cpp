@@ -169,8 +169,8 @@ int main (int argc, char* argv[])
             auto* editor = inst->createEditor();
             if (editor != nullptr)
             {
-                check (editor->getWidth() == 1100 && editor->getHeight() == 1082,
-                       "editor opens at the app's size");
+                check (editor->getWidth() == 1560 && editor->getHeight() == 900,
+                       "editor opens at the app's landscape size");
                 if (std::getenv ("PLUGIN_TEST_NO_HOST") == nullptr)
                 {
                     editor->addToDesktop (0);

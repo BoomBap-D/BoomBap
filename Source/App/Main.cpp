@@ -26,10 +26,21 @@ public:
                               DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar (true);
-            setContentOwned (new MainComponent (engine, true), true);
-            setResizable (false, false);
-            centreWithSize (getWidth(), getHeight());
+            auto* content = new MainComponent (engine, true);
+            setContentOwned (content, true);
+            // Pass 1 item 1: resizable, and never bigger than the display's
+            // usable area (screen minus taskbar) - the old fixed 1100x1082
+            // window ran off the top and bottom of a 1080p screen.
+            const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+            const auto area = display != nullptr ? display->userArea
+                                                 : juce::Rectangle<int> (0, 0, 1920, 1080);
+            setResizeLimits (1000, 620, area.getWidth(), area.getHeight());
+            setResizable (true, true);
+            const int w = juce::jmin (1560, area.getWidth());
+            const int h = juce::jmin (900, area.getHeight());
+            setBounds (area.withSizeKeepingCentre (w, h));
             setVisible (true);
+            content->checkForRecovery();
         }
 
         void closeButtonPressed() override

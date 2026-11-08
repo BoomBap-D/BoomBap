@@ -203,7 +203,8 @@ public:
         : juce::DocumentWindow (name, background, juce::DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
-        setResizable (false, false);
+        setResizable (true, true);
+        setResizeLimits (716, 566, 10000, 10000);
     }
 
     void closeButtonPressed() override { setVisible (false); }

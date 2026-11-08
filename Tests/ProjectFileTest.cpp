@@ -31,7 +31,8 @@ static bool sameSettings (const ProjectSettings& a, const ProjectSettings& b)
              && near (a.pianoLevel, b.pianoLevel);
     for (int t = 0; t < ProjectSettings::kTracks; ++t)
     {
-        same = same && near (a.trackGain[t], b.trackGain[t]) && a.trackMute[t] == b.trackMute[t];
+        same = same && near (a.trackGain[t], b.trackGain[t]) && a.trackMute[t] == b.trackMute[t]
+                    && a.trackSolo[t] == b.trackSolo[t];
         for (int p = 0; p < ProjectSettings::kPatterns; ++p)
             for (int s = 0; s < ProjectSettings::kSteps; ++s) same = same && a.patData[p][t][s] == b.patData[p][t][s];
     }
@@ -69,6 +70,7 @@ int main()
     d.settings.patData[2][1][5] = 90;   d.settings.patMelody[2][3] = 30;  d.settings.patMelodySource[2] = 5;
     d.settings.songChain[0] = 2; d.settings.songChain[1] = 0; d.settings.songLength = 2; d.settings.currentPattern = 2;
     d.settings.trackGain[1] = 0.55f;  d.settings.trackMute[3] = true;
+    d.settings.trackSolo[2] = true;   d.settings.trackSolo[5] = true;
     d.settings.kickTuneHz = 46.5f;  d.settings.kickDecayMs = 820.0f;  d.settings.snareSnappy = 0.25f;
     d.settings.openHatDecayMs = 500.0f;  d.settings.clapTailMs = 120.0f;
     d.settings.dustOn = true;  d.settings.dustRateHz = 15000.0f;
@@ -122,6 +124,17 @@ int main()
     const String json = projectToJson (d, projectA);
     check (json.contains ("\"relativePath\": \"samples/kick.wav\""), "in-folder sample is stored relative");
     check (json.contains ("boombap-project"), "file is labelled");
+
+    // Pass 1 item 7: the crash-recovery file is an ordinary project file at a
+    // fixed location - the autosave writes it and the restore reads it back.
+    std::printf ("Recovery file\n");
+    const File recovery = root.getChildFile ("settings").getChildFile ("BoomBap Recovery.boombap");
+    recovery.getParentDirectory().createDirectory();
+    check (saveProjectFile (recovery, d, err), "recovery autosave writes");
+    ProjectData recovered;
+    check (loadProjectFile (recovery, recovered, err), "recovery file loads");
+    check (sameSettings (d.settings, recovered.settings), "recovered settings match the autosaved ones");
+    check (recovery.deleteFile(), "recovery file clears");
 
     std::printf ("Moving the project folder\n");
     dirA.copyDirectoryTo (dirB);

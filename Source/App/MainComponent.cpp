@@ -2,8 +2,36 @@
 #include "PadBank.h"
 #include "PianoRoll.h"
 #include "Playlist.h"
+#include "AppSettings.h"
 
 using namespace juce;
+
+namespace
+{
+// The audio-device setup window (Pass 1 item 8): hosts JUCE's device
+// selector; closing it saves the device state so the choice persists.
+class AudioSettingsWindow : public juce::DocumentWindow
+{
+public:
+    AudioSettingsWindow (const String& name, std::function<void()> onClose)
+        : DocumentWindow (name, boombap::ui::bg(), juce::DocumentWindow::closeButton),
+          closeCallback (std::move (onClose))
+    {
+        setUsingNativeTitleBar (true);
+        setResizable (true, true);
+        setResizeLimits (480, 400, 1200, 900);
+    }
+
+    void closeButtonPressed() override
+    {
+        if (closeCallback) closeCallback();
+        setVisible (false);
+    }
+
+private:
+    std::function<void()> closeCallback;
+};
+} // namespace
 
 //==============================================================================
 MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevice)
@@ -11,12 +39,15 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
 {
     formats.registerBasicFormats();
     setLookAndFeel (&lookAndFeel);
-    setSize (1100, 1082);
+    setSize (1560, 900); // Pass 1 item 1: landscape design size; the layout scales to fit smaller windows
     setWantsKeyboardFocus (true);
 
     // ---- project bar ----
     for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &recentButton })
         addAndMakeVisible (b);
+    addAndMakeVisible (audioButton);
+    audioButton.setVisible (ownAudioDevice); // in a plugin the host owns the device
+    audioButton.onClick = [this] { showAudioSettings(); };
     addAndMakeVisible (projectName);
     projectName.setColour (Label::textColourId, Colours::white);
     projectName.setFont (juce::Font (15.0f));
@@ -26,15 +57,27 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     saveAsButton.onClick = [this] { saveProjectAs ({}); };
     recentButton.onClick = [this] { showRecentMenu(); };
 
-    // ---- transport ----
+    // ---- transport (Pass 1 item 2: big labelled MPC-style buttons) ----
     addAndMakeVisible (playButton);
+    addAndMakeVisible (stopButton);
     addAndMakeVisible (clearButton);
     addAndMakeVisible (resetButton);
     playButton.setColour (TextButton::buttonColourId, boombap::ui::accent());
     playButton.setColour (TextButton::textColourOffId, Colour (0xff14100a));
-    playButton.onClick  = [this] { togglePlay(); };
+    playButton.onClick  = [this] { startTransport(); };
+    stopButton.onClick  = [this] { stopTransport(); };
     clearButton.onClick = [this] { engine.clearPattern(); refreshGrid(); };
     resetButton.onClick = [this] { engine.loadDefaultPattern(); refreshGrid(); };
+
+    // ---- metronome (Pass 1 item 5) + pad activity (item 4b) ----
+    addAndMakeVisible (metroButton);
+    metroButton.setClickingTogglesState (true);
+    metroButton.onClick = [this] { engine.setMetronomeOn (metroButton.getToggleState()); };
+    addAndMakeVisible (metroVol.slider);
+    setupSlider (metroVol, "Click", 0.0, 1.0, 0.8, 0.01, "",
+                 [this] { engine.setMetronomeLevel ((float) metroVol.slider.getValue()); });
+    addAndMakeVisible (padLight);
+    addAndMakeVisible (padMeter);
 
     addAndMakeVisible (bpm.slider);
     addAndMakeVisible (swing.slider);
@@ -126,12 +169,18 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         row.mute.setColour (TextButton::buttonOnColourId, Colours::indianred);
         row.mute.onClick = [this, t] { engine.setTrackMute (t, rows[t].mute.getToggleState()); };
 
+        addAndMakeVisible (row.solo);
+        row.solo.setClickingTogglesState (true);
+        row.solo.setColour (TextButton::buttonOnColourId, Colour (0xffa8871a));
+        row.solo.onClick = [this, t] { engine.setTrackSolo (t, rows[t].solo.getToggleState()); };
+
         addAndMakeVisible (row.level);
         addAndMakeVisible (row.meter);
         row.level.setSliderStyle (Slider::LinearHorizontal);
         row.level.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
         row.level.setRange (0.0, 1.2, 0.01);
         row.level.setValue (0.8, dontSendNotification);
+        row.level.setDoubleClickReturnValue (true, 0.8); // Pass 1: double-click reset
         row.level.onValueChange = [this, t] { engine.setTrackGain (t, (float) rows[t].level.getValue()); };
 
         for (int s = 0; s < kSteps; ++s)
@@ -177,7 +226,10 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         const bool on = vocalToggle.getToggleState();
         engine.setVocalEnabled (on);
         if (ownAudioDevice)
-            setAudioChannels (on ? 1 : 0, 2); // only asks for the microphone once you switch this on
+        {
+            auto state = deviceManager.createStateXml(); // keep the chosen device / rate / buffer
+            setAudioChannels (on ? 1 : 0, 2, state.get()); // only asks for the microphone once you switch this on
+        }
         // in a plugin the host owns the audio device; the toggle just arms the vocal channel
     };
 
@@ -186,7 +238,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
 
     vocalHint.setText ("Use headphones: monitoring through speakers will feed back.", dontSendNotification);
     vocalHint.setColour (Label::textColourId, Colours::orange);
-    vocalHint.setFont (juce::Font (13.0f));
+    vocalHint.setFont (juce::Font (11.5f));
 
     // ---- vocal take ----
     addAndMakeVisible (recordButton);
@@ -247,7 +299,10 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     savedJson = currentJson();
     updateProjectLabel();
     if (ownAudioDevice)
-        setAudioChannels (0, 2);
+    {
+        auto state = loadDeviceStateXml(); // Pass 1 item 8: restore the device setup from last time
+        setAudioChannels (0, 2, state.get());
+    }
     startTimerHz (30);
 }
 
@@ -255,6 +310,8 @@ MainComponent::~MainComponent()
 {
     setLookAndFeel (nullptr);
     stopTimer();
+    saveDeviceState();
+    clearRecovery(); // a clean exit means the recovery file has done its job
     shutdownAudio();
 }
 
@@ -265,6 +322,7 @@ void MainComponent::setupSlider (LabeledSlider& s, const String& name, double mi
     s.slider.setTextBoxStyle (Slider::TextBoxRight, false, 72, 20);
     s.slider.setRange (min, max, step);
     s.slider.setValue (init, dontSendNotification);
+    s.slider.setDoubleClickReturnValue (true, init); // Pass 1 item 4: double-click resets, app-wide
     s.slider.setTextValueSuffix (suffix);
     s.slider.onValueChange = std::move (onChange);
 
@@ -279,9 +337,10 @@ void MainComponent::pushAllParams()
     for (auto* s : { &bpm, &swing, &master, &dustRate, &glueThreshold, &kickTune, &kickDecay,
                      &snareSnappy, &openHatDecay, &clapTail, &vocalDistance, &vocalInput,
                      &synthCutoff, &synthReso, &synthAttack, &synthRelease, &synthLevel,
-                     &pianoBright, &pianoDecay, &pianoLevel })
+                     &pianoBright, &pianoDecay, &pianoLevel, &metroVol })
         if (s->slider.onValueChange) s->slider.onValueChange();
 
+    engine.setMetronomeOn (metroButton.getToggleState());
     engine.setGlueEnabled (glueToggle.getToggleState());
     engine.setDustEnabled (dustToggle.getToggleState());
     engine.setVocalMic (micBox.getSelectedId() - 1);
@@ -298,6 +357,19 @@ void MainComponent::refreshGrid()
 void MainComponent::togglePlay()
 {
     engine.setPlaying (! engine.isPlaying());
+}
+
+void MainComponent::startTransport()
+{
+    // MPC-style: pressing Play while already playing restarts from the top.
+    if (engine.isPlaying())
+        engine.setPlaying (false);
+    engine.setPlaying (true);
+}
+
+void MainComponent::stopTransport()
+{
+    engine.setPlaying (false);
 }
 
 bool MainComponent::keyPressed (const KeyPress& key)
@@ -326,7 +398,13 @@ void MainComponent::timerCallback()
                 rows[t].steps[st].setPlaying (st == s);
     }
 
-    playButton.setButtonText (engine.isPlaying() ? "Stop" : "Play");
+    const bool playingNow = engine.isPlaying();
+    if (playingNow != lastPlayingState)
+    {
+        lastPlayingState = playingNow;
+        playButton.setColour (TextButton::buttonColourId,
+                              playingNow ? boombap::ui::accentHi() : boombap::ui::accent());
+    }
 
     if (++dirtyTick >= 8) { dirtyTick = 0; updateProjectLabel(); }
 
@@ -335,6 +413,22 @@ void MainComponent::timerCallback()
         const float peak = engine.consumeTrackPeak (t);
         meterShown[t] = std::max (peak, meterShown[t] * 0.82f);
         rows[t].meter.setLevel (meterShown[t]);
+    }
+
+    // pad activity (Pass 1 item 4b): light + pad-set meter here, flash in the pad bank
+    const float padPeak = engine.consumePadActivityPeak();
+    padShown = std::max (padPeak, padShown * 0.82f);
+    padMeter.setLevel (padShown);
+    padLight.setLevel (padShown);
+    if (padBank != nullptr && padPeak > 0.02f)
+        padBank->showActivity (engine.lastTriggeredPad());
+
+    // autosave (Pass 1 item 7): every ~60 s while there are unsaved changes
+    if (ownAudioDevice && ++autosaveTicks >= 30 * 60)
+    {
+        autosaveTicks = 0;
+        if (isDirty())
+            writeRecovery();
     }
 
     const bool recNow = engine.isRecording();
@@ -394,12 +488,131 @@ void MainComponent::getNextAudioBlock (const AudioSourceChannelInfo& info)
 }
 
 //==============================================================================
+// Pass 1 item 8: the audio-device setup surface. JUCE's selector drives the
+// real AudioDeviceManager (device type where the OS offers one, input and
+// output device, sample rate, buffer size); the state is saved when the
+// window closes and restored at launch.
+void MainComponent::showAudioSettings()
+{
+    if (! ownAudioDevice)
+        return;
+
+    if (audioWindow == nullptr)
+    {
+        auto* selector = new AudioDeviceSelectorComponent (deviceManager, 0, 2, 0, 2,
+                                                           false, false, true, false);
+        selector->setSize (540, 430);
+        audioWindow = std::make_unique<AudioSettingsWindow> ("Audio Device Setup",
+                                                             [this] { saveDeviceState(); });
+        audioWindow->setLookAndFeel (&lookAndFeel);
+        audioWindow->setContentOwned (selector, true);
+        audioWindow->centreWithSize (560, 470);
+    }
+    audioWindow->setVisible (true);
+    audioWindow->toFront (true);
+}
+
+void MainComponent::saveDeviceState()
+{
+    if (! ownAudioDevice)
+        return;
+    auto state = deviceManager.createStateXml();
+    if (state == nullptr)
+        return;
+    auto props = boombap::appPropertiesFile();
+    props->setValue ("audioDeviceState", state.get());
+    props->saveIfNeeded();
+}
+
+std::unique_ptr<XmlElement> MainComponent::loadDeviceStateXml()
+{
+    auto props = boombap::appPropertiesFile();
+    return props->getXmlValue ("audioDeviceState");
+}
+
+//==============================================================================
+// Pass 1 item 7: autosave + crash recovery. The recovery file is written by
+// the timer while the project is dirty, and deleted by a manual save, by
+// opening / starting another project, and by a clean exit - so if it is
+// still there at launch, the last session ended early.
+void MainComponent::writeRecovery()
+{
+    auto data = makeProjectData();
+    if (engine.hasTake() && takeDirty)
+    {
+        const File takeFile = boombap::recoveryTakeFile();
+        takeFile.getParentDirectory().createDirectory();
+        if (writeTakeWav (takeFile))
+            data.vocalTakePath = takeFile.getFullPathName();
+    }
+    const File recovery = boombap::recoveryFile();
+    recovery.getParentDirectory().createDirectory();
+    String error;
+    boombap::saveProjectFile (recovery, data, error);
+}
+
+void MainComponent::clearRecovery()
+{
+    if (! ownAudioDevice)
+        return;
+    boombap::recoveryFile().deleteFile();
+    boombap::recoveryTakeFile().deleteFile();
+}
+
+void MainComponent::checkForRecovery()
+{
+    if (! ownAudioDevice)
+        return;
+    const File recovery = boombap::recoveryFile();
+    if (! recovery.existsAsFile())
+        return;
+
+    Component::SafePointer<MainComponent> safe (this);
+    AlertWindow::showAsync (MessageBoxOptions::makeOptionsYesNo (MessageBoxIconType::InfoIcon,
+                                                                 "Recover your last session?",
+                                                                 "BoomBap closed with unsaved work last time. "
+                                                                 "Restore the autosaved project?",
+                                                                 "Restore", "Discard", this),
+                            [safe, recovery] (int result)
+                            {
+                                if (safe == nullptr)
+                                    return;
+                                if (result == 1)
+                                {
+                                    boombap::ProjectData d;
+                                    String error;
+                                    if (boombap::loadProjectFile (recovery, d, error))
+                                    {
+                                        safe->loadProjectData (d, false, false);
+                                        safe->savedJson.clear(); // still unsaved work - keep the * and the recovery file
+                                        safe->updateProjectLabel();
+                                    }
+                                }
+                                else
+                                {
+                                    recovery.deleteFile();
+                                    boombap::recoveryTakeFile().deleteFile();
+                                }
+                            });
+}
+
+//==============================================================================
+// The layout is drawn on a 1560x900 landscape canvas (Pass 1 item 1) and
+// scaled proportionally to whatever size the window actually has, so the
+// whole app always fits the screen - never taller than the usable area.
 void MainComponent::paint (Graphics& g)
 {
     using namespace boombap::ui;
     g.fillAll (bg());
 
-    const int oy = kProjectBar;
+    const float sx = (float) getWidth() / 1560.0f;
+    const float sy = (float) getHeight() / 900.0f;
+    auto RB = [&] (int x, int y, int w, int h)
+    {
+        return Rectangle<int> (roundToInt (x * sx), roundToInt (y * sy),
+                               roundToInt (w * sx), roundToInt (h * sy));
+    };
+    const int oy = RB (0, 0, 0, kProjectBar).getHeight();
 
     // project bar strip
     g.setColour (panel());
@@ -410,128 +623,140 @@ void MainComponent::paint (Graphics& g)
     // section panels
     auto drawPanel = [&] (int x, int y, int w, int h)
     {
-        Rectangle<float> r ((float) x, (float) y, (float) w, (float) h);
+        Rectangle<float> r = RB (x, y, w, h).toFloat();
         g.setColour (panel());
         g.fillRoundedRectangle (r, 12.0f);
         g.setColour (border().withAlpha (0.55f));
         g.drawRoundedRectangle (r, 12.0f, 1.0f);
     };
-    drawPanel (8, oy + 4,   getWidth() - 16, 96);    // transport + master FX
-    drawPanel (8, oy + 106, getWidth() - 16, 366);   // step grid
-    drawPanel (8, oy + 478, getWidth() - 16, 100);   // sample waveform
-    drawPanel (8, oy + 586, 532, 200);               // drum sound
-    drawPanel (548, oy + 586, getWidth() - 556, 262); // vocal + export
-    drawPanel (8, oy + 856, getWidth() - 16, 190);    // instruments
+    drawPanel (8, 46, 1544, 118);    // transport + master FX
+    drawPanel (8, 172, 1544, 384);   // step grid
+    drawPanel (8, 564, 764, 140);    // sample waveform
+    drawPanel (780, 564, 772, 140);  // vocal
+    drawPanel (8, 712, 420, 180);    // drum sound
+    drawPanel (436, 712, 760, 180);  // instruments
+    drawPanel (1204, 712, 348, 180); // export
 
     g.setColour (text().withAlpha (0.85f));
     g.setFont (juce::Font (13.0f, juce::Font::bold));
-    g.drawText ("SAMPLE WAVEFORM", 20, oy + 486, 220, 20, Justification::left);
-    g.drawText ("DRUM SOUND", 20, oy + 594, 300, 20, Justification::left);
-    g.drawText ("VOCAL", 560, oy + 594, 300, 20, Justification::left);
-    g.drawText ("EXPORT", 560, oy + 782, 300, 20, Justification::left);
-    g.drawText ("INSTRUMENTS", 20, oy + 864, 300, 20, Justification::left);
-    g.drawText ("SYNTH", 20, oy + 890, 60, 20, Justification::left);
-    g.drawText ("PIANO", 580, oy + 890, 60, 20, Justification::left);
+    g.drawText ("SAMPLE WAVEFORM", RB (20, 574, 220, 20), Justification::left);
+    g.drawText ("VOCAL", RB (792, 574, 300, 20), Justification::left);
+    g.drawText ("DRUM SOUND", RB (20, 722, 300, 20), Justification::left);
+    g.drawText ("INSTRUMENTS", RB (448, 722, 190, 20), Justification::left);
+    g.drawText ("EXPORT", RB (1216, 722, 300, 20), Justification::left);
+    g.drawText ("SYNTH", RB (448, 752, 56, 20), Justification::left);
+    g.drawText ("PIANO", RB (448, 816, 56, 20), Justification::left);
 
     g.setColour (muted());
-    g.setFont (12.0f);
-    g.drawText ("Synth and piano play from the Piano Roll - pick them in its Sound menu. Synth root C3, piano root C4.",
-                20, oy + 1022, 1000, 18, Justification::left);
+    g.setFont (11.0f);
+    g.drawText ("Synth and piano play from the Piano Roll's Sound menu. Synth root C3, piano root C4.",
+                RB (640, 722, 545, 20), Justification::left);
+    g.drawText ("Click a step: normal, accent, off.  Right-click clears.  Space = play/stop.  Ctrl/Cmd+S = save.",
+                RB (440, 182, 1105, 24), Justification::left);
 
-    g.setColour (muted());
     g.setFont (12.0f);
     for (int s = 0; s < kSteps; s += 4)
-    {
-        const int x = 330 + s * 42 + (s / 4) * 6;
-        g.drawText (String (s / 4 + 1), x, oy + 106, 40, 14, Justification::centredLeft);
-    }
-    g.drawText ("Click a step: normal, accent, off.  Right-click clears.  Space = play/stop.  Ctrl/Cmd+S = save.",
-                12, oy + 792, 540, 18, Justification::left);
+        g.drawText (String (s / 4 + 1), RB (398 + s * 66 + (s / 4) * 8, 212, 40, 14), Justification::centredLeft);
 }
 
 void MainComponent::resized()
 {
-    const int oy = kProjectBar;
+    const float sx = (float) getWidth() / 1560.0f;
+    const float sy = (float) getHeight() / 900.0f;
+    auto RB = [&] (int x, int y, int w, int h)
+    {
+        return Rectangle<int> (roundToInt (x * sx), roundToInt (y * sy),
+                               roundToInt (w * sx), roundToInt (h * sy));
+    };
 
     // project bar
-    newButton.setBounds (12, 6, 60, 26);
-    openButton.setBounds (78, 6, 80, 26);
-    saveButton.setBounds (164, 6, 60, 26);
-    saveAsButton.setBounds (230, 6, 90, 26);
-    recentButton.setBounds (326, 6, 76, 26);
-    projectName.setBounds (410, 6, 330, 26);
-    pianoButton.setBounds (748, 6, 96, 26);
-    playlistButton.setBounds (852, 6, 88, 26);
-    padBankButton.setBounds (948, 6, 92, 26);
-    patternLabel.setBounds (12, oy + 105, 56, 18);
+    newButton.setBounds (RB (12, 6, 60, 28));
+    openButton.setBounds (RB (78, 6, 80, 28));
+    saveButton.setBounds (RB (164, 6, 60, 28));
+    saveAsButton.setBounds (RB (230, 6, 90, 28));
+    recentButton.setBounds (RB (326, 6, 76, 28));
+    audioButton.setBounds (RB (408, 6, 80, 28));
+    projectName.setBounds (RB (500, 6, 430, 28));
+    pianoButton.setBounds (RB (1150, 6, 96, 28));
+    playlistButton.setBounds (RB (1254, 6, 88, 28));
+    padBankButton.setBounds (RB (1350, 6, 100, 28));
+
+    // transport row A: big play/stop, pattern edit helpers, tempo, swing, master, pad activity
+    playButton.setBounds (RB (20, 54, 150, 50));
+    stopButton.setBounds (RB (178, 54, 150, 50));
+    clearButton.setBounds (RB (336, 54, 84, 50));
+    resetButton.setBounds (RB (428, 54, 84, 50));
+    bpm.slider.setBounds (RB (578, 54, 230, 50));
+    swing.slider.setBounds (RB (888, 54, 190, 50));
+    master.slider.setBounds (RB (1152, 54, 200, 50));
+    padLight.setBounds (RB (1372, 61, 36, 36));
+    padMeter.setBounds (RB (1416, 65, 124, 28));
+
+    // transport row B: metronome, dust, glue
+    metroButton.setBounds (RB (20, 114, 110, 38));
+    metroVol.slider.setBounds (RB (196, 114, 180, 38));
+    dustToggle.setBounds (RB (420, 114, 140, 38));
+    dustRate.slider.setBounds (RB (626, 114, 200, 38));
+    glueToggle.setBounds (RB (860, 114, 84, 38));
+    glueThreshold.slider.setBounds (RB (1010, 114, 200, 38));
+    glueBar.setBounds (RB (1240, 118, 200, 12));
+    glueMeter.setBounds (RB (1240, 132, 200, 18));
+
+    // pattern selector strip (in the grid panel header)
+    patternLabel.setBounds (RB (20, 182, 70, 24));
     for (int i = 0; i < 8; ++i)
-        patternButtons[(size_t) i].setBounds (72 + i * 30, oy + 105, 26, 18);
-
-    // top bar
-    playButton.setBounds (12, oy + 12, 90, 40);
-    clearButton.setBounds (110, oy + 12, 70, 40);
-    resetButton.setBounds (188, oy + 12, 70, 40);
-    bpm.slider.setBounds (310, oy + 12, 200, 40);
-    swing.slider.setBounds (610, oy + 12, 200, 40);
-    master.slider.setBounds (900, oy + 12, 190, 40);
-
-    // master effects
-    dustToggle.setBounds (12, oy + 62, 130, 30);
-    dustRate.slider.setBounds (210, oy + 62, 220, 30);
-    glueToggle.setBounds (480, oy + 62, 80, 30);
-    glueThreshold.slider.setBounds (650, oy + 62, 220, 30);
-    glueBar.setBounds (890, oy + 64, 150, 10);
-    glueMeter.setBounds (890, oy + 76, 150, 16);
+        patternButtons[(size_t) i].setBounds (RB (96 + i * 40, 182, 36, 24));
 
     // grid
     for (int t = 0; t < kTracks; ++t)
     {
         Row& row = rows[t];
-        const int y = oy + 124 + t * 43;
-        row.name.setBounds (12, y, 90, 38);
-        row.load.setBounds (100, y + 6, 62, 26);
-        row.mute.setBounds (168, y + 6, 32, 26);
-        row.level.setBounds (204, y, 118, 38);
+        const int y = 232 + t * 40;
+        row.name.setBounds (RB (20, y, 100, 36));
+        row.load.setBounds (RB (124, y + 5, 58, 26));
+        row.mute.setBounds (RB (186, y + 5, 32, 26));
+        row.solo.setBounds (RB (222, y + 5, 32, 26));
+        row.level.setBounds (RB (262, y, 120, 36));
         for (int s = 0; s < kSteps; ++s)
-            row.steps[s].setBounds (330 + s * 42 + (s / 4) * 6, y, 40, 38);
-        row.meter.setBounds (1026, y + 15, 58, 8);
+            row.steps[s].setBounds (RB (398 + s * 66 + (s / 4) * 8, y, 60, 36));
+        row.meter.setBounds (RB (1480, y + 14, 60, 8));
     }
 
     // waveform panel
     for (int i = 0; i < 3; ++i)
-        waveSel[i].setBounds (226 + i * 44, oy + 485, 38, 22);
-    waveName.setBounds (368, oy + 485, 624, 22);
-    waveView.setBounds (16, oy + 512, getWidth() - 32, 58);
+        waveSel[i].setBounds (RB (226 + i * 44, 574, 38, 22));
+    waveName.setBounds (RB (368, 574, 380, 22));
+    waveView.setBounds (RB (16, 602, 748, 92));
+
+    // vocal panel
+    vocalToggle.setBounds (RB (792, 600, 150, 26));
+    micBox.setBounds (RB (950, 600, 220, 26));
+    vocalHint.setBounds (RB (1178, 600, 362, 26));
+    vocalDistance.slider.setBounds (RB (880, 632, 260, 26));
+    vocalInput.slider.setBounds (RB (1228, 632, 260, 26));
+    recordButton.setBounds (RB (792, 666, 92, 26));
+    takeToggle.setBounds (RB (892, 666, 76, 26));
+    takeLabel.setBounds (RB (976, 666, 560, 26));
 
     // drum sound panel
     LabeledSlider* drum[] = { &kickTune, &kickDecay, &snareSnappy, &openHatDecay, &clapTail };
     for (int i = 0; i < 5; ++i)
-        drum[i]->slider.setBounds (130, oy + 622 + i * 34, 380, 28);
-
-    // vocal panel
-    vocalToggle.setBounds (560, oy + 620, 150, 28);
-    micBox.setBounds (720, oy + 620, 220, 28);
-    vocalDistance.slider.setBounds (650, oy + 650, 380, 28);
-    vocalInput.slider.setBounds (650, oy + 684, 380, 28);
-    vocalHint.setBounds (560, oy + 714, 520, 22);
-    recordButton.setBounds (560, oy + 742, 92, 26);
-    takeToggle.setBounds (660, oy + 742, 76, 26);
-    takeLabel.setBounds (744, oy + 742, 348, 26);
-
-    // export
-    exportBars.setBounds (560, oy + 798, 90, 28);
-    normalizeToggle.setBounds (660, oy + 798, 110, 28);
-    exportButton.setBounds (780, oy + 798, 130, 28);
-    exportStatus.setBounds (920, oy + 798, 170, 28);
+        drum[i]->slider.setBounds (RB (128, 750 + i * 27, 280, 25));
 
     // instruments panel
-    synthWaveBox.setBounds (84, oy + 888, 130, 24);
-    synthCutoff.slider.setBounds (150, oy + 918, 176, 26);
-    synthAttack.slider.setBounds (150, oy + 950, 176, 26);
-    synthLevel.slider.setBounds (150, oy + 982, 176, 26);
-    synthReso.slider.setBounds (430, oy + 918, 176, 26);
-    synthRelease.slider.setBounds (430, oy + 950, 176, 26);
-    pianoBright.slider.setBounds (716, oy + 918, 344, 26);
-    pianoDecay.slider.setBounds (716, oy + 950, 344, 26);
-    pianoLevel.slider.setBounds (716, oy + 982, 344, 26);
+    synthWaveBox.setBounds (RB (504, 750, 124, 24));
+    synthCutoff.slider.setBounds (RB (692, 750, 200, 24));
+    synthReso.slider.setBounds (RB (956, 750, 220, 24));
+    synthAttack.slider.setBounds (RB (692, 782, 200, 24));
+    synthRelease.slider.setBounds (RB (956, 782, 220, 24));
+    synthLevel.slider.setBounds (RB (692, 814, 200, 24));
+    pianoBright.slider.setBounds (RB (956, 814, 220, 24));
+    pianoDecay.slider.setBounds (RB (692, 846, 200, 24));
+    pianoLevel.slider.setBounds (RB (956, 846, 220, 24));
+
+    // export panel
+    exportBars.setBounds (RB (1216, 750, 96, 26));
+    normalizeToggle.setBounds (RB (1216, 784, 130, 26));
+    exportButton.setBounds (RB (1216, 818, 160, 30));
+    exportStatus.setBounds (RB (1216, 854, 320, 24));
 }

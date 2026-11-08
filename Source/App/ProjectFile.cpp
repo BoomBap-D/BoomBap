@@ -60,7 +60,7 @@ String projectToJson (const ProjectData& d, const File& projectFile)
                                 { "piano", var (laneNotes (s.patPiano[p])) } }));
     }
     for (int t = 0; t < ProjectSettings::kTracks; ++t)
-        tracks.add (object ({ { "gain", (double) s.trackGain[t] }, { "mute", s.trackMute[t] } }));
+        tracks.add (object ({ { "gain", (double) s.trackGain[t] }, { "mute", s.trackMute[t] }, { "solo", s.trackSolo[t] } }));
 
     Array<var> chain;
     for (int i = 0; i < ProjectSettings::kSongSlots; ++i) chain.add (s.songChain[i]);
@@ -226,6 +226,7 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
         {
             s.trackGain[t] = getF ((*tr)[t], "gain", s.trackGain[t]);
             s.trackMute[t] = getB ((*tr)[t], "mute", s.trackMute[t]);
+            s.trackSolo[t] = getB ((*tr)[t], "solo", s.trackSolo[t]);
         }
 
     const var drums = root.getProperty ("drums", var());

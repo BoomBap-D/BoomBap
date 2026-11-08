@@ -39,7 +39,12 @@ public:
     void paint (juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat().reduced (1.0f);
-        g.setColour (hasSample ? boombap::ui::panelAlt() : boombap::ui::panel().darker (0.25f));
+        // Pass 1 item 4: the pads take the step sequencer's lighter charcoal
+        // gray (0xff262b33 family), with a slight top-to-bottom gradient.
+        const juce::Colour top = hasSample ? juce::Colour (0xff31363f) : juce::Colour (0xff272b32);
+        const juce::Colour bot = hasSample ? juce::Colour (0xff22252c) : juce::Colour (0xff1b1e24);
+        g.setGradientFill (juce::ColourGradient (top, b.getX(), b.getY(),
+                                                 bot, b.getX(), b.getBottom(), false));
         g.fillRoundedRectangle (b, 10.0f);
         if (flash > 0.0f)
         {
@@ -93,11 +98,11 @@ public:
         loadButton.onClick = [this] { if (onLoad) onLoad (selected); };
         addAndMakeVisible (loadButton);
 
-        setupRow (startRow, "Start %", 0.0, 97.0, 0.5);
-        setupRow (endRow, "End %", 3.0, 100.0, 0.5);
-        setupRow (tuneRow, "Tune st", -24.0, 24.0, 0.1);
-        setupRow (gainRow, "Gain", 0.0, 2.0, 0.01);
-        setupRow (velRow, "Vel sens", 0.0, 1.0, 0.01);
+        setupRow (startRow, "Start %", 0.0, 97.0, 0.5, 0.0);
+        setupRow (endRow, "End %", 3.0, 100.0, 0.5, 100.0);
+        setupRow (tuneRow, "Tune st", -24.0, 24.0, 0.1, 0.0);
+        setupRow (gainRow, "Gain", 0.0, 2.0, 0.01, 1.0);
+        setupRow (velRow, "Vel sens", 0.0, 1.0, 0.01, 1.0);
 
         reverseToggle.onClick = [this] { pushEditor(); };
         addAndMakeVisible (reverseToggle);
@@ -132,6 +137,13 @@ public:
     {
         for (int i = 0; i < 16; ++i) refreshPad (i);
         pullEditor();
+    }
+
+    // Pass 1 item 4b: a pad that sounds (sequencer or live) flashes here too.
+    void showActivity (int pad)
+    {
+        if (pad >= 0 && pad < 16)
+            pads[pad].triggerFlash();
     }
 
     void selectPad (int pad, bool trigger)
@@ -177,7 +189,7 @@ public:
         for (int i = 0; i < 5; ++i)
         {
             rowsArr[i]->label.setBounds (ex, 108 + i * 36, 64, 24);
-            rowsArr[i]->slider.setBounds (ex + 66, 108 + i * 36, 198, 24);
+            rowsArr[i]->slider.setBounds (ex + 66, 108 + i * 36, juce::jmax (120, getWidth() - ex - 84), 24);
         }
         reverseToggle.setBounds (ex, 292, 130, 26);
         muteLabel.setBounds (ex, 326, 84, 24);
@@ -191,13 +203,14 @@ private:
         juce::Slider slider;
     };
 
-    void setupRow (Row& row, const char* name, double lo, double hi, double step)
+    void setupRow (Row& row, const char* name, double lo, double hi, double step, double def)
     {
         row.label.setText (name, juce::dontSendNotification);
         addAndMakeVisible (row.label);
         row.slider.setSliderStyle (juce::Slider::LinearHorizontal);
         row.slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 22);
         row.slider.setRange (lo, hi, step);
+        row.slider.setDoubleClickReturnValue (true, def); // Pass 1: double-click reset
         row.slider.onValueChange = [this] { pushEditor(); };
         addAndMakeVisible (row.slider);
     }
@@ -263,7 +276,8 @@ public:
         : juce::DocumentWindow (name, background, juce::DocumentWindow::closeButton)
     {
         setUsingNativeTitleBar (true);
-        setResizable (false, false);
+        setResizable (true, true);
+        setResizeLimits (700, 420, 10000, 10000);
     }
 
     void closeButtonPressed() override { setVisible (false); }
