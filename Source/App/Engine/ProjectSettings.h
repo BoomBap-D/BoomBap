@@ -6,6 +6,17 @@
 
 namespace boombap
 {
+// One audio clip on the audio track (Fix pass item 35). Positions are in SAMPLES
+// on the song timeline; the recorded audio itself lives in the engine (and, on
+// disk, in the take WAV). Trimming moves these numbers, never the audio.
+struct AudioClip
+{
+    bool active = false;
+    long long startSamples = 0;   // where the clip sits on the timeline
+    long long sourceStart = 0;    // trim: offset into the recorded audio
+    long long lengthSamples = 0;  // trim: how much of the audio plays
+};
+
 struct ProjectSettings
 {
     static constexpr int kTracks = 8;
@@ -37,6 +48,16 @@ struct ProjectSettings
 
     int   vocalMic = 2;                  // index into the five mic models
     float vocalDistanceCm = 15.0f, vocalInputDb = 0.0f;
+
+    // Audio tracks (Fix pass item 35): one for now (the vocal), growing in
+    // Pass 4. The mixer runs in track order: the 8 instrument rows, then
+    // these. A recorded take lands here as a clip (item 32's home).
+    static constexpr int kAudioTracks = 1;
+    static constexpr int kMaxAudioClips = 16;
+    AudioClip audioClips[kMaxAudioClips];
+    float audioGain[kAudioTracks] = { 0.9f };
+    bool  audioMute[kAudioTracks] = { false };
+    bool  audioSolo[kAudioTracks] = { false };
 
     // MPC pad bank: per-pad chop/tune/level settings for all 16 pads.
     // (The pads' sample file paths live in ProjectFile.h.)
@@ -136,6 +157,17 @@ struct ProjectSettings
         vocalMic = std::clamp (vocalMic, 0, 7);
         vocalDistanceCm = std::clamp (vocalDistanceCm, 3.0f, 40.0f);
         vocalInputDb = std::clamp (vocalInputDb, -12.0f, 24.0f);
+        for (auto& c : audioClips)
+        {
+            c.startSamples  = std::clamp<long long> (c.startSamples, 0, 1LL << 40);
+            c.sourceStart   = std::clamp<long long> (c.sourceStart, 0, 1LL << 40);
+            c.lengthSamples = std::clamp<long long> (c.lengthSamples, 0, 1LL << 40);
+            if (c.lengthSamples <= 0) c.active = false;
+        }
+        for (int i = 0; i < kAudioTracks; ++i)
+        {
+            audioGain[i] = std::clamp (audioGain[i], 0.0f, 1.2f);
+        }
         for (int p = 0; p < kPads; ++p)
         {
             padStart[p] = std::clamp (padStart[p], 0.0f, 0.95f);

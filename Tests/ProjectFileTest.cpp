@@ -166,6 +166,31 @@ int main()
     check (wild.settings.vocalMic == 7, "mic index is clamped");
     check (wild.exportBars == 4, "odd export length falls back to 4 bars");
 
+    std::printf ("Fix pass: audio clips + whole-song export choice\n");
+    ProjectData cd;
+    cd.settings.audioClips[3].active = true;
+    cd.settings.audioClips[3].startSamples = 132300;
+    cd.settings.audioClips[3].sourceStart = 11025;
+    cd.settings.audioClips[3].lengthSamples = 66150;
+    cd.settings.audioGain[0] = 0.42f;
+    cd.settings.audioMute[0] = true;
+    cd.exportBars = 100;
+    ProjectData cback;
+    check (projectFromJson (projectToJson (cd, projectA), projectA, cback, err), "clip project parses");
+    check (cback.settings.audioClips[3].active && cback.settings.audioClips[3].startSamples == 132300
+           && cback.settings.audioClips[3].sourceStart == 11025
+           && cback.settings.audioClips[3].lengthSamples == 66150, "clip region survives the round trip");
+    check (! cback.settings.audioClips[0].active, "other clip slots stay empty");
+    check (cback.settings.audioGain[0] == 0.42f && cback.settings.audioMute[0],
+           "audio track mixer state survives");
+    check (cback.exportBars == 100, "whole-song export choice survives");
+
+    ProjectData oldf;
+    check (projectFromJson ("{\"format\":\"boombap-project\",\"version\":1}", projectA, oldf, err),
+           "pre-fix-pass file loads");
+    check (! oldf.settings.audioClips[0].active && oldf.settings.audioGain[0] == 0.9f,
+           "old files get the default audio track and no clips");
+
     root.deleteRecursively();
     std::printf (failures == 0 ? "project file checks passed\n" : "%d CHECK(S) FAILED\n", failures);
     return failures == 0 ? 0 : 1;

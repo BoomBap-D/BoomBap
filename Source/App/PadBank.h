@@ -115,7 +115,8 @@ public:
         addAndMakeVisible (muteGroupBox);
 
         hint.setText ("Click a pad to play it. Pads 1-3 are the sequencer's sample rows - same samples, "
-                      "same settings. Pads 4-16 are live pads, played by clicking.",
+                      "same settings; while the beat plays, hitting one also writes its step into the "
+                      "pattern. Pads 4-16 are live pads, played by clicking.",
                       juce::dontSendNotification);
         hint.setColour (juce::Label::textColourId, boombap::ui::muted());
         addAndMakeVisible (hint);
@@ -170,26 +171,32 @@ public:
             g.setColour (border().withAlpha (0.55f));
             g.drawRoundedRectangle (r, 12.0f, 1.0f);
         };
-        panel (8, 8, 456, 396);                       // pad grid + hint
-        panel (472, 8, getWidth() - 480, 352);        // editor
+        const auto lay = layout();
+        panel (8, 8, lay.gridRight + 8, getHeight() - 16);                    // pad grid + hint
+        panel (lay.editorX - 12, 8, getWidth() - lay.editorX + 4, getHeight() - 16); // editor
     }
 
     void resized() override
     {
+        // Item 30: the grid grows with the window (pads keep their
+        // proportions); the editor's sliders/faders take the rest of the
+        // width, so every control scales with the window too.
+        const auto lay = layout();
         for (int i = 0; i < 16; ++i)
-            pads[i].setBounds (16 + (i % 4) * 112, 16 + (i / 4) * 82, 104, 74);
-        hint.setBounds (16, 352, 440, 44);
+            pads[i].setBounds (16 + (i % 4) * (lay.padW + 8), 16 + (i / 4) * (lay.padH + 8),
+                               lay.padW, lay.padH);
+        hint.setBounds (16, 16 + 4 * (lay.padH + 8) + 6, juce::jmax (200, lay.gridRight - 16), 44);
 
-        const int ex = 484;
+        const int ex = lay.editorX;
         title.setBounds (ex, 16, 264, 24);
-        fileLabel.setBounds (ex, 42, 264, 20);
+        fileLabel.setBounds (ex, 42, juce::jmax (200, getWidth() - ex - 16), 20);
         loadButton.setBounds (ex, 66, 150, 26);
 
         Row* rowsArr[] = { &startRow, &endRow, &tuneRow, &gainRow, &velRow };
         for (int i = 0; i < 5; ++i)
         {
             rowsArr[i]->label.setBounds (ex, 108 + i * 36, 64, 24);
-            rowsArr[i]->slider.setBounds (ex + 66, 108 + i * 36, juce::jmax (120, getWidth() - ex - 84), 24);
+            rowsArr[i]->slider.setBounds (ex + 66, 108 + i * 36, juce::jmax (160, getWidth() - ex - 84), 24);
         }
         reverseToggle.setBounds (ex, 292, 130, 26);
         muteLabel.setBounds (ex, 326, 84, 24);
@@ -202,6 +209,24 @@ private:
         juce::Label label;
         juce::Slider slider;
     };
+
+    struct Layout
+    {
+        int padW = 104, padH = 74, gridRight = 456, editorX = 484;
+    };
+
+    Layout layout() const
+    {
+        Layout lay;
+        const int availW = juce::jmax (320, (getWidth() * 54) / 100 - 24);
+        const int availH = juce::jmax (240, getHeight() - 130);
+        const int cellW = (availW - 24) / 4, cellH = (availH - 24) / 4;
+        lay.padW = juce::jmin (cellW, (int) (cellH * 1.4f));
+        lay.padH = (int) (lay.padW / 1.4f);
+        lay.gridRight = 16 + 4 * lay.padW + 3 * 8;
+        lay.editorX = lay.gridRight + 28;
+        return lay;
+    }
 
     void setupRow (Row& row, const char* name, double lo, double hi, double step, double def)
     {

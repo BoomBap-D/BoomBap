@@ -104,10 +104,19 @@ private:
 };
 
 // Waveform display for one loaded sample (mono peaks, drawn per pixel column).
+// Fix pass item 33: the panel is clickable - a click loads a sample into the
+// row it is showing (the affordance the panel is supposed to carry; a
+// display-only panel is a dead end).
 class WaveformView : public juce::Component
 {
 public:
+    std::function<void()> onClick; // load a sample into the shown row
+
+    WaveformView() { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+
     void setData (std::vector<float> samples) { data = std::move (samples); repaint(); }
+
+    void mouseDown (const juce::MouseEvent&) override { if (onClick) onClick(); }
 
     void paint (juce::Graphics& g) override
     {
@@ -121,10 +130,15 @@ public:
         {
             g.setColour (boombap::ui::muted());
             g.setFont (13.0f);
-            g.drawText ("Load a sample into S1, S2 or S3 to see its waveform",
+            g.drawText ("Click to load a sample into this row",
                         getLocalBounds(), juce::Justification::centred);
             return;
         }
+
+        g.setColour (boombap::ui::muted().withAlpha (0.65f));
+        g.setFont (10.5f);
+        g.drawText ("click to load a different sample", 10, (int) b.getBottom() - 16, 220, 12,
+                    juce::Justification::left);
 
         const float mid = b.getCentreY();
         const float h = b.getHeight() * 0.44f;

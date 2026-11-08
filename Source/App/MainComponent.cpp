@@ -2,6 +2,7 @@
 #include "PadBank.h"
 #include "PianoRoll.h"
 #include "Playlist.h"
+#include "Multitrack.h"
 #include "AppSettings.h"
 
 using namespace juce;
@@ -109,6 +110,9 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     waveName.setColour (Label::textColourId, boombap::ui::muted());
     addAndMakeVisible (waveName);
     addAndMakeVisible (waveView);
+    // Fix pass item 33: clicking the waveform panel loads a sample into the
+    // row it is showing.
+    waveView.onClick = [this] { openSampleChooser (boombap::BoomBapEngine::Sample1 + waveTrack); };
     showWaveform (0);
 
     // ---- pad bank (own window, built on first open - a DocumentWindow shows itself when created, so it must not be built at launch) ----
@@ -143,6 +147,14 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     addAndMakeVisible (playlistButton);
     playlistButton.onClick = [this] { openPlaylist(); };
 
+    // ---- work-area view switch (Fix pass item 35) + the multitrack ----
+    addAndMakeVisible (viewButton);
+    viewButton.onClick = [this] { setAudioView (! audioView); };
+    multitrack = std::make_unique<MultitrackComponent> (engine, [] {});
+    multitrack->setLookAndFeel (&lookAndFeel);
+    multitrack->setVisible (false);
+    addAndMakeVisible (multitrack.get());
+
     addAndMakeVisible (dustRate.slider);
     addAndMakeVisible (glueThreshold.slider);
     setupSlider (dustRate, "Rate", 7500.0, 39375.0, 26000.0, 100.0, " Hz",
@@ -162,6 +174,15 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         {
             addAndMakeVisible (row.load);
             row.load.onClick = [this, t] { openSampleChooser (t); };
+        }
+
+        // Fix pass item 28: pitched rows summon the piano roll bound to
+        // themselves - the kick (the pitched melody sound) and the sample
+        // rows (their own pad, pitched).
+        if (t == boombap::BoomBapEngine::Kick || t >= boombap::BoomBapEngine::Sample1)
+        {
+            addAndMakeVisible (row.roll);
+            row.roll.onClick = [this, t] { openPianoRollFor (t); };
         }
 
         addAndMakeVisible (row.mute);
@@ -259,6 +280,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     exportBars.addItem ("2 bars", 2);
     exportBars.addItem ("4 bars", 4);
     exportBars.addItem ("8 bars", 8);
+    exportBars.addItem ("Whole song", 100); // Fix pass item 34
     exportBars.setSelectedId (4, dontSendNotification);
     normalizeToggle.setToggleState (true, dontSendNotification);
     exportButton.onClick = [this] { startExport(); };
@@ -286,6 +308,19 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     setupSlider (pianoBright,  "Bright",  0.0,   1.0,     0.6,    0.01, "",    [this] { engine.setPianoBright ((float) pianoBright.slider.getValue()); });
     setupSlider (pianoDecay,   "Decay",   400.0, 6000.0,  2200.0, 50.0, " ms", [this] { engine.setPianoDecay ((float) pianoDecay.slider.getValue()); });
     setupSlider (pianoLevel,   "Level",   0.0,   1.2,     0.85,   0.01, "",    [this] { engine.setPianoLevel ((float) pianoLevel.slider.getValue()); });
+
+    // ---- instrument switcher (Fix pass item 29) ----
+    addAndMakeVisible (synthTab);
+    addAndMakeVisible (pianoTab);
+    addAndMakeVisible (instrumentRollButton);
+    synthTab.onClick = [this] { selectInstrument (0); };
+    pianoTab.onClick = [this] { selectInstrument (1); };
+    instrumentRollButton.onClick = [this]
+    {
+        openPianoRollFor (shownInstrument == 0 ? PianoRollComponent::kBindSynth
+                                               : PianoRollComponent::kBindPiano);
+    };
+    selectInstrument (0);
 
     // keep the space bar for play/stop
     for (auto* c : getChildren())
@@ -352,6 +387,73 @@ void MainComponent::refreshGrid()
     for (int t = 0; t < kTracks; ++t)
         for (int s = 0; s < kSteps; ++s)
             rows[t].steps[s].setVelocity (engine.getStep (t, s));
+}
+
+// Fix pass item 29: one instrument at a time. The switcher shows the chosen
+// instrument's controls; if the piano roll is open it rebinds to that
+// instrument's lane, so controls and lane are never a hunt.
+void MainComponent::selectInstrument (int which)
+{
+    shownInstrument = which;
+    const bool synth = which == 0;
+
+    synthWaveBox.setVisible (synth);
+    for (auto* s : { &synthCutoff, &synthReso, &synthAttack, &synthRelease, &synthLevel })
+        s->slider.setVisible (synth);
+    for (auto* s : { &pianoBright, &pianoDecay, &pianoLevel })
+        s->slider.setVisible (! synth);
+
+    synthTab.setColour (TextButton::buttonColourId, synth ? boombap::ui::accent() : boombap::ui::panelAlt());
+    synthTab.setColour (TextButton::textColourOffId, synth ? Colour (0xff14100a) : boombap::ui::text());
+    pianoTab.setColour (TextButton::buttonColourId, ! synth ? boombap::ui::accent() : boombap::ui::panelAlt());
+    pianoTab.setColour (TextButton::textColourOffId, ! synth ? Colour (0xff14100a) : boombap::ui::text());
+
+    if (pianoRoll != nullptr && pianoWindow != nullptr && pianoWindow->isVisible())
+        openPianoRollFor (synth ? PianoRollComponent::kBindSynth : PianoRollComponent::kBindPiano);
+    repaint();
+}
+
+// Fix pass item 35: one button swaps the top work area between the step
+// sequencer and the audio multitrack (D's Reaper grammar).
+void MainComponent::setAudioView (bool audio)
+{
+    audioView = audio;
+    viewButton.setButtonText (audio ? "STEPS" : "AUDIO");
+
+    for (int t = 0; t < kTracks; ++t)
+    {
+        Row& row = rows[t];
+        row.name.setVisible (! audio);
+        row.load.setVisible (! audio && t >= boombap::BoomBapEngine::Sample1);
+        row.roll.setVisible (! audio && (t == boombap::BoomBapEngine::Kick
+                                         || t >= boombap::BoomBapEngine::Sample1));
+        row.mute.setVisible (! audio);
+        row.solo.setVisible (! audio);
+        row.level.setVisible (! audio);
+        row.meter.setVisible (! audio);
+        for (int s = 0; s < kSteps; ++s)
+            row.steps[s].setVisible (! audio);
+    }
+    patternLabel.setVisible (! audio);
+    for (auto& b : patternButtons)
+        b.setVisible (! audio);
+
+    if (multitrack != nullptr)
+    {
+        multitrack->setVisible (audio);
+        if (audio)
+            multitrack->refreshFromEngine();
+    }
+    resized();
+    repaint();
+}
+
+// Fix pass item 32: when a take finishes, it lands on the audio track as a
+// clip - visible, homed, editable in the multitrack view.
+void MainComponent::placeTakeAsClip()
+{
+    if (engine.placeTakeAsClip() >= 0 && multitrack != nullptr)
+        multitrack->refreshFromEngine();
 }
 
 void MainComponent::togglePlay()
@@ -423,6 +525,15 @@ void MainComponent::timerCallback()
     if (padBank != nullptr && padPeak > 0.02f)
         padBank->showActivity (engine.lastTriggeredPad());
 
+    // pad capture (Fix pass item 31): a captured hit flashes its pad and the
+    // new step shows in the grid straight away
+    const int captured = engine.consumeCapturedPad();
+    if (captured >= 0)
+    {
+        if (padBank != nullptr) padBank->showActivity (captured);
+        refreshGrid();
+    }
+
     // autosave (Pass 1 item 7): every ~60 s while there are unsaved changes
     if (ownAudioDevice && ++autosaveTicks >= 30 * 60)
     {
@@ -432,7 +543,7 @@ void MainComponent::timerCallback()
     }
 
     const bool recNow = engine.isRecording();
-    if (uiRecording && ! recNow) { engine.finishTake(); takeDirty = true; }
+    if (uiRecording && ! recNow) { engine.finishTake(); takeDirty = true; placeTakeAsClip(); }
     if (recNow != uiRecording || recNow) refreshTakeUi();
     uiRecording = recNow;
 
@@ -644,19 +755,21 @@ void MainComponent::paint (Graphics& g)
     g.drawText ("DRUM SOUND", RB (20, 722, 300, 20), Justification::left);
     g.drawText ("INSTRUMENTS", RB (448, 722, 190, 20), Justification::left);
     g.drawText ("EXPORT", RB (1216, 722, 300, 20), Justification::left);
-    g.drawText ("SYNTH", RB (448, 752, 56, 20), Justification::left);
-    g.drawText ("PIANO", RB (448, 816, 56, 20), Justification::left);
+    g.drawText (shownInstrument == 0 ? "SYNTH" : "PIANO", RB (448, 752, 100, 24), Justification::left);
 
     g.setColour (muted());
     g.setFont (11.0f);
-    g.drawText ("Synth and piano play from the Piano Roll's Sound menu. Synth root C3, piano root C4.",
-                RB (640, 722, 545, 20), Justification::left);
-    g.drawText ("Click a step: normal, accent, off.  Right-click clears.  Space = play/stop.  Ctrl/Cmd+S = save.",
-                RB (440, 182, 1105, 24), Justification::left);
+    g.drawText ("One instrument at a time - its roll opens from the button above, or from a track's ROLL button.",
+                RB (448, 856, 736, 20), Justification::left);
+    if (! audioView)
+    {
+        g.drawText ("Click a step: normal, accent, off.  Right-click clears.  Space = play/stop.  Ctrl/Cmd+S = save.",
+                    RB (440, 182, 1105, 24), Justification::left);
 
-    g.setFont (12.0f);
-    for (int s = 0; s < kSteps; s += 4)
-        g.drawText (String (s / 4 + 1), RB (398 + s * 66 + (s / 4) * 8, 212, 40, 14), Justification::centredLeft);
+        g.setFont (12.0f);
+        for (int s = 0; s < kSteps; s += 4)
+            g.drawText (String (s / 4 + 1), RB (398 + s * 66 + (s / 4) * 8, 212, 40, 14), Justification::centredLeft);
+    }
 }
 
 void MainComponent::resized()
@@ -701,6 +814,7 @@ void MainComponent::resized()
     glueThreshold.slider.setBounds (RB (1010, 114, 200, 38));
     glueBar.setBounds (RB (1240, 118, 200, 12));
     glueMeter.setBounds (RB (1240, 132, 200, 18));
+    viewButton.setBounds (RB (1456, 114, 88, 38));
 
     // pattern selector strip (in the grid panel header)
     patternLabel.setBounds (RB (20, 182, 70, 24));
@@ -712,15 +826,20 @@ void MainComponent::resized()
     {
         Row& row = rows[t];
         const int y = 232 + t * 40;
-        row.name.setBounds (RB (20, y, 100, 36));
-        row.load.setBounds (RB (124, y + 5, 58, 26));
-        row.mute.setBounds (RB (186, y + 5, 32, 26));
-        row.solo.setBounds (RB (222, y + 5, 32, 26));
-        row.level.setBounds (RB (262, y, 120, 36));
+        row.name.setBounds (RB (20, y, 92, 36));
+        row.load.setBounds (RB (116, y + 5, 54, 26));
+        row.roll.setBounds (RB (174, y + 5, 46, 26));
+        row.mute.setBounds (RB (224, y + 5, 28, 26));
+        row.solo.setBounds (RB (256, y + 5, 28, 26));
+        row.level.setBounds (RB (292, y, 94, 36));
         for (int s = 0; s < kSteps; ++s)
             row.steps[s].setBounds (RB (398 + s * 66 + (s / 4) * 8, y, 60, 36));
         row.meter.setBounds (RB (1480, y + 14, 60, 8));
     }
+
+    // multitrack (audio view) fills the grid panel
+    if (multitrack != nullptr)
+        multitrack->setBounds (RB (16, 180, 1528, 368));
 
     // waveform panel
     for (int i = 0; i < 3; ++i)
@@ -743,16 +862,20 @@ void MainComponent::resized()
     for (int i = 0; i < 5; ++i)
         drum[i]->slider.setBounds (RB (128, 750 + i * 27, 280, 25));
 
-    // instruments panel
-    synthWaveBox.setBounds (RB (504, 750, 124, 24));
-    synthCutoff.slider.setBounds (RB (692, 750, 200, 24));
-    synthReso.slider.setBounds (RB (956, 750, 220, 24));
-    synthAttack.slider.setBounds (RB (692, 782, 200, 24));
-    synthRelease.slider.setBounds (RB (956, 782, 220, 24));
-    synthLevel.slider.setBounds (RB (692, 814, 200, 24));
-    pianoBright.slider.setBounds (RB (956, 814, 220, 24));
-    pianoDecay.slider.setBounds (RB (692, 846, 200, 24));
-    pianoLevel.slider.setBounds (RB (956, 846, 220, 24));
+    // instruments panel: the switcher on top, then the chosen instrument's
+    // controls in the one shared block (item 29)
+    synthTab.setBounds (RB (570, 718, 84, 24));
+    pianoTab.setBounds (RB (660, 718, 84, 24));
+    instrumentRollButton.setBounds (RB (1056, 718, 128, 24));
+    synthWaveBox.setBounds (RB (560, 750, 130, 24));
+    synthCutoff.slider.setBounds (RB (758, 750, 190, 24));
+    synthReso.slider.setBounds (RB (1012, 750, 170, 24));
+    synthAttack.slider.setBounds (RB (758, 782, 190, 24));
+    synthRelease.slider.setBounds (RB (1012, 782, 170, 24));
+    synthLevel.slider.setBounds (RB (758, 814, 190, 24));
+    pianoBright.slider.setBounds (RB (758, 750, 190, 24));
+    pianoDecay.slider.setBounds (RB (1012, 750, 170, 24));
+    pianoLevel.slider.setBounds (RB (758, 782, 190, 24));
 
     // export panel
     exportBars.setBounds (RB (1216, 750, 96, 26));

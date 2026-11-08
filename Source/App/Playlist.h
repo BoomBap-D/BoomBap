@@ -7,6 +7,8 @@
 // mode is on. Sounds are global - the chain only chooses which pattern plays.
 // Click a slot to cycle its pattern, click the + slot to append the pattern
 // being edited in the main window, right-click a slot to remove it.
+// Fix pass item 30: the slots SCALE with the window - letters and click
+// targets grow, so the chain stays legible at any size.
 class PlaylistComponent : public juce::Component, private juce::Timer
 {
 public:
@@ -49,6 +51,7 @@ public:
         const int len = engine.getSongLength();
         const int playPos = (engine.isSongMode() && engine.isPlaying()) ? engine.getPlaySongPos() : -1;
 
+        const float letterSize = juce::jlimit (13.0f, 34.0f, slotRect (0).getHeight() * 0.52f);
         for (int i = 0; i < kSlots; ++i)
         {
             const auto r = slotRect (i);
@@ -57,7 +60,7 @@ public:
                 g.setColour (i == playPos ? accent() : panelAlt());
                 g.fillRoundedRectangle (r, 5.0f);
                 g.setColour (i == playPos ? juce::Colour (0xff14100a) : text());
-                g.setFont (juce::Font (15.0f, juce::Font::bold));
+                g.setFont (juce::Font (letterSize, juce::Font::bold));
                 g.drawText (juce::String::charToString ((juce::juce_wchar) ('A' + engine.getSongSlot (i))),
                             r, juce::Justification::centred);
             }
@@ -66,7 +69,7 @@ public:
                 g.setColour (border());
                 g.drawRoundedRectangle (r, 5.0f, 1.2f);
                 g.setColour (muted());
-                g.setFont (juce::Font (15.0f));
+                g.setFont (juce::Font (letterSize));
                 g.drawText ("+", r, juce::Justification::centred);
             }
             else
@@ -81,8 +84,8 @@ public:
     {
         modeToggle.setBounds (16, 12, 120, 26);
         clearButton.setBounds (148, 12, 110, 26);
-        status.setBounds (270, 12, 374, 26);
-        hint.setBounds (16, 152, getWidth() - 32, 34);
+        status.setBounds (270, 12, juce::jmax (120, getWidth() - 286), 26);
+        hint.setBounds (16, getHeight() - 42, getWidth() - 32, 34);
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -115,10 +118,18 @@ public:
 private:
     static constexpr int kSlots = boombap::BoomBapEngine::kSongSlots;
 
+    // Slots tile the area between the header and the hint, scaling with the
+    // window (item 30): 16 columns x 2 rows of equal cells with a small gap.
     juce::Rectangle<float> slotRect (int i) const
     {
         const int col = i % 16, row = i / 16;
-        return { (float) (16 + col * 38), (float) (52 + row * 44), 34.0f, 34.0f };
+        const float areaX = 16.0f, areaY = 50.0f;
+        const float areaW = (float) juce::jmax (160, getWidth() - 32);
+        const float areaH = (float) juce::jmax (72, getHeight() - 50 - 52);
+        const float gap = 6.0f;
+        const float w = (areaW - 15.0f * gap) / 16.0f;
+        const float h = (areaH - gap) / 2.0f;
+        return { areaX + col * (w + gap), areaY + row * (h + gap), w, h };
     }
 
     int slotAt (int x, int y) const
@@ -170,7 +181,7 @@ public:
     {
         setUsingNativeTitleBar (true);
         setResizable (true, true);
-        setResizeLimits (660, 300, 10000, 10000);
+        setResizeLimits (520, 240, 10000, 10000);
     }
 
     void closeButtonPressed() override { setVisible (false); }

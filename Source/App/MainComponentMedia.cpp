@@ -2,6 +2,7 @@
 #include "PadBank.h"
 #include "PianoRoll.h"
 #include "Playlist.h"
+#include "Multitrack.h"
 #include "WavWrite.h"
 
 using namespace juce;
@@ -134,6 +135,14 @@ void MainComponent::openPadBank()
 
 void MainComponent::openPianoRoll()
 {
+    openPianoRollFor (rollTrack);
+}
+
+// Fix pass item 28: the roll is summoned FROM a track and bound to it - the
+// window title, the lane and the sound all belong to that track.
+void MainComponent::openPianoRollFor (int track)
+{
+    rollTrack = track;
     if (pianoWindow == nullptr)
     {
         pianoRoll = std::make_unique<PianoRollComponent> (engine);
@@ -141,9 +150,10 @@ void MainComponent::openPianoRoll()
         pianoWindow = std::make_unique<PianoRollWindow> ("BoomBap Piano Roll", boombap::ui::bg());
         pianoWindow->setLookAndFeel (&lookAndFeel);
         pianoWindow->setContentNonOwned (pianoRoll.get(), false); // the unique_ptr owns it - the window must not delete it too
-        pianoWindow->centreWithSize (760, 600);
+        pianoWindow->centreWithSize (900, 620);
     }
-    pianoRoll->refreshFromEngine();
+    pianoRoll->bindToTrack (track);
+    pianoWindow->setName (pianoRoll->bindingTitle());
     pianoWindow->setVisible (true);
     pianoWindow->toFront (true);
 }
@@ -182,6 +192,7 @@ void MainComponent::toggleRecording()
     {
         engine.stopRecording();
         takeDirty = true;
+        placeTakeAsClip();
     }
     else
     {

@@ -34,6 +34,8 @@ public:
     static constexpr int kPatterns  = ProjectSettings::kPatterns;
     static constexpr int kSongSlots = ProjectSettings::kSongSlots;
     static constexpr int kMaxTakeSeconds = 120;
+    static constexpr int kAudioTracks   = ProjectSettings::kAudioTracks;
+    static constexpr int kMaxAudioClips = ProjectSettings::kMaxAudioClips;
     enum Track { Kick, Snare, ClosedHat, OpenHat, Clap, Sample1, Sample2, Sample3 };
 
     static const char* trackName (int t)
@@ -56,6 +58,9 @@ public:
         for (auto& n : patSynth) n.store (0);
         for (auto& n : patPiano) n.store (0);
         for (auto& n : songChainA) n.store (0);
+        for (auto& g : audioGainA) g.store (0.9f);
+        for (auto& m : audioMuteA) m.store (false);
+        for (auto& s : audioSoloA) s.store (false);
         loadDefaultPattern();
     }
 
@@ -68,6 +73,7 @@ public:
         dust.prepare (sr);
         bus.prepare (sr);
         vocal.prepare (sr);
+        takeVocal.prepare (sr);
         synth.prepare (sr);
         piano.prepare (sr);
         applyParams();
@@ -109,14 +115,35 @@ public:
         openHatDecay.store (o.openHatDecay.load()); clapTail.store (o.clapTail.load());
         dustOn.store (o.dustOn.load());     dustRate.store (o.dustRate.load());
         glueOn.store (o.glueOn.load());     glueThreshold.store (o.glueThreshold.load());
+        // Fix pass: the export clone must sound like the session - the vocal
+        // settings (item 36: they treat the take at playback), pad capture,
+        // the audio track's mixer state and its clips all ride along.
+        vocalMic.store (o.vocalMic.load()); vocalDistance.store (o.vocalDistance.load());
+        vocalInputDb.store (o.vocalInputDb.load());
+        padCaptureOn.store (o.padCaptureOn.load());
+        for (int i = 0; i < kAudioTracks; ++i)
+        {
+            audioGainA[(size_t) i].store (o.audioGainA[(size_t) i].load());
+            audioMuteA[(size_t) i].store (o.audioMuteA[(size_t) i].load());
+            audioSoloA[(size_t) i].store (o.audioSoloA[(size_t) i].load());
+        }
+        for (int i = 0; i < kMaxAudioClips; ++i)
+        {
+            clipsA[(size_t) i].active.store (o.clipsA[(size_t) i].active.load());
+            clipsA[(size_t) i].start.store (o.clipsA[(size_t) i].start.load());
+            clipsA[(size_t) i].srcStart.store (o.clipsA[(size_t) i].srcStart.load());
+            clipsA[(size_t) i].length.store (o.clipsA[(size_t) i].length.load());
+        }
         {
             std::lock_guard<std::mutex> lock (o.sampleMutex);
             pads = o.pads;
             takeData = o.takeData;
+            clipData = o.clipData;
             takeLenAtomic.store (o.takeLenAtomic.load());
             takeStartPosA.store (o.takeStartPosA.load());
             takeOn.store (o.takeOn.load());
         }
+        clipRevision.fetch_add (1);
         pads.stopAll();
         synth.stopAll();
         piano.stopAll();
@@ -168,6 +195,20 @@ public:
                 p.padVelSens[i] = pp.velSens;    p.padReverse[i] = pp.reverse;
                 p.padMuteGroup[i] = pp.muteGroup;
             }
+        }
+        for (int i = 0; i < kMaxAudioClips; ++i)
+        {
+            const auto& c = clipsA[(size_t) i];
+            p.audioClips[i].active = c.active.load();
+            p.audioClips[i].startSamples = c.start.load();
+            p.audioClips[i].sourceStart = c.srcStart.load();
+            p.audioClips[i].lengthSamples = c.length.load();
+        }
+        for (int i = 0; i < kAudioTracks; ++i)
+        {
+            p.audioGain[i] = audioGainA[(size_t) i].load();
+            p.audioMute[i] = audioMuteA[(size_t) i].load();
+            p.audioSolo[i] = audioSoloA[(size_t) i].load();
         }
         return p;
     }
@@ -221,7 +262,38 @@ public:
                 pads.setPadParams (i, pp);
             }
         }
+        for (int i = 0; i < kMaxAudioClips; ++i)
+        {
+            clipsA[(size_t) i].active.store (p.audioClips[i].active);
+            clipsA[(size_t) i].start.store (p.audioClips[i].startSamples);
+            clipsA[(size_t) i].srcStart.store (p.audioClips[i].sourceStart);
+            clipsA[(size_t) i].length.store (p.audioClips[i].lengthSamples);
+        }
+        for (int i = 0; i < kAudioTracks; ++i)
+        {
+            audioGainA[(size_t) i].store (p.audioGain[i]);
+            audioMuteA[(size_t) i].store (p.audioMute[i]);
+            audioSoloA[(size_t) i].store (p.audioSolo[i]);
+        }
+        {
+            // clip buffers never travel in settings - clear them so a stale
+            // buffer can never sit under a freshly applied region
+            std::lock_guard<std::mutex> lock (sampleMutex);
+            for (auto& d : clipData) d.clear();
+        }
+        clipRevision.fetch_add (1);
         dirty.store (true);
+    }
+
+    // After a project load: every clip on the audio track was cut from the
+    // take, so each active clip's buffer is the take's audio.
+    void restoreClipBuffersFromTake()
+    {
+        std::lock_guard<std::mutex> lock (sampleMutex);
+        for (int i = 0; i < kMaxAudioClips; ++i)
+            if (clipsA[(size_t) i].active.load())
+                clipData[(size_t) i] = takeData;
+        clipRevision.fetch_add (1);
     }
 
     void clearSample (int track)
@@ -351,7 +423,9 @@ public:
     void setVocalInputDb (float db)   { vocalInputDb.store (db);    dirty.store (true); }
 
     // ---------------- vocal take ----------------
-    // Recording captures the vocal chain's output (the processed signal you monitor).
+    // Recording captures the CLEAN input (input-gain staging only) - the mic
+    // emulation you monitor through is never burned in (item 36); it is
+    // applied to the take at playback, and can be switched at any time.
     // Pressing record while the beat plays starts the take on the next downbeat; the
     // finished take is padded to whole bars and loops against the pattern. The live
     // mic is never part of an export, but a recorded take is.
@@ -470,6 +544,156 @@ public:
         return pads.hasSample (pad);
     }
 
+    // ---------------- pad capture (Fix pass item 31) ----------------
+    // While the transport plays, a live hit on pads 1-3 (the sequencer's
+    // sample rows) also writes that row's step at the playhead, with the
+    // hit's velocity - the pad bank performs INTO the pattern. Pads 4-16
+    // have no row and stay live-only.
+    void setPadCaptureEnabled (bool on) { padCaptureOn.store (on); }
+    bool isPadCaptureEnabled() const    { return padCaptureOn.load(); }
+
+    // UI feedback: the pad index of the most recent captured hit, or -1 once
+    // consumed. Lets the pad bank flash and the grid refresh on a capture.
+    int consumeCapturedPad() { return capturedPad.exchange (-1); }
+
+    // ---------------- audio track + clips (Fix pass items 32/35) ----------------
+    // The recorded take becomes a clip on the audio track: visible waveform,
+    // a home on the timeline, trim/cut/move editing. The clip's region is
+    // plain data; the recorded audio (the take buffer) is shared, never cut.
+    int placeTakeAsClip()
+    {
+        std::lock_guard<std::mutex> lock (sampleMutex);
+        if (takeData.empty()) return -1;
+        for (int i = 0; i < kMaxAudioClips; ++i)
+            if (! clipsA[(size_t) i].active.load())
+            {
+                clipData[(size_t) i] = takeData;
+                clipsA[(size_t) i].start.store (takeStartPosA.load());
+                clipsA[(size_t) i].srcStart.store (0);
+                clipsA[(size_t) i].length.store ((long long) takeData.size());
+                clipsA[(size_t) i].active.store (true);
+                clipRevision.fetch_add (1);
+                // the clip is the take's home now - the raw take loop stands
+                // down so the same audio never sounds twice
+                takeOn.store (false);
+                return i;
+            }
+        return -1;
+    }
+
+    int audioClipCount() const
+    {
+        int n = 0;
+        for (const auto& c : clipsA) if (c.active.load()) ++n;
+        return n;
+    }
+
+    AudioClip getAudioClip (int slot) const
+    {
+        AudioClip c;
+        if (slot < 0 || slot >= kMaxAudioClips) return c;
+        const auto& s = clipsA[(size_t) slot];
+        c.active = s.active.load();
+        c.startSamples = s.start.load();
+        c.sourceStart = s.srcStart.load();
+        c.lengthSamples = s.length.load();
+        return c;
+    }
+
+    std::vector<float> getAudioClipData (int slot) const
+    {
+        std::lock_guard<std::mutex> lock (sampleMutex);
+        if (slot < 0 || slot >= kMaxAudioClips) return {};
+        return clipData[(size_t) slot];
+    }
+
+    long long getAudioClipDataLength (int slot) const
+    {
+        std::lock_guard<std::mutex> lock (sampleMutex);
+        if (slot < 0 || slot >= kMaxAudioClips) return 0;
+        return (long long) clipData[(size_t) slot].size();
+    }
+
+    void clearAudioClip (int slot)
+    {
+        if (slot < 0 || slot >= kMaxAudioClips) return;
+        {
+            std::lock_guard<std::mutex> lock (sampleMutex);
+            clipData[(size_t) slot].clear();
+        }
+        clipsA[(size_t) slot].active.store (false);
+        clipsA[(size_t) slot].length.store (0);
+        clipRevision.fetch_add (1);
+    }
+
+    void clearAllAudioClips()
+    {
+        for (int i = 0; i < kMaxAudioClips; ++i) clearAudioClip (i);
+    }
+
+    void moveAudioClip (int slot, long long newStartSamples)
+    {
+        if (slot < 0 || slot >= kMaxAudioClips || ! clipsA[(size_t) slot].active.load()) return;
+        clipsA[(size_t) slot].start.store (std::max (0LL, newStartSamples));
+        clipRevision.fetch_add (1);
+    }
+
+    // Trim: move any edge. newLength is clamped so the region never leaves
+    // the recorded audio and never shrinks below a sliver.
+    void trimAudioClip (int slot, long long newStart, long long newSourceStart, long long newLength)
+    {
+        if (slot < 0 || slot >= kMaxAudioClips || ! clipsA[(size_t) slot].active.load()) return;
+        const long long dataLen = getAudioClipDataLength (slot);
+        newSourceStart = std::clamp (newSourceStart, 0LL, std::max (0LL, dataLen - 512));
+        newLength = std::clamp (newLength, 512LL, std::max (512LL, dataLen - newSourceStart));
+        clipsA[(size_t) slot].start.store (std::max (0LL, newStart));
+        clipsA[(size_t) slot].srcStart.store (newSourceStart);
+        clipsA[(size_t) slot].length.store (newLength);
+        clipRevision.fetch_add (1);
+    }
+
+    // Cut: split the clip at a timeline position; the right half lands in a
+    // free slot, pointing further into the same recorded audio.
+    bool splitAudioClip (int slot, long long atTimelineSamples)
+    {
+        if (slot < 0 || slot >= kMaxAudioClips) return false;
+        const AudioClip c = getAudioClip (slot);
+        if (! c.active) return false;
+        const long long rel = atTimelineSamples - c.startSamples;
+        if (rel < 512 || rel > c.lengthSamples - 512) return false;
+        int freeSlot = -1;
+        for (int i = 0; i < kMaxAudioClips; ++i)
+            if (! clipsA[(size_t) i].active.load()) { freeSlot = i; break; }
+        if (freeSlot < 0) return false;
+        {
+            std::lock_guard<std::mutex> lock (sampleMutex);
+            clipData[(size_t) freeSlot] = clipData[(size_t) slot];
+        }
+        clipsA[(size_t) freeSlot].start.store (atTimelineSamples);
+        clipsA[(size_t) freeSlot].srcStart.store (c.sourceStart + rel);
+        clipsA[(size_t) freeSlot].length.store (c.lengthSamples - rel);
+        clipsA[(size_t) freeSlot].active.store (true);
+        clipsA[(size_t) slot].length.store (rel);
+        clipRevision.fetch_add (1);
+        return true;
+    }
+
+    int clipRevisionCount() const { return clipRevision.load(); }
+
+    // The audio track's own mixer channel (item 35: mixer order = track
+    // order, so this channel follows the 8 instrument rows).
+    void  setAudioTrackGain (int t, float g) { if (t >= 0 && t < kAudioTracks) audioGainA[(size_t) t].store (std::clamp (g, 0.0f, 1.2f)); }
+    float getAudioTrackGain (int t) const    { return t >= 0 && t < kAudioTracks ? audioGainA[(size_t) t].load() : 0.0f; }
+    void  setAudioTrackMute (int t, bool m)  { if (t >= 0 && t < kAudioTracks) audioMuteA[(size_t) t].store (m); }
+    bool  getAudioTrackMute (int t) const    { return t >= 0 && t < kAudioTracks && audioMuteA[(size_t) t].load(); }
+    void  setAudioTrackSolo (int t, bool s)  { if (t >= 0 && t < kAudioTracks) audioSoloA[(size_t) t].store (s); }
+    bool  getAudioTrackSolo (int t) const    { return t >= 0 && t < kAudioTracks && audioSoloA[(size_t) t].load(); }
+
+    // Timeline helpers for the multitrack view.
+    long long transportPosition() const { return transportPosAtomic.load(); }
+    double barSamples() const          { return sr * 240.0 / (double) bpm.load(); }
+    int    songBars() const            { return songLength.load(); }  // 0 = pattern mode
+
     // ---------------- audio thread ----------------
     // vocalIn may be nullptr (no input). outL/outR are overwritten.
     void process (const float* vocalIn, float* outL, float* outR, int numSamples)
@@ -485,6 +709,15 @@ public:
             {
                 const int v = padHit[p].exchange (0);
                 if (v > 0) pads.trigger (p, v / 127.0f);
+                // Fix pass item 31: a hit on a sequencer pad (1-3) while the
+                // transport plays is captured into the pattern at the
+                // playhead step, with the hit's velocity.
+                const int capStep = playStep.load();
+                if (v > 0 && p < 3 && playing.load() && padCaptureOn.load() && capStep >= 0)
+                {
+                    patGrid[(size_t) gIdx (activePattern, Sample1 + p, capStep)].store ((uint8_t) v);
+                    capturedPad.store (p);
+                }
             }
 
         const bool isPlayingNow = playing.load();
@@ -514,6 +747,20 @@ public:
                                                                                       : trackGain[t].load();
         const float clickLvl = metronomeLevel.load();
         if (! isPlayingNow) clickSamplesLeft = 0;
+
+        // Audio track (Fix pass item 35): silent when muted, or when an
+        // instrument solo is active and the audio track is not itself soloed.
+        // Clips live on the song timeline, which loops with the song (or with
+        // the single pattern in pattern mode).
+        const float audioGainNow = (audioMuteA[0].load() || (soloActive && ! audioSoloA[0].load()))
+                                       ? 0.0f : audioGainA[0].load();
+        const bool useClips = samplesOk && audioGainNow > 0.0f && audioClipCount() > 0;
+        const double barSamplesNow = sr * 240.0 / (double) bpm.load();
+        const long long loopSamples = (long long) std::llround (
+            (songMode.load() && songLength.load() > 0 ? (double) songLength.load() : 1.0) * barSamplesNow);
+        // Item 36: the take records the CLEAN input - input-gain staging only.
+        // The mic emulation is a playback treatment (see takeVocal below).
+        const float inGainLin = std::pow (10.0f, vocalInputDb.load() / 20.0f);
 
         float pk[kTracks] = {};
         float padPk = 0.0f;
@@ -593,14 +840,47 @@ public:
 
             if (cap && samplesOk && recLen < (int) recData.size())
             {
-                recData[(size_t) recLen++] = vocalSample;
+                // Item 36: store the clean input (gain staging only) - never
+                // the monitored, mic-emulated signal.
+                recData[(size_t) recLen++] = vocalIn != nullptr ? vocalIn[i] * inGainLin : 0.0f;
                 if (recLen >= (int) recData.size()) recording.store (false); // length cap
             }
 
-            if (samplesOk && takeOn.load() && takeLenAtomic.load() > 0 && isPlayingNow)
+            // The vocal bus (items 32/36): the stored take and the clips
+            // cut from it are the same CLEAN recording, so they sum here and
+            // run through the one playback chain - the mic-locker treatment
+            // is applied at playback, switchable any time, never burned in.
             {
-                const long long rel = transportSamples - takeStartPosA.load();
-                if (rel >= 0) mix += takeData[(size_t) (rel % takeLenAtomic.load())];
+                float vocalBus = 0.0f;
+                bool vocalPresent = false;
+                if (samplesOk && takeOn.load() && takeLenAtomic.load() > 0 && isPlayingNow)
+                {
+                    const long long rel = transportSamples - takeStartPosA.load();
+                    if (rel >= 0)
+                    {
+                        vocalBus += takeData[(size_t) (rel % takeLenAtomic.load())];
+                        vocalPresent = true;
+                    }
+                }
+                if (useClips && isPlayingNow && loopSamples > 0)
+                {
+                    const long long songPos = transportSamples % loopSamples;
+                    for (int ci = 0; ci < kMaxAudioClips; ++ci)
+                    {
+                        const auto& c = clipsA[(size_t) ci];
+                        if (! c.active.load()) continue;
+                        const long long pos = songPos - c.start.load();
+                        if (pos < 0 || pos >= c.length.load()) continue;
+                        const auto& data = clipData[(size_t) ci];
+                        const long long src = c.srcStart.load() + pos;
+                        if (src >= 0 && src < (long long) data.size())
+                        {
+                            vocalBus += data[(size_t) src] * audioGainNow;
+                            vocalPresent = true;
+                        }
+                    }
+                }
+                if (vocalPresent) mix += takeVocal.process (vocalBus);
             }
 
             if (isPlayingNow) ++transportSamples;
@@ -633,6 +913,7 @@ public:
 
         if (cap) recPublished.store (recLen);
 
+        transportPosAtomic.store (transportSamples);
         glueGr.store (useGlue ? bus.getGainReductionDb() : 0.0f);
     }
 
@@ -686,7 +967,8 @@ private:
             case ClosedHat: hat.triggerClosed (vel); hatTrack = ClosedHat; break; // chokes an open hat
             case OpenHat:   hat.triggerOpen (vel);   hatTrack = OpenHat;   break;
             case Clap:      clap.trigger (vel); break;
-            default:        if (samplesOk) pads.trigger (track - Sample1, vel); break;
+            default:        if (samplesOk) { pads.trigger (track - Sample1, vel); lastPadIndex.store (track - Sample1); }
+                            break;
         }
     }
 
@@ -731,6 +1013,7 @@ private:
         vp.mic.distanceCm = vocalDistance.load();
         vp.inputDb = vocalInputDb.load();
         vocal.setParams (vp);
+        takeVocal.setParams (vp); // item 36: the take's playback treatment tracks the same settings
     }
 
     double sr = 44100.0;
@@ -743,6 +1026,7 @@ private:
     S950Crusher dust;
     BusCompressor bus;
     VocalChain vocal;
+    VocalChain takeVocal; // item 36: treats the clean recorded take at playback
 
     // pattern + mixer state (shared with the UI thread)
     std::array<std::atomic<uint8_t>, kPatterns * kTracks * kSteps> patGrid;
@@ -770,6 +1054,24 @@ private:
     std::array<std::atomic<int>, kPatterns> patMelodySource;
     std::array<std::atomic<int>, kPatterns * kSteps> patSynth, patPiano;
     std::array<std::atomic<int>, kSongSlots> songChainA;
+
+    // pad capture (item 31)
+    std::atomic<bool> padCaptureOn { true };
+    std::atomic<int> capturedPad { -1 };
+
+    // audio track + clips (items 32/35): regions are atomics; the audio
+    // buffers sit beside takeData under sampleMutex.
+    struct ClipState
+    {
+        std::atomic<bool> active { false };
+        std::atomic<long long> start { 0 }, srcStart { 0 }, length { 0 };
+    };
+    std::array<ClipState, kMaxAudioClips> clipsA;
+    std::array<std::vector<float>, kMaxAudioClips> clipData;
+    std::array<std::atomic<float>, kAudioTracks> audioGainA;
+    std::array<std::atomic<bool>, kAudioTracks> audioMuteA, audioSoloA;
+    std::atomic<int> clipRevision { 0 };
+    std::atomic<long long> transportPosAtomic { 0 };
 
     // vocal take: capture buffer + finished take (swapped only under sampleMutex)
     std::vector<float> takeData, recData;

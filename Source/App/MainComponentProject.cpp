@@ -2,6 +2,7 @@
 #include "PadBank.h"
 #include "PianoRoll.h"
 #include "Playlist.h"
+#include "Multitrack.h"
 #include "WavWrite.h"
 
 using namespace juce;
@@ -81,6 +82,7 @@ void MainComponent::applyProjectToUi (const boombap::ProjectData& d)
     normalizeToggle.setToggleState (d.exportNormalize, dontSendNotification);
     if (pianoRoll != nullptr) pianoRoll->refreshFromEngine();
     if (playlist != nullptr) playlist->refreshFromEngine();
+    if (multitrack != nullptr) multitrack->refreshFromEngine();
     refreshPatternUi();
     refreshGrid();
 }
@@ -103,6 +105,8 @@ void MainComponent::newProject()
     }
     if (padBank != nullptr) padBank->refreshAll();
     engine.clearVocalTake();
+    engine.clearAllAudioClips();
+    if (multitrack != nullptr) multitrack->refreshFromEngine();
     takePath.clear();
     takeDirty = false;
     refreshTakeUi();
@@ -258,6 +262,7 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
     refreshTakeUi();
     }
 
+    engine.restoreClipBuffersFromTake(); // clip regions came from the file; their audio is the take
     applyProjectToUi (d);
     loadingProject = false;
 
@@ -375,14 +380,19 @@ void MainComponent::startExport()
 void MainComponent::exportTo (const File& file)
 {
     // In song mode the export is one full pass through the playlist.
+    // Fix pass item 34: choosing "Whole song" does the same pass even when
+    // song mode is off (and renders one bar of pattern if the playlist is
+    // still empty).
+    const bool wantWholeSong = exportBars.getSelectedId() == 100 && engine.getSongLength() > 0;
     const bool songExport = engine.isSongMode() && engine.getSongLength() > 0;
-    const int bars = songExport ? engine.getSongLength() : exportBars.getSelectedId();
+    const int bars = (songExport || wantWholeSong) ? engine.getSongLength() : exportBars.getSelectedId();
     const bool normalize = normalizeToggle.getToggleState();
     const double sampleRate = engine.getSampleRate();
 
     // clone the current pattern, mixer, sound settings and samples; the live engine is untouched
     auto offline = std::make_shared<boombap::BoomBapEngine>();
     offline->copySettingsFrom (engine);
+    if (wantWholeSong) offline->setSongMode (true);
 
     exporting = true;
     exportButton.setEnabled (false);

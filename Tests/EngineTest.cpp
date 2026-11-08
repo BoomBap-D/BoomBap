@@ -518,5 +518,131 @@ int main()
         std::printf ("Solo, metronome, pad activity: ok\n");
     }
 
+    // ---- 11. fix pass: pad capture, whole-song length, audio clips, clean takes ----
+    {
+        // pad capture (item 31): a hit while playing writes its step at the playhead
+        auto cap = fresh();
+        cap->clearPattern();
+        cap->loadSample (BoomBapEngine::Sample1, std::vector<float> (4000, 0.5f), sr);
+        cap->setPadCaptureEnabled (true);
+        cap->setPlaying (true);
+        render (*cap, 256 * 40);
+        cap->triggerPad (0, 0.5f);
+        const int stepAtHit = cap->currentStep();
+        render (*cap, 512);
+        assert (cap->getStep (BoomBapEngine::Sample1, stepAtHit) == 64);
+        assert (cap->consumeCapturedPad() == 0);
+        assert (cap->consumeCapturedPad() == -1);
+        cap->setPadCaptureEnabled (false);
+        cap->setEditPattern (1);
+        render (*cap, 256 * 4);
+        cap->triggerPad (0, 0.5f);
+        render (*cap, 512);
+        bool anyInP1 = false;
+        for (int s = 0; s < 16; ++s) anyInP1 = anyInP1 || cap->getStep (BoomBapEngine::Sample1, s) != 0;
+        assert (! anyInP1); // capture off: hits stay performance-only
+        cap->setPadCaptureEnabled (true);
+        cap->setEditPattern (2);
+        cap->triggerPad (7, 0.9f); // not a sequencer row: never captured
+        render (*cap, 512);
+        bool anyInP2 = false;
+        for (int s = 0; s < 16; ++s) anyInP2 = anyInP2 || cap->getStep (BoomBapEngine::Sample1, s) != 0;
+        assert (! anyInP2);
+        cap->setPlaying (false);
+        cap->triggerPad (0, 0.5f);
+        render (*cap, 512);
+        anyInP2 = false;
+        for (int s = 0; s < 16; ++s) anyInP2 = anyInP2 || cap->getStep (BoomBapEngine::Sample1, s) != 0;
+        assert (! anyInP2); // transport stopped: no capture either
+        std::printf ("Pad capture: ok\n");
+
+        // whole-song render length (item 34): 16-bar song + tail
+        auto song = fresh();
+        song->setStep (BoomBapEngine::Kick, 0, 100);
+        for (int s = 0; s < 16; ++s) song->setSongSlot (s, 0);
+        song->setSongLength (16);
+        auto songClone = fresh();
+        songClone->copySettingsFrom (*song);
+        songClone->setSongMode (true);
+        const auto wholeSong = renderOffline (*songClone, 16, 44100.0, 2.0f, false);
+        const long long expectWhole = std::llround (16.0 * 384.0 * (60.0 / 120.0 / 96.0) * 44100.0)
+                                      + (long long) (2.0 * 44100.0);
+        assert ((long long) wholeSong[0].size() == expectWhole);
+        std::printf ("Whole-song render length: ok\n");
+
+        // audio clips (items 32/35): place, hear, move, trim, split
+        auto cl = fresh();
+        cl->clearPattern();
+        std::vector<float> vox (88200);
+        for (int i = 0; i < 88200; ++i)
+            vox[(size_t) i] = 0.6f * std::sin (2.0f * 3.14159265f * 220.0f * (float) i / (float) sr);
+        cl->setVocalTake (vox);
+        const int slot = cl->placeTakeAsClip();
+        assert (slot >= 0 && cl->audioClipCount() == 1);
+        auto region = cl->getAudioClip (slot);
+        assert (region.active && region.startSamples == 0 && region.lengthSamples == 88200);
+        assert ((long long) cl->getAudioClipData (slot).size() == 88200);
+        cl->setPlaying (true);
+        assert (peakOf (render (*cl, 22050)) > 0.15f); // the clip is audible on the track
+        cl->setPlaying (false);
+        cl->moveAudioClip (slot, 44100);
+        assert (cl->getAudioClip (slot).startSamples == 44100);
+        cl->trimAudioClip (slot, 44100, 11025, 44100);
+        region = cl->getAudioClip (slot);
+        assert (region.sourceStart == 11025 && region.lengthSamples == 44100);
+        const int right = cl->splitAudioClip (slot, 44100 + 22050);
+        assert (right >= 0 && cl->audioClipCount() == 2);
+        assert (cl->getAudioClip (slot).lengthSamples == 22050);
+        region = cl->getAudioClip (right);
+        assert (region.startSamples == 44100 + 22050 && region.sourceStart == 11025 + 22050
+                && region.lengthSamples == 22050);
+        assert (cl->splitAudioClip (slot, 10) == -1); // a cut outside the clip is refused
+        cl->clearAudioClip (right);
+        assert (cl->audioClipCount() == 1);
+        cl->setAudioTrackGain (0, 0.42f);
+        cl->setAudioTrackMute (0, true);
+        assert (std::abs (cl->getAudioTrackGain (0) - 0.42f) < 1.0e-6f && cl->getAudioTrackMute (0));
+        std::printf ("Audio clips: ok\n");
+
+        // item 36: the take stores the CLEAN capture - the mic emulation is
+        // a playback setting, never burned in
+        auto recordClean = [&] (int mic, float distCm, float inDb)
+        {
+            auto r = fresh();
+            r->clearPattern();
+            r->setVocalMic (mic);
+            r->setVocalDistance (distCm);
+            r->setVocalInputDb (inDb);
+            std::vector<float> in (88200);
+            for (int i = 0; i < 88200; ++i)
+                in[(size_t) i] = 0.4f * std::sin (2.0f * 3.14159265f * 110.0f * (float) i / (float) sr)
+                               + 0.3f * std::sin (2.0f * 3.14159265f * 440.0f * (float) i / (float) sr)
+                               + 0.2f * std::sin (2.0f * 3.14159265f * 3000.0f * (float) i / (float) sr);
+            r->startRecording();
+            render (*r, 88200, &in);
+            r->stopRecording();
+            return r->getTakeData();
+        };
+        const auto takeA = recordClean (0, 0.0f, 0.0f);
+        const auto takeB = recordClean (7, 90.0f, 0.0f); // opposite mic + far distance
+        assert (takeA.size() == takeB.size() && takeA == takeB); // stored data identical
+        const auto takeHot = recordClean (0, 0.0f, 6.0f);
+        assert (std::abs (rmsOf (takeHot) / rmsOf (takeA) - 1.9953f) < 0.05f); // only the input gain is staged in
+        auto player = fresh();
+        player->clearPattern();
+        player->setVocalTake (takeA);
+        player->setVocalMic (0);
+        player->setPlaying (true);
+        const auto heardA = render (*player, 44100);
+        player->setVocalMic (7);
+        const auto heardB = render (*player, 44100);
+        float maxDiff = 0.0f;
+        for (size_t i = 0; i < heardA.size(); ++i)
+            maxDiff = std::max (maxDiff, std::abs (heardA[i] - heardB[i]));
+        assert (maxDiff > 0.01f); // switching the mic changes what you HEAR...
+        assert (player->getTakeData() == takeA); // ...never what is stored
+        std::printf ("Clean take / playback mic (item 36): ok\n");
+    }
+
     std::printf ("engine checks passed\n");
 }

@@ -17,6 +17,7 @@ class PianoRollComponent;
 class PianoRollWindow;
 class PlaylistComponent;
 class PlaylistWindow;
+class MultitrackComponent;
 
 class MainComponent : public juce::AudioAppComponent, private juce::Timer
 {
@@ -59,6 +60,7 @@ private:
     {
         juce::Label name;
         juce::TextButton load { "Load..." };   // sample rows only
+        juce::TextButton roll { "ROLL" };      // pitched rows only (Fix pass item 28)
         juce::TextButton mute { "M" };
         juce::TextButton solo { "S" };
         juce::Slider level;
@@ -96,6 +98,10 @@ private:
     void refreshTakeUi();
     bool writeTakeWav (const juce::File& file);
     void openPianoRoll();
+    void openPianoRollFor (int track);   // Fix pass item 28: the roll bound to a track
+    void selectInstrument (int which);   // Fix pass item 29: 0 = synth, 1 = piano
+    void setAudioView (bool audio);      // Fix pass item 35: sequencer <-> multitrack
+    void placeTakeAsClip();              // Fix pass item 32: take -> clip on the audio track
     void openPlaylist();
     void refreshPatternUi();
     // project files
@@ -167,6 +173,11 @@ private:
     LabeledSlider kickTune, kickDecay, snareSnappy, openHatDecay, clapTail;
 
     // instruments (played from the piano roll)
+    // Fix pass item 29: one instrument at a time - the switcher shows the
+    // chosen instrument's controls (and its roll opens from here).
+    juce::TextButton synthTab { "SYNTH" }, pianoTab { "PIANO" };
+    juce::TextButton instrumentRollButton { "Piano Roll" };
+    int shownInstrument = 0;
     juce::ComboBox synthWaveBox;
     LabeledSlider synthCutoff, synthReso, synthAttack, synthRelease, synthLevel;
     LabeledSlider pianoBright, pianoDecay, pianoLevel;
@@ -204,6 +215,13 @@ private:
     juce::TextButton pianoButton { "Piano Roll" };
     std::unique_ptr<PianoRollComponent> pianoRoll;
     std::unique_ptr<PianoRollWindow> pianoWindow;
+    int rollTrack = 0; // the track the roll was last summoned from (item 28)
+
+    // Fix pass item 35: the top work area switches between the step
+    // sequencer and the audio multitrack.
+    juce::TextButton viewButton { "AUDIO" };
+    bool audioView = false;
+    std::unique_ptr<MultitrackComponent> multitrack;
 
     juce::Label patternLabel;
     std::array<juce::TextButton, 8> patternButtons;

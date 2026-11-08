@@ -13,6 +13,7 @@ double numberOr (const var& v, double fallback)
 
 float  getF (const var& obj, const char* key, float fallback)  { return (float) numberOr (obj.getProperty (key, var()), fallback); }
 int    getI (const var& obj, const char* key, int fallback)    { return (int) std::lround (numberOr (obj.getProperty (key, var()), fallback)); }
+long long getL (const var& obj, const char* key, long long fallback) { return (long long) std::llround (numberOr (obj.getProperty (key, var()), (double) fallback)); }
 bool   getB (const var& obj, const char* key, bool fallback)
 {
     const var v = obj.getProperty (key, var());
@@ -101,6 +102,22 @@ String projectToJson (const ProjectData& d, const File& projectFile)
         padArr.add (var (o));
     }
 
+    // Fix pass item 35: the audio track (mixer state in track order, after
+    // the instrument rows) and its clips (regions only - the audio itself is
+    // the take WAV). Older files simply have neither key.
+    Array<var> audioTracksArr, audioClipsArr;
+    for (int i = 0; i < ProjectSettings::kAudioTracks; ++i)
+        audioTracksArr.add (object ({ { "gain", (double) s.audioGain[i] },
+                                      { "mute", s.audioMute[i] }, { "solo", s.audioSolo[i] } }));
+    for (int i = 0; i < ProjectSettings::kMaxAudioClips; ++i)
+    {
+        if (! s.audioClips[i].active) continue;
+        audioClipsArr.add (object ({ { "slot", i },
+                                      { "start", (double) s.audioClips[i].startSamples },
+                                      { "sourceStart", (double) s.audioClips[i].sourceStart },
+                                      { "length", (double) s.audioClips[i].lengthSamples } }));
+    }
+
     var root = object ({
         { "format", "boombap-project" },
         { "version", kProjectFormatVersion },
@@ -125,6 +142,8 @@ String projectToJson (const ProjectData& d, const File& projectFile)
                                  { "level", (double) s.pianoLevel } }) } }) },
         { "samples", var (samples) },
         { "pads", var (padArr) },
+        { "audioTracks", var (audioTracksArr) },
+        { "audioClips", var (audioClipsArr) },
         { "export", object ({ { "bars", d.exportBars }, { "normalize", d.exportNormalize } }) }
     });
 
@@ -338,9 +357,31 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
         }
     }
 
+    if (auto* at = root.getProperty ("audioTracks", var()).getArray())
+        for (int i = 0; i < ProjectSettings::kAudioTracks && i < at->size(); ++i)
+        {
+            s.audioGain[i] = getF ((*at)[i], "gain", s.audioGain[i]);
+            s.audioMute[i] = getB ((*at)[i], "mute", s.audioMute[i]);
+            s.audioSolo[i] = getB ((*at)[i], "solo", s.audioSolo[i]);
+        }
+
+    if (auto* ac = root.getProperty ("audioClips", var()).getArray())
+        for (const var& item : *ac)
+        {
+            const int slot = getI (item, "slot", -1);
+            if (slot < 0 || slot >= ProjectSettings::kMaxAudioClips) continue;
+            s.audioClips[slot].startSamples  = getL (item, "start", 0);
+            s.audioClips[slot].sourceStart   = getL (item, "sourceStart", 0);
+            s.audioClips[slot].lengthSamples = getL (item, "length", 0);
+            s.audioClips[slot].active        = s.audioClips[slot].lengthSamples > 0;
+        }
+    s.sanitize();
+
     const var ex = root.getProperty ("export", var());
     d.exportBars = getI (ex, "bars", d.exportBars);
-    if (d.exportBars != 1 && d.exportBars != 2 && d.exportBars != 4 && d.exportBars != 8) d.exportBars = 4;
+    // 100 = "Whole song" (Fix pass item 34): render the full playlist length.
+    if (d.exportBars != 1 && d.exportBars != 2 && d.exportBars != 4 && d.exportBars != 8
+        && d.exportBars != 100) d.exportBars = 4;
     d.exportNormalize = getB (ex, "normalize", d.exportNormalize);
 
     out = d;
