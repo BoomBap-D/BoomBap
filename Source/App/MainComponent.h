@@ -18,6 +18,7 @@ class PianoRollWindow;
 class PlaylistComponent;
 class PlaylistWindow;
 class MultitrackComponent;
+class SequencerPanel;
 
 class MainComponent : public juce::AudioAppComponent, private juce::Timer
 {
@@ -52,21 +53,15 @@ public:
     // Runs `proceed` straight away, or after asking what to do with unsaved changes.
     void confirmDiscardThen (std::function<void()> proceed);
 
+    // Item 59: exactly one production view is visible at any time; the
+    // plugin's first-open test asserts it. 0 = sequencer, 1 = MPC, 2 = audio.
+    bool tabViewVisible (int index) { auto* c = tabContent (index); return c != nullptr && c->isVisible(); }
+    int activeTabIndex() const { return activeTab; }
+    void showInitialTab() { selectTab (0); }
+
 private:
     static constexpr int kTracks = boombap::BoomBapEngine::kTracks;
     static constexpr int kSteps  = boombap::BoomBapEngine::kSteps;
-
-    struct Row
-    {
-        juce::Label name;
-        juce::TextButton load { "Load..." };   // sample rows only
-        juce::TextButton roll { "ROLL" };      // pitched rows only (Fix pass item 28)
-        juce::TextButton mute { "M" };
-        juce::TextButton solo { "S" };
-        juce::Slider level;
-        LevelMeter meter;
-        StepButton steps[kSteps];
-    };
 
     struct LabeledSlider
     {
@@ -78,6 +73,15 @@ private:
     void togglePlay();
     void startTransport();
     void stopTransport();
+    void startAudioOnlyPlayback();              // item 47: the audio view's own PLAY
+    // Production Area tab bar (items 37/42): 0 steps, 1 MPC, 2 audio
+    void selectTab (int index);
+    void togglePopOut();
+    void popOutTab (int index);
+    void dockTab (int index);
+    void updateTabChrome();
+    void showKitMenu (int track);               // item 40
+    juce::Component* tabContent (int index);
     // audio device setup (Pass 1 item 8) + autosave / recovery (item 7)
     void showAudioSettings();
     void saveDeviceState();
@@ -97,13 +101,12 @@ private:
     void toggleRecording();
     void refreshTakeUi();
     bool writeTakeWav (const juce::File& file);
+    void ensureTakeFileInHome();         // Item 62: the take lives as a WAV in Documents/BoomBap/Takes
     void openPianoRoll();
     void openPianoRollFor (int track);   // Fix pass item 28: the roll bound to a track
     void selectInstrument (int which);   // Fix pass item 29: 0 = synth, 1 = piano
-    void setAudioView (bool audio);      // Fix pass item 35: sequencer <-> multitrack
     void placeTakeAsClip();              // Fix pass item 32: take -> clip on the audio track
     void openPlaylist();
-    void refreshPatternUi();
     // project files
     static constexpr int kProjectBar = 40; // height of the project bar; everything else sits below it
     boombap::ProjectData makeProjectData() const;
@@ -166,8 +169,8 @@ private:
     GrMeter glueBar;
     juce::Label glueMeter;
 
-    // grid
-    Row rows[kTracks];
+    // grid: the step sequencer view lives in the Production Area tabs now
+    std::unique_ptr<SequencerPanel> sequencerPanel;
 
     // drum sound
     LabeledSlider kickTune, kickDecay, snareSnappy, openHatDecay, clapTail;
@@ -197,11 +200,13 @@ private:
     WaveformView waveView;
     juce::TextButton waveSel[3];
     juce::Label waveName;
+    juce::TextButton wavePlayButton { "PLAY" }; // item 46: audition this panel's sample
     std::array<std::vector<float>, 3> waveData;
+    std::array<double, 3> waveRates {};         // source rate per waveform slot
     int waveTrack = 0;
 
     juce::TextButton recordButton { "Record" };
-    juce::ToggleButton takeToggle { "Take" };
+    juce::ToggleButton takeToggle { "Loop take" }; // item 56: the raw take's loop is an explicit opt-in
     juce::Label takeLabel;
     juce::String takePath;
     bool takeDirty = false;
@@ -217,14 +222,22 @@ private:
     std::unique_ptr<PianoRollWindow> pianoWindow;
     int rollTrack = 0; // the track the roll was last summoned from (item 28)
 
-    // Fix pass item 35: the top work area switches between the step
-    // sequencer and the audio multitrack.
-    juce::TextButton viewButton { "AUDIO" };
-    bool audioView = false;
+    // Fix pass 2, items 37/42: the Production Area is a TAB BAR - STEP
+    // SEQUENCER / MPC PANEL / AUDIO MULTITRACK - and every tab can pop
+    // out into its own window and dock back (his Reaper grammar).
+    juce::TextButton tabButtons[3];
+    juce::TextButton popOutButton { "Pop out" };
+    juce::Label tabPoppedLabel;
+    int activeTab = 0;
+    bool tabPoppedOut[3] = {};
+    std::unique_ptr<juce::DocumentWindow> productionWindows[3];
+    std::unique_ptr<PadBankComponent> mpcPanel; // the MPC PANEL tab's pad bank
     std::unique_ptr<MultitrackComponent> multitrack;
 
-    juce::Label patternLabel;
-    std::array<juce::TextButton, 8> patternButtons;
+    // item 40: audio files bound to rows outside the sample slots and
+    // pad bank (kit rows 0-4, added rows 21+) - persisted in the project
+    std::array<juce::File, kTracks> rowFiles;
+
     juce::TextButton playlistButton { "Playlist" };
     std::unique_ptr<PlaylistComponent> playlist;
     std::unique_ptr<PlaylistWindow> playlistWindow;

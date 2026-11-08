@@ -15,14 +15,23 @@ struct AudioClip
     long long startSamples = 0;   // where the clip sits on the timeline
     long long sourceStart = 0;    // trim: offset into the recorded audio
     long long lengthSamples = 0;  // trim: how much of the audio plays
+    int track = 0;                // which audio track it lives on (item 60;
+                                  // older files have no track - they mean 0)
 };
 
 struct ProjectSettings
 {
-    static constexpr int kTracks = 8;
-    static constexpr int kSteps  = 16;
+    // Fix pass 2: a pattern is TWO bars (item 48: 32 steps), and the track
+    // list grows past the original 8 rows (item 39: unlimited tracks that
+    // scroll). kTracks is the engine capacity; numTracks is how many rows
+    // this project actually shows. Files from earlier builds carry 8 tracks
+    // x 16 steps - the loader leaves the rest at defaults, so they extend
+    // with empty steps and the standard 8 rows.
+    static constexpr int kTracks = 32;
+    static constexpr int kSteps  = 32;
     static constexpr int kPatterns = 8;   // patterns A-H
     static constexpr int kSongSlots = 32; // playlist length
+    int numTracks = 8;                    // rows in use (5 kit + 3 sample to start)
 
     float bpm = 90.0f, swing = 58.0f, masterDb = 0.0f;
 
@@ -49,11 +58,13 @@ struct ProjectSettings
     int   vocalMic = 2;                  // index into the five mic models
     float vocalDistanceCm = 15.0f, vocalInputDb = 0.0f;
 
-    // Audio tracks (Fix pass item 35): one for now (the vocal), growing in
-    // Pass 4. The mixer runs in track order: the 8 instrument rows, then
-    // these. A recorded take lands here as a clip (item 32's home).
-    static constexpr int kAudioTracks = 1;
+    // Audio tracks (Fix pass item 35; item 60 made them many): each is its
+    // own channel, after the instrument rows in mixer order, and clips live
+    // on any of them. kAudioTracks is the capacity; numAudioTracks is how
+    // many this project shows. Older files carry one track.
+    static constexpr int kAudioTracks = 8;
     static constexpr int kMaxAudioClips = 16;
+    int numAudioTracks = 1;
     AudioClip audioClips[kMaxAudioClips];
     float audioGain[kAudioTracks] = { 0.9f };
     bool  audioMute[kAudioTracks] = { false };
@@ -99,6 +110,7 @@ struct ProjectSettings
             trackMute[t] = false;
             trackSolo[t] = false;
         }
+        for (int i = 0; i < kAudioTracks; ++i) audioGain[i] = 0.9f;
         for (int p = 0; p < kPads; ++p)
         {
             padStart[p] = 0.0f; padEnd[p] = 1.0f; padTune[p] = 0.0f;
@@ -109,10 +121,15 @@ struct ProjectSettings
         // The starter pattern lives in pattern A; B-H start empty.
         for (int s : { 0, 7, 10 }) patData[0][0][s] = 127;                       // kick
         for (int s : { 4, 12 })    patData[0][1][s] = 127;                       // snare
-        for (int s = 0; s < kSteps; ++s)                                         // closed hat
+        for (int s = 0; s < 16; ++s)                                             // closed hat
             patData[0][2][s] = s % 4 == 0 ? 110 : (s % 2 == 0 ? 80 : 45);
         patData[0][3][14] = 90;                                                  // open hat
         patData[0][4][12] = 70;                                                  // clap
+        // the pattern is two bars now (item 48): the classic bar repeats into
+        // bar 2 so the starter pattern loops the way it always did
+        for (int t = 0; t < kTracks; ++t)
+            for (int s = 0; s < 16; ++s)
+                patData[0][t][s + 16] = patData[0][t][s];
     }
 
     // Pulls every value into a safe range (used for files written by hand or by newer builds).
@@ -135,6 +152,7 @@ struct ProjectSettings
             }
             patMelodySource[p] = std::clamp (patMelodySource[p], 0, 16);
         }
+        numTracks = std::clamp (numTracks, 1, kTracks);
         currentPattern = std::clamp (currentPattern, 0, kPatterns - 1);
         for (int i = 0; i < kSongSlots; ++i) songChain[i] = std::clamp (songChain[i], 0, kPatterns - 1);
         songLength = std::clamp (songLength, 0, kSongSlots);
@@ -157,11 +175,13 @@ struct ProjectSettings
         vocalMic = std::clamp (vocalMic, 0, 7);
         vocalDistanceCm = std::clamp (vocalDistanceCm, 3.0f, 40.0f);
         vocalInputDb = std::clamp (vocalInputDb, -12.0f, 24.0f);
+        numAudioTracks = std::clamp (numAudioTracks, 1, kAudioTracks);
         for (auto& c : audioClips)
         {
             c.startSamples  = std::clamp<long long> (c.startSamples, 0, 1LL << 40);
             c.sourceStart   = std::clamp<long long> (c.sourceStart, 0, 1LL << 40);
             c.lengthSamples = std::clamp<long long> (c.lengthSamples, 0, 1LL << 40);
+            c.track         = std::clamp (c.track, 0, kAudioTracks - 1);
             if (c.lengthSamples <= 0) c.active = false;
         }
         for (int i = 0; i < kAudioTracks; ++i)

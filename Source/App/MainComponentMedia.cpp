@@ -3,6 +3,8 @@
 #include "PianoRoll.h"
 #include "Playlist.h"
 #include "Multitrack.h"
+#include "SequencerPanel.h"
+#include "DataHome.h"
 #include "WavWrite.h"
 
 using namespace juce;
@@ -45,6 +47,12 @@ bool MainComponent::decodeSampleFile (const File& file, std::vector<float>& mono
     return true;
 }
 
+// One loader for every row kind (fix pass 2):
+// - kit rows 0-4 (item 40): the file BINDS to the row - the row plays the
+//   sample with its steps until Reset brings the built-in drum back.
+// - sample rows 5-7: the classic path (waveform panel + pad 1-3).
+// - pad rows 8-20: the row IS pad (track - 4) - same sample store.
+// - added rows 21+: the row's own sample slot (item 39).
 void MainComponent::loadSampleFile (int track, const File& file)
 {
     std::vector<float> mono;
@@ -56,13 +64,36 @@ void MainComponent::loadSampleFile (int track, const File& file)
         return;
     }
 
-    const int waveIdx = track - boombap::BoomBapEngine::Sample1;
-    waveData[(size_t) waveIdx] = mono;
-    engine.loadSample (track, std::move (mono), fileSr);
-    samplePaths[(size_t) waveIdx] = file;
-    rows[track].load.setButtonText (file.getFileNameWithoutExtension().substring (0, 8));
-    showWaveform (waveIdx);
-    if (padBank != nullptr) padBank->refreshPad (waveIdx);
+    const String shortName = file.getFileNameWithoutExtension().substring (0, 8);
+    if (track <= boombap::BoomBapEngine::Clap)
+    {
+        engine.setKitSample (track, mono, fileSr);
+        rowFiles[(size_t) track] = file;
+    }
+    else if (track < boombap::BoomBapEngine::kFirstOwnRow)
+    {
+        const int pad = track - boombap::BoomBapEngine::Sample1; // rows 5..20 -> pads 1..16
+        if (pad < 3)
+        {
+            waveData[(size_t) pad] = mono;
+            waveRates[(size_t) pad] = fileSr;
+            samplePaths[(size_t) pad] = file;
+            showWaveform (pad);
+        }
+        else
+        {
+            padFiles[(size_t) pad] = file;
+        }
+        engine.loadSample (track, std::move (mono), fileSr);
+        if (padBank != nullptr) padBank->refreshPad (pad);
+        if (mpcPanel != nullptr) mpcPanel->refreshPad (pad);
+    }
+    else
+    {
+        engine.loadSample (track, std::move (mono), fileSr);
+        rowFiles[(size_t) track] = file;
+    }
+    if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, shortName);
     fireMediaChanged();
 }
 
@@ -92,6 +123,10 @@ void MainComponent::loadPadFile (int pad, const File& file)
     engine.loadPadSample (pad, std::move (mono), fileSr);
     padFiles[(size_t) pad] = file;
     if (padBank != nullptr) padBank->refreshPad (pad);
+    if (mpcPanel != nullptr) mpcPanel->refreshPad (pad);
+    if (sequencerPanel != nullptr && pad >= 3)
+        sequencerPanel->setRowLoadText (boombap::BoomBapEngine::Sample1 + pad,
+                                        file.getFileNameWithoutExtension().substring (0, 8));
     fireMediaChanged();
 }
 
@@ -174,18 +209,6 @@ void MainComponent::openPlaylist()
     playlistWindow->toFront (true);
 }
 
-void MainComponent::refreshPatternUi()
-{
-    const int cur = engine.getEditPattern();
-    for (int i = 0; i < 8; ++i)
-    {
-        auto& b = patternButtons[(size_t) i];
-        const bool sel = i == cur;
-        b.setColour (TextButton::buttonColourId, sel ? boombap::ui::accent() : boombap::ui::panelAlt());
-        b.setColour (TextButton::textColourOffId, sel ? Colour (0xff14100a) : boombap::ui::text());
-    }
-}
-
 void MainComponent::toggleRecording()
 {
     if (engine.isRecording())
@@ -210,17 +233,64 @@ void MainComponent::refreshTakeUi()
     recordButton.setColour (TextButton::buttonColourId,
                             rec ? Colour (0xffc0392b) : boombap::ui::panelAlt());
     recordButton.setColour (TextButton::textColourOffId, Colours::white);
+    // item 56: the switch shows the engine's truth, never a stale default
+    takeToggle.setToggleState (engine.takeEnabled(), dontSendNotification);
 
     String text;
     if (rec)
         text = "Recording... " + String (engine.recordedSeconds(), 1) + " s";
+    else if (engine.hasTake() && engine.takeIsPlaced())
+    {
+        const int slot = engine.takeClipSlot();
+        const int trk = slot >= 0 ? engine.getAudioClip (slot).track + 1 : 1;
+        text = "Take: " + String (engine.takeSeconds(), 1) + " s - it lives on AUDIO TRACK "
+             + String (trk) + " as one clip";
+    }
     else if (engine.hasTake())
-        text = "Take: " + String (engine.takeSeconds(), 1) + " s, loops with the beat";
+        text = "Take: " + String (engine.takeSeconds(), 1) + " s - 'Loop take' plays it raw with the beat";
     else
         text = "No take yet - press Record and perform over the beat";
 
     if (takeLabel.getText() != text)
         takeLabel.setText (text, dontSendNotification);
+}
+
+// Item 62: a recorded take is a real WAV in Documents/BoomBap/Takes - in
+// the standalone AND the plugin (this component serves both). The project
+// references that file; an older sidecar WAV from beside a project file
+// is copied home the first time the project is saved again.
+void MainComponent::ensureTakeFileInHome()
+{
+    if (! engine.hasTake()) return;
+    boombap::ensureDataHome();
+    const File current (takePath);
+    const auto takes = boombap::takesDir();
+
+    if (! takeDirty && current.existsAsFile() && current.getParentDirectory() == takes)
+        return; // already homed and up to date
+
+    File dest;
+    if (! takeDirty && current.existsAsFile())
+    {
+        dest = takes.getChildFile (current.getFileName());
+        if (dest.existsAsFile() && dest.getSize() == current.getSize())
+        {
+            takePath = dest.getFullPathName(); // the home copy is already there
+            fireMediaChanged();
+            return;
+        }
+        if (dest.existsAsFile())
+            dest = boombap::newTakeFile();
+        if (! current.copyFileTo (dest)) return;
+    }
+    else
+    {
+        dest = boombap::newTakeFile();
+        if (! writeTakeWav (dest)) return;
+    }
+    takePath = dest.getFullPathName();
+    takeDirty = false;
+    fireMediaChanged();
 }
 
 bool MainComponent::writeTakeWav (const File& file)
@@ -241,6 +311,7 @@ bool MainComponent::writeTakeWav (const File& file)
 void MainComponent::showWaveform (int index)
 {
     waveTrack = index;
+    engine.stopAudition(); // the audition belongs to the sample it started on
     waveView.setData (waveData[(size_t) index]);
     for (int i = 0; i < 3; ++i)
         waveSel[i].setToggleState (i == index, dontSendNotification);

@@ -4,6 +4,171 @@
 #include "BoomBapLookAndFeel.h"
 #include <functional>
 
+// ============================================================================
+//  The selected pad's own waveform (item 44): the whole sample, the
+//  [start, end] window the pad plays shaded amber, the rest dimmed.
+//  Drag the window's edges here to trim in place - the same Start/End
+//  sliders below follow - or click inside the window to audition.
+// ============================================================================
+class PadWaveView : public juce::Component
+{
+public:
+    std::function<void (float, float)> onTrim; // (startFrac, endFrac), on release
+    std::function<void()> onAudition;
+
+    void setData (std::vector<float> mono, float startFrac, float endFrac)
+    {
+        data = std::move (mono);
+        start = juce::jlimit (0.0f, 1.0f, startFrac);
+        end = juce::jlimit (0.0f, 1.0f, endFrac);
+        if (end <= start + 0.002f) end = juce::jmin (1.0f, start + 0.002f);
+        rebuildPeaks();
+        repaint();
+    }
+
+    // During a trim drag the sample does not change - window only.
+    void setWindow (float startFrac, float endFrac)
+    {
+        start = juce::jlimit (0.0f, 1.0f, startFrac);
+        end = juce::jlimit (0.0f, 1.0f, endFrac);
+        repaint();
+    }
+
+    void setActive (bool isPlaying) // the sounding pad lights up (item 54)
+    {
+        if (active != isPlaying) { active = isPlaying; repaint(); }
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace boombap::ui;
+        g.setColour (panelAlt().darker (0.25f));
+        g.fillRoundedRectangle (getLocalBounds().toFloat(), 6.0f);
+        g.setColour (active ? accentHi() : border().withAlpha (0.6f));
+        g.drawRoundedRectangle (getLocalBounds().toFloat().reduced (0.5f), 6.0f, active ? 2.0f : 1.0f);
+
+        if (peaks.empty())
+        {
+            g.setColour (muted());
+            g.setFont (12.0f);
+            g.drawText ("No sample on the selected pad", getLocalBounds(), juce::Justification::centred);
+            return;
+        }
+
+        const auto b = getLocalBounds().toFloat().reduced (6.0f, 8.0f);
+        const float mid = b.getCentreY();
+        const float h = b.getHeight() * 0.46f;
+        const float x0 = b.getX() + start * b.getWidth();
+        const float x1 = b.getX() + end * b.getWidth();
+
+        const int cols = juce::jmax (1, (int) b.getWidth());
+        for (int x = 0; x < cols; ++x)
+        {
+            const int idx = juce::jmin ((int) peaks.size() - 1,
+                                        (int) ((double) x / (double) cols * (double) peaks.size()));
+            const float px = b.getX() + (float) x;
+            const bool inWindow = px >= x0 && px <= x1;
+            g.setColour (inWindow ? accentHi() : muted().withAlpha (0.35f));
+            g.drawLine (px, mid - peaks[(size_t) idx].second * h,
+                        px, mid - peaks[(size_t) idx].first * h, 1.0f);
+        }
+
+        // Item 63: the parts of the sample that are NOT used are SHADED
+        // OUT - the waveform itself shows the trim decision.
+        g.setColour (juce::Colours::black.withAlpha (0.48f));
+        if (x0 > b.getX())
+            g.fillRect (juce::Rectangle<float> (b.getX(), b.getY(), x0 - b.getX(), b.getHeight()));
+        if (x1 < b.getRight())
+            g.fillRect (juce::Rectangle<float> (x1, b.getY(), b.getRight() - x1, b.getHeight()));
+
+        // Pull bars ON the waveform at the trim points: grab and drag.
+        for (const float bx : { x0, x1 })
+        {
+            const juce::Rectangle<float> bar (bx - 5.0f, b.getY(), 10.0f, b.getHeight());
+            g.setColour (accent());
+            g.fillRoundedRectangle (bar, 3.0f);
+            g.setColour (juce::Colour (0xff14100a).withAlpha (0.75f));
+            g.drawLine (bx - 1.8f, b.getY() + 6.0f, bx - 1.8f, b.getBottom() - 6.0f, 1.4f);
+            g.drawLine (bx + 1.8f, b.getY() + 6.0f, bx + 1.8f, b.getBottom() - 6.0f, 1.4f);
+        }
+
+        g.setColour (text());
+        g.setFont (juce::Font (11.0f, juce::Font::bold));
+        g.drawText ("PAD WAVEFORM - drag the pull bars to trim, click inside to hear it",
+                    10, 2, getWidth() - 20, 13, juce::Justification::left);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        if (peaks.empty()) return;
+        // the pull bars are the grab targets (item 63): a generous pixel
+        // zone around each bar, not a fraction of the sample
+        const auto b = getLocalBounds().toFloat().reduced (6.0f, 8.0f);
+        const float x0 = b.getX() + start * b.getWidth();
+        const float x1 = b.getX() + end * b.getWidth();
+        dragEdge = 0;
+        if (std::abs ((float) e.x - x0) <= 8.0f) dragEdge = 1;
+        else if (std::abs ((float) e.x - x1) <= 8.0f) dragEdge = 2;
+        if (dragEdge != 0) setWindowFromDrag (fracAt ((float) e.x));
+    }
+
+    void mouseDrag (const juce::MouseEvent& e) override
+    {
+        if (dragEdge != 0) setWindowFromDrag (fracAt ((float) e.x));
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (dragEdge != 0)
+        {
+            dragEdge = 0;
+            if (onTrim) onTrim (start, end);
+        }
+        else if (onAudition) onAudition(); // a plain click inside the window
+    }
+
+private:
+    float fracAt (float x) const
+    {
+        const auto b = getLocalBounds().toFloat().reduced (6.0f, 8.0f);
+        return juce::jlimit (0.0f, 1.0f, (x - b.getX()) / juce::jmax (1.0f, b.getWidth()));
+    }
+
+    void setWindowFromDrag (float fx)
+    {
+        if (dragEdge == 1) start = juce::jmin (fx, end - 0.002f);
+        else if (dragEdge == 2) end = juce::jmax (fx, start + 0.002f);
+        repaint();
+    }
+
+    void rebuildPeaks()
+    {
+        peaks.clear();
+        if (data.empty()) return;
+        const int numPeaks = 1024;
+        peaks.resize ((size_t) numPeaks);
+        const double per = (double) data.size() / (double) numPeaks;
+        for (int p = 0; p < numPeaks; ++p)
+        {
+            const int s0 = (int) (p * per);
+            const int s1 = juce::jmin ((int) data.size(), juce::jmax (s0 + 1, (int) ((p + 1) * per)));
+            float lo = 0.0f, hi = 0.0f;
+            for (int j = s0; j < s1; ++j)
+            {
+                lo = juce::jmin (lo, data[(size_t) j]);
+                hi = juce::jmax (hi, data[(size_t) j]);
+            }
+            peaks[(size_t) p] = { lo, hi };
+        }
+    }
+
+    std::vector<float> data;
+    std::vector<std::pair<float, float>> peaks;
+    float start = 0.0f, end = 1.0f;
+    int dragEdge = 0;
+    bool active = false;
+};
+
 // One MPC-style pad: number top-left, sample name along the bottom,
 // amber outline when selected, a flash of amber when it sounds.
 class PadButton : public juce::Component
@@ -23,6 +188,8 @@ public:
     {
         if (selected != s) { selected = s; repaint(); }
     }
+
+    bool isFlashing() const { return flash > 0.05f; }
 
     void triggerFlash() { flash = 1.0f; repaint(); }
 
@@ -97,6 +264,20 @@ public:
 
         loadButton.onClick = [this] { if (onLoad) onLoad (selected); };
         addAndMakeVisible (loadButton);
+
+        // item 44: the selected pad's waveform, trimmable in place
+        waveView.onTrim = [this] (float s, float e)
+        {
+            startRow.slider.setValue (s * 100.0, juce::dontSendNotification);
+            endRow.slider.setValue (e * 100.0, juce::dontSendNotification);
+            pushEditor();
+        };
+        waveView.onAudition = [this]
+        {
+            engine.triggerPad (selected, 1.0f);
+            pads[selected].triggerFlash();
+        };
+        addAndMakeVisible (waveView);
 
         setupRow (startRow, "Start %", 0.0, 97.0, 0.5, 0.0);
         setupRow (endRow, "End %", 3.0, 100.0, 0.5, 100.0);
@@ -192,15 +373,23 @@ public:
         fileLabel.setBounds (ex, 42, juce::jmax (200, getWidth() - ex - 16), 20);
         loadButton.setBounds (ex, 66, 150, 26);
 
+        // item 44: the waveform strip under Load; the editor rows shift
+        // down for it and compact when the view is short (the tab).
+        const int waveH = juce::jlimit (52, 130, getHeight() / 5);
+        waveView.setBounds (ex, 98, juce::jmax (200, getWidth() - ex - 16), waveH);
+        const int rowsY = 98 + waveH + 8;
+        const int pitch = juce::jlimit (26, 36, (getHeight() - rowsY - 64) / 5);
+
         Row* rowsArr[] = { &startRow, &endRow, &tuneRow, &gainRow, &velRow };
         for (int i = 0; i < 5; ++i)
         {
-            rowsArr[i]->label.setBounds (ex, 108 + i * 36, 64, 24);
-            rowsArr[i]->slider.setBounds (ex + 66, 108 + i * 36, juce::jmax (160, getWidth() - ex - 84), 24);
+            rowsArr[i]->label.setBounds (ex, rowsY + i * pitch, 64, 24);
+            rowsArr[i]->slider.setBounds (ex + 66, rowsY + i * pitch, juce::jmax (160, getWidth() - ex - 84), 24);
         }
-        reverseToggle.setBounds (ex, 292, 130, 26);
-        muteLabel.setBounds (ex, 326, 84, 24);
-        muteGroupBox.setBounds (ex + 88, 326, 110, 24);
+        const int footY = rowsY + 5 * pitch + 6;
+        reverseToggle.setBounds (ex, footY, 130, 26);
+        muteLabel.setBounds (ex + 142, footY, 84, 24);
+        muteGroupBox.setBounds (ex + 230, footY, 110, 24);
     }
 
 private:
@@ -259,6 +448,8 @@ private:
         title.setText ("PAD " + juce::String (selected + 1), juce::dontSendNotification);
         const juce::String n = nameFor ? nameFor (selected) : juce::String();
         fileLabel.setText (n.isEmpty() ? "No sample loaded" : n, juce::dontSendNotification);
+        // item 44: the waveform follows the selected pad
+        waveView.setData (engine.getPadSampleData (selected), pp.startFrac, pp.endFrac);
     }
 
     void pushEditor()
@@ -272,11 +463,13 @@ private:
         pp.reverse = reverseToggle.getToggleState();
         pp.muteGroup = std::max (0, muteGroupBox.getSelectedId() - 1);
         engine.setPadParams (selected, pp);
+        waveView.setWindow (pp.startFrac, pp.endFrac); // the trim follows the sliders
     }
 
     void timerCallback() override
     {
         for (auto& p : pads) p.decayFlash();
+        waveView.setActive (pads[selected].isFlashing());
     }
 
     boombap::BoomBapEngine& engine;
@@ -288,6 +481,7 @@ private:
 
     juce::Label title, fileLabel, muteLabel, hint;
     juce::TextButton loadButton { "Load sample..." };
+    PadWaveView waveView;
     Row startRow, endRow, tuneRow, gainRow, velRow;
     juce::ToggleButton reverseToggle { "Reverse" };
     juce::ComboBox muteGroupBox;

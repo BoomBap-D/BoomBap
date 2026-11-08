@@ -3,6 +3,8 @@
 #include "PianoRoll.h"
 #include "Playlist.h"
 #include "Multitrack.h"
+#include "SequencerPanel.h"
+#include "DataHome.h"
 #include "WavWrite.h"
 
 using namespace juce;
@@ -16,6 +18,8 @@ boombap::ProjectData MainComponent::makeProjectData() const
         d.samplePaths[i] = samplePaths[i] == File() ? String() : samplePaths[i].getFullPathName();
     for (size_t i = 3; i < padFiles.size(); ++i)
         d.padPaths[i] = padFiles[i] == File() ? String() : padFiles[i].getFullPathName();
+    for (size_t t = 0; t < rowFiles.size(); ++t)
+        d.rowSamplePaths[t] = rowFiles[t] == File() ? String() : rowFiles[t].getFullPathName();
     d.vocalTakePath = takePath;
     d.exportBars = exportBars.getSelectedId();
     d.exportNormalize = normalizeToggle.getToggleState();
@@ -71,19 +75,13 @@ void MainComponent::applyProjectToUi (const boombap::ProjectData& d)
     pianoDecay.slider.setValue (s.pianoDecayMs, dontSendNotification);
     pianoLevel.slider.setValue (s.pianoLevel, dontSendNotification);
 
-    for (int t = 0; t < kTracks; ++t)
-    {
-        rows[t].mute.setToggleState (s.trackMute[t], dontSendNotification);
-        rows[t].solo.setToggleState (s.trackSolo[t], dontSendNotification);
-        rows[t].level.setValue (s.trackGain[t], dontSendNotification);
-    }
+    if (sequencerPanel != nullptr) sequencerPanel->refreshMixerFromSettings (s);
 
     exportBars.setSelectedId (d.exportBars, dontSendNotification);
     normalizeToggle.setToggleState (d.exportNormalize, dontSendNotification);
     if (pianoRoll != nullptr) pianoRoll->refreshFromEngine();
     if (playlist != nullptr) playlist->refreshFromEngine();
     if (multitrack != nullptr) multitrack->refreshFromEngine();
-    refreshPatternUi();
     refreshGrid();
 }
 
@@ -96,14 +94,30 @@ void MainComponent::newProject()
         engine.clearSample (boombap::BoomBapEngine::Sample1 + i);
         samplePaths[(size_t) i] = File();
         waveData[(size_t) i].clear();
-        rows[boombap::BoomBapEngine::Sample1 + i].load.setButtonText ("Load...");
+        waveRates[(size_t) i] = 0.0;
+        if (sequencerPanel != nullptr)
+            sequencerPanel->setRowLoadText (boombap::BoomBapEngine::Sample1 + i, "Load...");
     }
     for (int i = 3; i < 16; ++i)
     {
         engine.clearPad (i);
         padFiles[(size_t) i] = File();
     }
+    // fix pass 2: kit rows back to their built-in drums, added rows emptied
+    for (int t = 0; t <= boombap::BoomBapEngine::Clap; ++t)
+    {
+        engine.clearKitSample (t);
+        rowFiles[(size_t) t] = File();
+        if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (t, "Load...");
+    }
+    for (int t = boombap::BoomBapEngine::kFirstOwnRow; t < kTracks; ++t)
+    {
+        engine.clearSample (t);
+        rowFiles[(size_t) t] = File();
+        if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (t, "Load...");
+    }
     if (padBank != nullptr) padBank->refreshAll();
+    if (mpcPanel != nullptr) mpcPanel->refreshAll();
     engine.clearVocalTake();
     engine.clearAllAudioClips();
     if (multitrack != nullptr) multitrack->refreshFromEngine();
@@ -193,7 +207,7 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         const String path = d.samplePaths[(size_t) i];
         engine.clearSample (track);
         samplePaths[(size_t) i] = File();
-        rows[track].load.setButtonText ("Load...");
+        if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, "Load...");
 
         if (path.isEmpty())
             continue;
@@ -206,7 +220,7 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         else
         {
             samplePaths[(size_t) i] = f;                // keep the reference so a save doesn't lose it
-            rows[track].load.setButtonText ("Missing");
+            if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, "Missing");
             missing.add (f.getFileName());
         }
     }
@@ -229,6 +243,30 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         }
     }
     if (padBank != nullptr) padBank->refreshAll();
+    if (mpcPanel != nullptr) mpcPanel->refreshAll();
+
+    // fix pass 2: row-bound samples - kit rows (item 40) and added rows
+    for (int t = 0; t < kTracks; ++t)
+    {
+        if (! (t <= boombap::BoomBapEngine::Clap || t >= boombap::BoomBapEngine::kFirstOwnRow))
+            continue;
+        if (t <= boombap::BoomBapEngine::Clap) engine.clearKitSample (t);
+        else engine.clearSample (t);
+        rowFiles[(size_t) t] = File();
+        if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (t, "Load...");
+        const String path = d.rowSamplePaths[(size_t) t];
+        if (path.isEmpty())
+            continue;
+        const File f (path);
+        if (f.existsAsFile())
+            loadSampleFile (t, f);
+        else
+        {
+            rowFiles[(size_t) t] = f; // keep the reference, like the sample rows
+            if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (t, "Missing");
+            missing.add (f.getFileName());
+        }
+    }
 
     if (preserveEngineTake && d.vocalTakePath.isEmpty())
     {
@@ -263,6 +301,14 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
     }
 
     engine.restoreClipBuffersFromTake(); // clip regions came from the file; their audio is the take
+
+    // Item 61: NO INVISIBLE AUDIO. A take that arrives with a project or a
+    // host state restore and has no clip home yet gets one here, exactly
+    // like a fresh recording - placement also stands the raw take loop
+    // down, so it can never sound unexplained from behind the interface.
+    if (engine.hasTake() && ! engine.takeIsPlaced())
+        placeTakeAsClip();
+
     applyProjectToUi (d);
     loadingProject = false;
 
@@ -277,19 +323,15 @@ bool MainComponent::writeProject (const File& file)
 {
     if (engine.hasTake())
     {
-        const File takeFile = file.getParentDirectory()
-                                  .getChildFile (file.getFileNameWithoutExtension() + " - vocal.wav");
-        if (takeDirty || ! takeFile.existsAsFile())
+        // Item 62: the take's WAV lives in the BoomBap home (Takes) and the
+        // project references it - no more sidecar file beside the project.
+        ensureTakeFileInHome();
+        if (takePath.isEmpty() || ! File (takePath).existsAsFile())
         {
-            if (! writeTakeWav (takeFile))
-            {
-                AlertWindow::showMessageBoxAsync (MessageBoxIconType::WarningIcon, "Couldn't save vocal take",
-                                                  "BoomBap couldn't write " + takeFile.getFileName());
-                return false;
-            }
-            takeDirty = false;
+            AlertWindow::showMessageBoxAsync (MessageBoxIconType::WarningIcon, "Couldn't save vocal take",
+                                              "BoomBap couldn't write the take into " + boombap::takesDir().getFullPathName());
+            return false;
         }
-        takePath = takeFile.getFullPathName();
     }
     else
     {
@@ -385,7 +427,8 @@ void MainComponent::exportTo (const File& file)
     // still empty).
     const bool wantWholeSong = exportBars.getSelectedId() == 100 && engine.getSongLength() > 0;
     const bool songExport = engine.isSongMode() && engine.getSongLength() > 0;
-    const int bars = (songExport || wantWholeSong) ? engine.getSongLength() : exportBars.getSelectedId();
+    // a playlist slot is one pattern = two bars now (item 48)
+    const int bars = (songExport || wantWholeSong) ? engine.getSongLength() * 2 : exportBars.getSelectedId();
     const bool normalize = normalizeToggle.getToggleState();
     const double sampleRate = engine.getSampleRate();
 

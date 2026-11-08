@@ -11,6 +11,10 @@ BoomBapEditor::BoomBapEditor (BoomBapProcessor& p)
     // the UI in line with the project the processor is already holding.
     main.loadProjectData (proc.captureStateData(), false, true);
 
+    // Item 59: the editor opens on exactly ONE view - the step sequencer,
+    // the standalone's default - settled explicitly before first paint.
+    main.showInitialTab();
+
     // Pass 1 item 1: same landscape fit as the standalone - clamped to the
     // display's usable area, and resizable in the host.
     const auto* display = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();

@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "DataHome.h"
 
 BoomBapProcessor::BoomBapProcessor()
     : AudioProcessor (BusesProperties()
@@ -163,8 +164,10 @@ bool BoomBapProcessor::writeTakeTempFile (juce::File& outFile)
     const auto data = engine.getTakeData();
     if (data.empty()) return false;
 
-    outFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                  .getChildFile ("BoomBap plugin take.wav");
+    // Item 62: a plugin take is a real WAV in the BoomBap home's Takes
+    // folder - findable by the user, never parked in a temp directory.
+    boombap::ensureDataHome();
+    outFile = boombap::takesDir().getChildFile ("BoomBap plugin take.wav");
     outFile.deleteFile();
 
     juce::AudioBuffer<float> buffer (1, (int) data.size());

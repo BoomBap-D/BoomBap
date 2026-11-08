@@ -50,6 +50,9 @@ public:
 
     bool isActive() const { return active; }
 
+    // Fix pass 2 item 45: hard silence on demand (the global stop).
+    void stop() { active = false; toneEnv = noiseEnv = 0.0f; }
+
     float process()
     {
         if (! active)

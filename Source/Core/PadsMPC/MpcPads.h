@@ -58,6 +58,13 @@ public:
         return valid (pad) && samples[pad].size() >= 2;
     }
 
+    // Read-only access for displays (the pad bank's waveform strip).
+    const std::vector<float>& getSampleData (int pad) const
+    {
+        static const std::vector<float> empty;
+        return valid (pad) ? samples[pad] : empty;
+    }
+
     void trigger (int pad, float velocity = 1.0f)
     {
         triggerWithTune (pad, velocity, 0.0f);

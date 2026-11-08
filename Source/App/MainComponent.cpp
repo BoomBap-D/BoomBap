@@ -3,7 +3,9 @@
 #include "PianoRoll.h"
 #include "Playlist.h"
 #include "Multitrack.h"
+#include "SequencerPanel.h"
 #include "AppSettings.h"
+#include "DataHome.h"
 
 using namespace juce;
 
@@ -32,6 +34,29 @@ public:
 private:
     std::function<void()> closeCallback;
 };
+
+// A Production Area view popped out into its own window (items 37/42):
+// closing the window docks the view back onto its tab.
+class PopOutWindow : public juce::DocumentWindow
+{
+public:
+    PopOutWindow (const String& name, std::function<void()> onClose)
+        : DocumentWindow (name, boombap::ui::bg(), juce::DocumentWindow::closeButton),
+          closeCallback (std::move (onClose))
+    {
+        setUsingNativeTitleBar (true);
+        setResizable (true, true);
+        setResizeLimits (560, 320, 4000, 3000);
+    }
+
+    void closeButtonPressed() override
+    {
+        if (closeCallback) closeCallback();
+    }
+
+private:
+    std::function<void()> closeCallback;
+};
 } // namespace
 
 //==============================================================================
@@ -39,6 +64,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     : engine (eng), ownAudioDevice (useOwnAudioDevice)
 {
     formats.registerBasicFormats();
+    boombap::ensureDataHome(); // item 62: Documents/BoomBap exists from first run, both shells
     setLookAndFeel (&lookAndFeel);
     setSize (1560, 900); // Pass 1 item 1: landscape design size; the layout scales to fit smaller windows
     setWantsKeyboardFocus (true);
@@ -115,6 +141,17 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     waveView.onClick = [this] { openSampleChooser (boombap::BoomBapEngine::Sample1 + waveTrack); };
     showWaveform (0);
 
+    // item 46: the waveform panel auditions its own sample, on its own
+    // button - and the global stop silences it like everything else.
+    addAndMakeVisible (wavePlayButton);
+    wavePlayButton.onClick = [this]
+    {
+        if (engine.isAuditionPlaying()) { engine.stopAudition(); return; }
+        if (! waveData[waveTrack].empty())
+            engine.startAudition (waveData[waveTrack],
+                                  waveRates[waveTrack] > 0.0 ? waveRates[waveTrack] : engine.getSampleRate());
+    };
+
     // ---- pad bank (own window, built on first open - a DocumentWindow shows itself when created, so it must not be built at launch) ----
     addAndMakeVisible (padBankButton);
     padBankButton.onClick = [this] { openPadBank(); };
@@ -123,37 +160,67 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     addAndMakeVisible (pianoButton);
     pianoButton.onClick = [this] { openPianoRoll(); };
 
-    // ---- pattern selector (lives in the grid header strip) ----
-    patternLabel.setText ("PATTERN", dontSendNotification);
-    patternLabel.setColour (Label::textColourId, boombap::ui::muted());
-    patternLabel.setFont (juce::Font (10.5f, juce::Font::bold));
-    addAndMakeVisible (patternLabel);
-    for (int i = 0; i < 8; ++i)
+    // ---- the Production Area (fix pass 2, items 37/42): a labelled,
+    // outlined TAB BAR - STEP SEQUENCER / MPC PANEL / AUDIO MULTITRACK -
+    // replacing the old corner toggle D could not find. Every tab can
+    // pop out into its own window and dock back (his Reaper grammar).
     {
-        auto& b = patternButtons[(size_t) i];
-        b.setButtonText (String::charToString ((juce_wchar) ('A' + i)));
-        b.onClick = [this, i]
+        const char* names[3] = { "STEP SEQUENCER", "MPC PANEL", "AUDIO MULTITRACK" };
+        for (int i = 0; i < 3; ++i)
         {
-            engine.setEditPattern (i);
-            refreshGrid();
-            refreshPatternUi();
-            if (pianoRoll != nullptr) pianoRoll->refreshFromEngine();
-        };
-        addAndMakeVisible (b);
+            tabButtons[i].setButtonText (names[i]);
+            tabButtons[i].onClick = [this, i] { selectTab (i); };
+            addAndMakeVisible (tabButtons[i]);
+        }
     }
-    refreshPatternUi();
+    popOutButton.onClick = [this] { togglePopOut(); };
+    addAndMakeVisible (popOutButton);
+    tabPoppedLabel.setText ("This view is open in its own window - close that window, or press Pop out again, to dock it back here.",
+                            dontSendNotification);
+    tabPoppedLabel.setColour (Label::textColourId, boombap::ui::muted());
+    tabPoppedLabel.setJustificationType (Justification::centred);
+    tabPoppedLabel.setVisible (false);
+    addAndMakeVisible (tabPoppedLabel);
+
+    {
+        SequencerPanel::Callbacks scb;
+        scb.onLoadSample = [this] (int t) { openSampleChooser (t); };
+        scb.onRoll = [this] (int t) { openPianoRollFor (t); };
+        scb.onNameMenu = [this] (int t) { showKitMenu (t); };
+        scb.onPatternChanged = [this] { if (pianoRoll != nullptr) pianoRoll->refreshFromEngine(); };
+        sequencerPanel = std::make_unique<SequencerPanel> (engine, scb);
+    }
+    sequencerPanel->setLookAndFeel (&lookAndFeel);
+    addAndMakeVisible (sequencerPanel.get());
+
+    // The MPC PANEL tab: its own pad bank instance (pads + the selected
+    // pad's waveform and trim, item 44) - same engine, same samples as
+    // the standalone Pad Bank window; both stay in step through it.
+    mpcPanel = std::make_unique<PadBankComponent> (engine,
+        [this] (int pad) { openPadChooser (pad); },
+        [this] (int pad) { return padDisplayName (pad); });
+    mpcPanel->setLookAndFeel (&lookAndFeel);
+    // Item 59: hidden tabs are added as CHILD components, never via
+    // addAndMakeVisible (which un-hides them) - updateTabChrome below is
+    // the single authority on which production view is visible, so the
+    // editor can never open with two views drawn on top of each other.
+    addChildComponent (mpcPanel.get());
+    mpcPanel->setVisible (false);
+
+    multitrack = std::make_unique<MultitrackComponent> (engine, [] {},
+        [this] { startAudioOnlyPlayback(); },
+        [this] { stopTransport(); });
+    multitrack->setLookAndFeel (&lookAndFeel);
+    addChildComponent (multitrack.get());
+    multitrack->setVisible (false);
+    multitrack->setHomePathText ("BoomBap home: " + boombap::dataHome().getFullPathName()
+                                 + "  -  takes land in its Takes folder");
+    updateTabChrome();
+    refreshGrid();
 
     // ---- playlist (own window) ----
     addAndMakeVisible (playlistButton);
     playlistButton.onClick = [this] { openPlaylist(); };
-
-    // ---- work-area view switch (Fix pass item 35) + the multitrack ----
-    addAndMakeVisible (viewButton);
-    viewButton.onClick = [this] { setAudioView (! audioView); };
-    multitrack = std::make_unique<MultitrackComponent> (engine, [] {});
-    multitrack->setLookAndFeel (&lookAndFeel);
-    multitrack->setVisible (false);
-    addAndMakeVisible (multitrack.get());
 
     addAndMakeVisible (dustRate.slider);
     addAndMakeVisible (glueThreshold.slider);
@@ -161,58 +228,6 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
                  [this] { engine.setDustRate ((float) dustRate.slider.getValue()); });
     setupSlider (glueThreshold, "Thresh", -30.0, 0.0, -12.0, 0.5, " dB",
                  [this] { engine.setGlueThresholdDb ((float) glueThreshold.slider.getValue()); });
-
-    // ---- grid rows ----
-    for (int t = 0; t < kTracks; ++t)
-    {
-        Row& row = rows[t];
-        addAndMakeVisible (row.name);
-        row.name.setText (boombap::BoomBapEngine::trackName (t), dontSendNotification);
-        row.name.setColour (Label::textColourId, Colours::white);
-
-        if (t >= boombap::BoomBapEngine::Sample1)
-        {
-            addAndMakeVisible (row.load);
-            row.load.onClick = [this, t] { openSampleChooser (t); };
-        }
-
-        // Fix pass item 28: pitched rows summon the piano roll bound to
-        // themselves - the kick (the pitched melody sound) and the sample
-        // rows (their own pad, pitched).
-        if (t == boombap::BoomBapEngine::Kick || t >= boombap::BoomBapEngine::Sample1)
-        {
-            addAndMakeVisible (row.roll);
-            row.roll.onClick = [this, t] { openPianoRollFor (t); };
-        }
-
-        addAndMakeVisible (row.mute);
-        row.mute.setClickingTogglesState (true);
-        row.mute.setColour (TextButton::buttonOnColourId, Colours::indianred);
-        row.mute.onClick = [this, t] { engine.setTrackMute (t, rows[t].mute.getToggleState()); };
-
-        addAndMakeVisible (row.solo);
-        row.solo.setClickingTogglesState (true);
-        row.solo.setColour (TextButton::buttonOnColourId, Colour (0xffa8871a));
-        row.solo.onClick = [this, t] { engine.setTrackSolo (t, rows[t].solo.getToggleState()); };
-
-        addAndMakeVisible (row.level);
-        addAndMakeVisible (row.meter);
-        row.level.setSliderStyle (Slider::LinearHorizontal);
-        row.level.setTextBoxStyle (Slider::NoTextBox, false, 0, 0);
-        row.level.setRange (0.0, 1.2, 0.01);
-        row.level.setValue (0.8, dontSendNotification);
-        row.level.setDoubleClickReturnValue (true, 0.8); // Pass 1: double-click reset
-        row.level.onValueChange = [this, t] { engine.setTrackGain (t, (float) rows[t].level.getValue()); };
-
-        for (int s = 0; s < kSteps; ++s)
-        {
-            StepButton& sb = row.steps[s];
-            addAndMakeVisible (sb);
-            sb.setBeatShade ((s / 4) % 2 == 0);
-            sb.onChange = [this, t, s] (int v) { engine.setStep (t, s, v); };
-        }
-    }
-    refreshGrid();
 
     // ---- drum sound ----
     for (auto* s : { &kickTune, &kickDecay, &snareSnappy, &openHatDecay, &clapTail })
@@ -266,7 +281,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     addAndMakeVisible (takeToggle);
     addAndMakeVisible (takeLabel);
     recordButton.onClick = [this] { toggleRecording(); };
-    takeToggle.setToggleState (true, dontSendNotification);
+    takeToggle.setToggleState (false, dontSendNotification); // item 56: off until chosen
     takeToggle.onClick = [this] { engine.setTakeEnabled (takeToggle.getToggleState()); refreshTakeUi(); };
     takeLabel.setColour (Label::textColourId, boombap::ui::muted());
     refreshTakeUi();
@@ -384,9 +399,7 @@ void MainComponent::pushAllParams()
 
 void MainComponent::refreshGrid()
 {
-    for (int t = 0; t < kTracks; ++t)
-        for (int s = 0; s < kSteps; ++s)
-            rows[t].steps[s].setVelocity (engine.getStep (t, s));
+    if (sequencerPanel != nullptr) sequencerPanel->refreshGrid();
 }
 
 // Fix pass item 29: one instrument at a time. The switcher shows the chosen
@@ -413,39 +426,98 @@ void MainComponent::selectInstrument (int which)
     repaint();
 }
 
-// Fix pass item 35: one button swaps the top work area between the step
-// sequencer and the audio multitrack (D's Reaper grammar).
-void MainComponent::setAudioView (bool audio)
+// Fix pass 2, items 37/42: the Production Area tabs. A tab's content is
+// either docked here or living in its own pop-out window - never both,
+// never lost.
+juce::Component* MainComponent::tabContent (int index)
 {
-    audioView = audio;
-    viewButton.setButtonText (audio ? "STEPS" : "AUDIO");
+    if (index == 0) return sequencerPanel.get();
+    if (index == 1) return mpcPanel.get();
+    return multitrack.get();
+}
 
-    for (int t = 0; t < kTracks; ++t)
-    {
-        Row& row = rows[t];
-        row.name.setVisible (! audio);
-        row.load.setVisible (! audio && t >= boombap::BoomBapEngine::Sample1);
-        row.roll.setVisible (! audio && (t == boombap::BoomBapEngine::Kick
-                                         || t >= boombap::BoomBapEngine::Sample1));
-        row.mute.setVisible (! audio);
-        row.solo.setVisible (! audio);
-        row.level.setVisible (! audio);
-        row.meter.setVisible (! audio);
-        for (int s = 0; s < kSteps; ++s)
-            row.steps[s].setVisible (! audio);
-    }
-    patternLabel.setVisible (! audio);
-    for (auto& b : patternButtons)
-        b.setVisible (! audio);
-
-    if (multitrack != nullptr)
-    {
-        multitrack->setVisible (audio);
-        if (audio)
-            multitrack->refreshFromEngine();
-    }
+void MainComponent::selectTab (int index)
+{
+    activeTab = index;
+    updateTabChrome();
+    if (index == 2 && multitrack != nullptr && ! tabPoppedOut[2])
+        multitrack->refreshFromEngine();
     resized();
     repaint();
+}
+
+void MainComponent::togglePopOut()
+{
+    if (tabPoppedOut[activeTab]) dockTab (activeTab);
+    else popOutTab (activeTab);
+}
+
+void MainComponent::popOutTab (int index)
+{
+    auto* content = tabContent (index);
+    if (content == nullptr || tabPoppedOut[index]) return;
+    static const char* titles[3] = { "BoomBap - Step Sequencer", "BoomBap - MPC Panel", "BoomBap - Audio Multitrack" };
+    auto win = std::make_unique<PopOutWindow> (titles[index], [this, index] { dockTab (index); });
+    win->setContentOwned (content, false);
+    win->setSize (juce::jmax (760, content->getWidth()), juce::jmax (380, content->getHeight() + 40));
+    win->centreWithSize (win->getWidth(), win->getHeight());
+    productionWindows[index] = std::move (win);
+    productionWindows[index]->setVisible (true);
+    tabPoppedOut[index] = true;
+    updateTabChrome();
+    resized();
+    repaint();
+}
+
+void MainComponent::dockTab (int index)
+{
+    auto* content = tabContent (index);
+    if (content == nullptr) { tabPoppedOut[index] = false; return; }
+    if (productionWindows[index] != nullptr)
+    {
+        productionWindows[index]->clearContentComponent();
+        productionWindows[index].reset();
+    }
+    tabPoppedOut[index] = false;
+    addChildComponent (content); // item 59: updateTabChrome decides visibility
+    if (index == 2) multitrack->refreshFromEngine();
+    updateTabChrome();
+    resized();
+    repaint();
+}
+
+void MainComponent::updateTabChrome()
+{
+    for (int i = 0; i < 3; ++i)
+    {
+        const bool sel = i == activeTab;
+        tabButtons[i].setColour (TextButton::buttonColourId, sel ? boombap::ui::accent() : boombap::ui::panelAlt());
+        tabButtons[i].setColour (TextButton::textColourOffId, sel ? Colour (0xff14100a) : boombap::ui::text());
+        auto* c = tabContent (i);
+        if (c != nullptr && ! tabPoppedOut[i])
+            c->setVisible (sel);
+    }
+    popOutButton.setButtonText (tabPoppedOut[activeTab] ? "Dock back" : "Pop out");
+    tabPoppedLabel.setVisible (tabPoppedOut[activeTab]);
+}
+
+// Item 40: clicking a kit row's name offers to change that row's sound.
+void MainComponent::showKitMenu (int track)
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, "Load sample for this row...");
+    menu.addItem (2, "Reset to the built-in sound", engine.kitHasSample (track));
+    menu.showMenuAsync (juce::PopupMenu::Options(), [this, track] (int choice)
+    {
+        if (choice == 1) openSampleChooser (track);
+        else if (choice == 2)
+        {
+            engine.clearKitSample (track);
+            rowFiles[track] = juce::File();
+            if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, "Load...");
+            fireMediaChanged();
+        }
+    });
 }
 
 // Fix pass item 32: when a take finishes, it lands on the audio track as a
@@ -469,14 +541,50 @@ void MainComponent::startTransport()
     engine.setPlaying (true);
 }
 
+// Item 45: STOP MEANS ALL SOUND OFF. One press ends a take in progress
+// (cleanly - what was recorded lands as a clip), stops both transports
+// and kills every voice in the engine behind a few-ms click fade. There
+// is no sound this button cannot stop; D killed the app twice learning
+// the old one's limits.
 void MainComponent::stopTransport()
 {
-    engine.setPlaying (false);
+    if (engine.isRecording())
+    {
+        engine.stopRecording();
+        engine.finishTake();
+        takeDirty = true;
+        placeTakeAsClip();
+        uiRecording = false;
+        refreshTakeUi();
+    }
+    engine.stopAllSound();
+}
+
+// Item 47: the audio view's own PLAY - the audio tracks alone, from the
+// audio playhead, no beat behind them.
+void MainComponent::startAudioOnlyPlayback()
+{
+    engine.setAudioPlaying (true);
 }
 
 bool MainComponent::keyPressed (const KeyPress& key)
 {
-    if (key == KeyPress::spaceKey) { togglePlay(); return true; }
+    if (key == KeyPress::spaceKey)
+    {
+        // Stop gets the spacebar too when anything is sounding: the same
+        // all-sound-off, never a polite pause that leaves voices ringing.
+        if (engine.isPlaying() || engine.isAudioPlaying() || engine.isRecording())
+            stopTransport();
+        else
+            startTransport();
+        return true;
+    }
+    if ((key == KeyPress::deleteKey || key == KeyPress::backspaceKey)
+        && activeTab == 2 && multitrack != nullptr && ! tabPoppedOut[2])
+    {
+        multitrack->deleteSelectedClip();
+        return true;
+    }
 
     const auto mods = key.getModifiers();
     if (mods.isCommandDown())
@@ -491,14 +599,7 @@ bool MainComponent::keyPressed (const KeyPress& key)
 
 void MainComponent::timerCallback()
 {
-    const int s = engine.currentStep();
-    if (s != lastPlayStep)
-    {
-        lastPlayStep = s;
-        for (int t = 0; t < kTracks; ++t)
-            for (int st = 0; st < kSteps; ++st)
-                rows[t].steps[st].setPlaying (st == s);
-    }
+    if (sequencerPanel != nullptr) sequencerPanel->tick();
 
     const bool playingNow = engine.isPlaying();
     if (playingNow != lastPlayingState)
@@ -510,11 +611,11 @@ void MainComponent::timerCallback()
 
     if (++dirtyTick >= 8) { dirtyTick = 0; updateProjectLabel(); }
 
-    for (int t = 0; t < kTracks; ++t)
+    // the waveform panel's audition button tells the truth (item 46)
     {
-        const float peak = engine.consumeTrackPeak (t);
-        meterShown[t] = std::max (peak, meterShown[t] * 0.82f);
-        rows[t].meter.setLevel (meterShown[t]);
+        const bool aud = engine.isAuditionPlaying();
+        const juce::String want = aud ? "STOP" : "PLAY";
+        if (wavePlayButton.getButtonText() != want) wavePlayButton.setButtonText (want);
     }
 
     // pad activity (Pass 1 item 4b): light + pad-set meter here, flash in the pad bank
@@ -522,8 +623,12 @@ void MainComponent::timerCallback()
     padShown = std::max (padPeak, padShown * 0.82f);
     padMeter.setLevel (padShown);
     padLight.setLevel (padShown);
-    if (padBank != nullptr && padPeak > 0.02f)
-        padBank->showActivity (engine.lastTriggeredPad());
+    const int lastPad = engine.lastTriggeredPad();
+    if (padPeak > 0.02f)
+    {
+        if (padBank != nullptr) padBank->showActivity (lastPad);
+        if (mpcPanel != nullptr) mpcPanel->showActivity (lastPad);
+    }
 
     // pad capture (Fix pass item 31): a captured hit flashes its pad and the
     // new step shows in the grid straight away
@@ -531,6 +636,7 @@ void MainComponent::timerCallback()
     if (captured >= 0)
     {
         if (padBank != nullptr) padBank->showActivity (captured);
+        if (mpcPanel != nullptr) mpcPanel->showActivity (captured);
         refreshGrid();
     }
 
@@ -544,6 +650,7 @@ void MainComponent::timerCallback()
 
     const bool recNow = engine.isRecording();
     if (uiRecording && ! recNow) { engine.finishTake(); takeDirty = true; placeTakeAsClip(); }
+    if (takeDirty && engine.hasTake()) ensureTakeFileInHome(); // item 62: the take gets its WAV home promptly
     if (recNow != uiRecording || recNow) refreshTakeUi();
     uiRecording = recNow;
 
@@ -741,7 +848,7 @@ void MainComponent::paint (Graphics& g)
         g.drawRoundedRectangle (r, 12.0f, 1.0f);
     };
     drawPanel (8, 46, 1544, 118);    // transport + master FX
-    drawPanel (8, 172, 1544, 384);   // step grid
+    drawPanel (8, 172, 1544, 384);   // production area (tabbed)
     drawPanel (8, 564, 764, 140);    // sample waveform
     drawPanel (780, 564, 772, 140);  // vocal
     drawPanel (8, 712, 420, 180);    // drum sound
@@ -761,15 +868,6 @@ void MainComponent::paint (Graphics& g)
     g.setFont (11.0f);
     g.drawText ("One instrument at a time - its roll opens from the button above, or from a track's ROLL button.",
                 RB (448, 856, 736, 20), Justification::left);
-    if (! audioView)
-    {
-        g.drawText ("Click a step: normal, accent, off.  Right-click clears.  Space = play/stop.  Ctrl/Cmd+S = save.",
-                    RB (440, 182, 1105, 24), Justification::left);
-
-        g.setFont (12.0f);
-        for (int s = 0; s < kSteps; s += 4)
-            g.drawText (String (s / 4 + 1), RB (398 + s * 66 + (s / 4) * 8, 212, 40, 14), Justification::centredLeft);
-    }
 }
 
 void MainComponent::resized()
@@ -814,37 +912,27 @@ void MainComponent::resized()
     glueThreshold.slider.setBounds (RB (1010, 114, 200, 38));
     glueBar.setBounds (RB (1240, 118, 200, 12));
     glueMeter.setBounds (RB (1240, 132, 200, 18));
-    viewButton.setBounds (RB (1456, 114, 88, 38));
 
-    // pattern selector strip (in the grid panel header)
-    patternLabel.setBounds (RB (20, 182, 70, 24));
-    for (int i = 0; i < 8; ++i)
-        patternButtons[(size_t) i].setBounds (RB (96 + i * 40, 182, 36, 24));
-
-    // grid
-    for (int t = 0; t < kTracks; ++t)
-    {
-        Row& row = rows[t];
-        const int y = 232 + t * 40;
-        row.name.setBounds (RB (20, y, 92, 36));
-        row.load.setBounds (RB (116, y + 5, 54, 26));
-        row.roll.setBounds (RB (174, y + 5, 46, 26));
-        row.mute.setBounds (RB (224, y + 5, 28, 26));
-        row.solo.setBounds (RB (256, y + 5, 28, 26));
-        row.level.setBounds (RB (292, y, 94, 36));
-        for (int s = 0; s < kSteps; ++s)
-            row.steps[s].setBounds (RB (398 + s * 66 + (s / 4) * 8, y, 60, 36));
-        row.meter.setBounds (RB (1480, y + 14, 60, 8));
-    }
-
-    // multitrack (audio view) fills the grid panel
-    if (multitrack != nullptr)
-        multitrack->setBounds (RB (16, 180, 1528, 368));
+    // Production Area: the tab bar in the panel header, the active view
+    // below it (items 37/42). A popped-out view keeps its own window's
+    // size, so it is only laid out here while docked.
+    tabButtons[0].setBounds (RB (20, 178, 190, 28));
+    tabButtons[1].setBounds (RB (218, 178, 150, 28));
+    tabButtons[2].setBounds (RB (376, 178, 210, 28));
+    popOutButton.setBounds (RB (1420, 178, 112, 28));
+    tabPoppedLabel.setBounds (RB (16, 212, 1528, 336));
+    if (sequencerPanel != nullptr && ! tabPoppedOut[0])
+        sequencerPanel->setBounds (RB (8, 210, 1544, 340));
+    if (mpcPanel != nullptr && ! tabPoppedOut[1])
+        mpcPanel->setBounds (RB (16, 212, 1528, 336));
+    if (multitrack != nullptr && ! tabPoppedOut[2])
+        multitrack->setBounds (RB (16, 212, 1528, 336));
 
     // waveform panel
     for (int i = 0; i < 3; ++i)
         waveSel[i].setBounds (RB (226 + i * 44, 574, 38, 22));
-    waveName.setBounds (RB (368, 574, 380, 22));
+    waveName.setBounds (RB (368, 574, 300, 22));
+    wavePlayButton.setBounds (RB (676, 574, 80, 22));
     waveView.setBounds (RB (16, 602, 748, 92));
 
     // vocal panel
@@ -854,8 +942,8 @@ void MainComponent::resized()
     vocalDistance.slider.setBounds (RB (880, 632, 260, 26));
     vocalInput.slider.setBounds (RB (1228, 632, 260, 26));
     recordButton.setBounds (RB (792, 666, 92, 26));
-    takeToggle.setBounds (RB (892, 666, 76, 26));
-    takeLabel.setBounds (RB (976, 666, 560, 26));
+    takeToggle.setBounds (RB (892, 666, 110, 26));
+    takeLabel.setBounds (RB (1010, 666, 526, 26));
 
     // drum sound panel
     LabeledSlider* drum[] = { &kickTune, &kickDecay, &snareSnappy, &openHatDecay, &clapTail };

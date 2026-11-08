@@ -149,7 +149,8 @@ private:
             text = "Song mode is on, but the chain is empty - add patterns below.";
         else
         {
-            text = "Song: " + juce::String (len) + (len == 1 ? " bar" : " bars") + " - ";
+            text = "Song: " + juce::String (len) + (len == 1 ? " pattern" : " patterns")
+                 + " (" + juce::String (len * 2) + " bars) - ";
             for (int i = 0; i < len; ++i)
             {
                 if (i > 0) text += " ";

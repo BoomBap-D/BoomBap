@@ -18,6 +18,10 @@ struct ProjectData
     std::array<juce::String, 3> samplePaths;  // absolute path per sample track; empty = unused
     std::array<juce::String, 16> padPaths;    // sample files for pads 4-16 (indices 3-15);
                                               // pads 1-3 are the sample tracks above
+    // Fix pass 2: files bound directly to a row - the kit rows' replacement
+    // samples (item 40, tracks 0-4) and the own-buffer rows past the pad
+    // bank (item 39, tracks 21+). Indexed by track; empty = unbound.
+    std::array<juce::String, ProjectSettings::kTracks> rowSamplePaths;
     int  exportBars = 4;
     bool exportNormalize = true;
     juce::String vocalTakePath;   // the recorded vocal take's WAV file; empty = no take

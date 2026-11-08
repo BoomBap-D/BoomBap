@@ -115,12 +115,34 @@ String projectToJson (const ProjectData& d, const File& projectFile)
         audioClipsArr.add (object ({ { "slot", i },
                                       { "start", (double) s.audioClips[i].startSamples },
                                       { "sourceStart", (double) s.audioClips[i].sourceStart },
-                                      { "length", (double) s.audioClips[i].lengthSamples } }));
+                                      { "length", (double) s.audioClips[i].lengthSamples },
+                                      { "track", s.audioClips[i].track } }));
+    }
+
+    // Fix pass 2: rows bound directly to a file (kit replacements + the
+    // own-buffer rows), and the track-list size. Older files have neither.
+    Array<var> rowSamples;
+    for (int t = 0; t < ProjectSettings::kTracks; ++t)
+    {
+        if (d.rowSamplePaths[(size_t) t].isEmpty()) continue;
+        const bool direct = (t <= 4) || (t >= 21);
+        if (! direct) continue;
+        const File f (d.rowSamplePaths[(size_t) t]);
+        const String rel = projectFile == File() ? f.getFullPathName()
+                                                 : f.getRelativePathFrom (projectFile.getParentDirectory());
+        auto* o = new DynamicObject();
+        o->setProperty ("track", t);
+        o->setProperty ("path", f.getFullPathName());
+        if (! File::isAbsolutePath (rel)) o->setProperty ("relativePath", rel);
+        rowSamples.add (var (o));
     }
 
     var root = object ({
         { "format", "boombap-project" },
         { "version", kProjectFormatVersion },
+        { "numTracks", s.numTracks },
+        { "numAudioTracks", s.numAudioTracks },
+        { "rowSamples", var (rowSamples) },
         { "tempo", object ({ { "bpm", (double) s.bpm }, { "swing", (double) s.swing } }) },
         { "master", object ({ { "gainDb", (double) s.masterDb } }) },
         { "patterns", var (patterns) },
@@ -190,6 +212,8 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
     s.bpm = getF (tempo, "bpm", s.bpm);
     s.swing = getF (tempo, "swing", s.swing);
     s.masterDb = getF (root.getProperty ("master", var()), "gainDb", s.masterDb);
+    s.numTracks = getI (root, "numTracks", s.numTracks); // fix pass 2 (older files: the default 8)
+    s.numAudioTracks = getI (root, "numAudioTracks", s.numAudioTracks); // item 60 (older files: 1)
 
     if (auto* pats = root.getProperty ("patterns", var()).getArray())
     {
@@ -339,6 +363,27 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
         }
     }
 
+    if (auto* rs = root.getProperty ("rowSamples", var()).getArray())
+    {
+        for (const var& item : *rs)
+        {
+            const int track = getI (item, "track", -1);
+            if (track < 0 || track >= ProjectSettings::kTracks) continue;
+            if (! (track <= 4 || track >= 21)) continue;
+            const String rel = item.getProperty ("relativePath", var()).toString();
+            const String abs = item.getProperty ("path", var()).toString();
+            File resolved;
+            if (rel.isNotEmpty())
+            {
+                const File viaRelative = projectFile.getParentDirectory().getChildFile (rel);
+                if (viaRelative.existsAsFile()) resolved = viaRelative;
+            }
+            if (resolved == File() && abs.isNotEmpty())
+                resolved = File (abs);
+            d.rowSamplePaths[(size_t) track] = resolved.getFullPathName();
+        }
+    }
+
     {
         const var vt = root.getProperty ("vocalTake", var());
         if (vt.isObject())
@@ -373,6 +418,7 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
             s.audioClips[slot].startSamples  = getL (item, "start", 0);
             s.audioClips[slot].sourceStart   = getL (item, "sourceStart", 0);
             s.audioClips[slot].lengthSamples = getL (item, "length", 0);
+            s.audioClips[slot].track         = getI (item, "track", 0); // item 60 (older files: track 0)
             s.audioClips[slot].active        = s.audioClips[slot].lengthSamples > 0;
         }
     s.sanitize();

@@ -32,6 +32,8 @@ target_sources(BoomBap PRIVATE
     Source/App/PadBank.h
     Source/App/PianoRoll.h
     Source/App/Playlist.h
+    Source/App/Multitrack.h
+    Source/App/SequencerPanel.h
     Source/App/ProjectFile.cpp
     Source/App/ProjectFile.h
     Source/App/Engine/BoomBapEngine.h)
@@ -83,6 +85,8 @@ target_sources(BoomBapPlugin PRIVATE
     Source/App/PadBank.h
     Source/App/PianoRoll.h
     Source/App/Playlist.h
+    Source/App/Multitrack.h
+    Source/App/SequencerPanel.h
     Source/App/ProjectFile.cpp
     Source/App/ProjectFile.h
     Source/App/Engine/BoomBapEngine.h)
@@ -145,6 +149,26 @@ if(BOOMBAP_BUILD_TESTS)
         target_link_libraries(EditorLifecycleTest PRIVATE X11)
     endif()
     add_test(NAME editor_lifecycle COMMAND EditorLifecycleTest)
+
+    # plugin render test (items 59/61/64: first-open view state, restored
+    # take homing, and measured Glue/Dust/mic verdicts through processBlock)
+    add_executable(PluginRenderTest
+        Tests/PluginRenderTest.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(PluginRenderTest PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(PluginRenderTest PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(PluginRenderTest PRIVATE X11)
+    endif()
+    add_test(NAME plugin_render COMMAND PluginRenderTest)
 
     # recent-projects list test (storage logic, no UI)
     add_executable(RecentProjectsTest Tests/RecentProjectsTest.cpp)

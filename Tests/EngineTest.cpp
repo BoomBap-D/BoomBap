@@ -436,15 +436,17 @@ int main()
             sg->setBpm (220.0f);
             sg->setPlaying (true);
             const int bar = (int) (sr * 240.0 / 220.0);
-            const auto song = render (*sg, bar * 2 - 1000);
+            // Fix pass 2 (item 48): a pattern spans TWO bars now, so the
+            // chain advances every two bars - A fills bars 1-2, B bars 3-4.
+            const auto song = render (*sg, bar * 4 - 1000);
             auto peakRange = [] (const std::vector<float>& v, int from, int to)
             {
                 float pk = 0.0f;
                 for (int i = from; i < to && i < (int) v.size(); ++i) pk = std::max (pk, std::abs (v[(size_t) i]));
                 return pk;
             };
-            assert (peakRange (song, 0, bar) < 0.01f);             // bar 1 = pattern A: silence
-            assert (peakRange (song, bar, bar * 2 - 1000) > 0.3f); // bar 2 = pattern B: the kick
+            assert (peakRange (song, 0, bar * 2) < 0.01f);             // bars 1-2 = pattern A: silence
+            assert (peakRange (song, bar * 2, bar * 4 - 1000) > 0.3f); // bars 3-4 = pattern B: the kick
             assert (sg->getPlayPattern() == 1 && sg->getPlaySongPos() == 1);
             std::printf ("Patterns + song chain: ok\n");
         }
@@ -556,7 +558,9 @@ int main()
         assert (! anyInP2); // transport stopped: no capture either
         std::printf ("Pad capture: ok\n");
 
-        // whole-song render length (item 34): 16-bar song + tail
+        // whole-song render length (item 34): a 16-pattern song is 32 bars
+        // of audio now (each pattern spans 2 bars, item 48) + tail. The app
+        // asks renderOffline for songLength * 2 bars in song mode.
         auto song = fresh();
         song->setStep (BoomBapEngine::Kick, 0, 100);
         for (int s = 0; s < 16; ++s) song->setSongSlot (s, 0);
@@ -564,8 +568,8 @@ int main()
         auto songClone = fresh();
         songClone->copySettingsFrom (*song);
         songClone->setSongMode (true);
-        const auto wholeSong = renderOffline (*songClone, 16, 44100.0, 2.0f, false);
-        const long long expectWhole = std::llround (16.0 * 384.0 * (60.0 / 120.0 / 96.0) * 44100.0)
+        const auto wholeSong = renderOffline (*songClone, 32, 44100.0, 2.0f, false);
+        const long long expectWhole = std::llround (32.0 * 384.0 * (60.0 / 90.0 / 96.0) * 44100.0)
                                       + (long long) (2.0 * 44100.0);
         assert ((long long) wholeSong[0].size() == expectWhole);
         std::printf ("Whole-song render length: ok\n");
@@ -590,13 +594,20 @@ int main()
         cl->trimAudioClip (slot, 44100, 11025, 44100);
         region = cl->getAudioClip (slot);
         assert (region.sourceStart == 11025 && region.lengthSamples == 44100);
-        const int right = cl->splitAudioClip (slot, 44100 + 22050);
-        assert (right >= 0 && cl->audioClipCount() == 2);
+        // (splitAudioClip returns bool; an earlier version of this test
+        // compared it to -1, which only "passed" because Release builds
+        // compile assert away - repaired in fix pass 2.)
+        const bool splitOk = cl->splitAudioClip (slot, 44100 + 22050);
+        assert (splitOk && cl->audioClipCount() == 2);
+        int right = -1;
+        for (int i = 0; i < boombap::BoomBapEngine::kMaxAudioClips; ++i)
+            if (i != slot && cl->getAudioClip (i).active) right = i;
+        assert (right >= 0);
         assert (cl->getAudioClip (slot).lengthSamples == 22050);
         region = cl->getAudioClip (right);
         assert (region.startSamples == 44100 + 22050 && region.sourceStart == 11025 + 22050
                 && region.lengthSamples == 22050);
-        assert (cl->splitAudioClip (slot, 10) == -1); // a cut outside the clip is refused
+        assert (! cl->splitAudioClip (slot, 10)); // a cut outside the clip is refused
         cl->clearAudioClip (right);
         assert (cl->audioClipCount() == 1);
         cl->setAudioTrackGain (0, 0.42f);
@@ -642,6 +653,353 @@ int main()
         assert (maxDiff > 0.01f); // switching the mic changes what you HEAR...
         assert (player->getTakeData() == takeA); // ...never what is stored
         std::printf ("Clean take / playback mic (item 36): ok\n");
+    }
+
+    // ---- 12. fix pass 2: stop = all sound off (45), audio cluster (46-48,
+    // 50, 51, 53), kit rows (40), unlimited tracks (39) ----
+    // These use hard checks (not assert) so they gate the build even in
+    // Release, where assert compiles away.
+    {
+        int failures = 0;
+        auto CHECK = [&] (bool ok, const char* what)
+        {
+            std::printf ("  [%s] %s\n", ok ? "ok" : "FAIL", what);
+            if (! ok) ++failures;
+        };
+        auto peakRange = [] (const std::vector<float>& v, int from, int to)
+        {
+            float pk = 0.0f;
+            for (int i = from; i < to && i < (int) v.size(); ++i) pk = std::max (pk, std::abs (v[(size_t) i]));
+            return pk;
+        };
+        auto latePeak = [] (const std::vector<float>& v, size_t from)
+        {
+            float pk = 0.0f;
+            for (size_t i = from; i < v.size(); ++i) pk = std::max (pk, std::abs (v[i]));
+            return pk;
+        };
+
+        // item 45a: a 30-second pad one-shot dies on the global stop
+        {
+            auto e = fresh();
+            e->clearPattern();
+            e->loadPadSample (9, std::vector<float> ((size_t) sr * 30, 0.6f), sr);
+            e->triggerPad (9, 1.0f);
+            CHECK (peakOf (render (*e, 4096)) > 0.2f, "45a: long one-shot sounding before stop");
+            e->stopAllSound();
+            const auto post = render (*e, 8192);
+            CHECK (latePeak (post, 2048) < 1.0e-3f, "45a: stop silences a 30 s one-shot within budget");
+            CHECK (! e->isPlaying() && ! e->isAudioPlaying(), "45a: stop halts both transports");
+        }
+
+        // item 45b: a playing clip and a synth note die on the same stop
+        {
+            auto e = fresh();
+            e->clearPattern();
+            e->setVocalTake (std::vector<float> ((size_t) sr * 4, 0.5f));
+            CHECK (e->placeTakeAsClip() >= 0, "45b: clip placed for stop test");
+            e->setSynthStep (0, 25);
+            e->setPlaying (true);
+            CHECK (peakOf (render (*e, 8192)) > 0.1f, "45b: clip + synth sounding before stop");
+            e->stopAllSound();
+            CHECK (latePeak (render (*e, 8192), 2048) < 1.0e-3f, "45b: stop silences clip + synth");
+        }
+
+        // item 48a: steps 16..31 exist, and a hit there lands in bar 2
+        {
+            auto e = fresh();
+            e->clearPattern();
+            e->setStep (BoomBapEngine::Kick, 20, 127);
+            CHECK (e->getStep (BoomBapEngine::Kick, 20) == 127, "48a: step 20 stores in the 32-step pattern");
+            e->setPlaying (true);
+            const int bar = (int) (sr * 240.0 / 90.0);
+            const auto two = render (*e, bar * 2);
+            CHECK (peakRange (two, 0, bar) < 0.01f, "48a: bar 1 silent (the hit is in bar 2)");
+            CHECK (peakRange (two, bar, bar * 2) > 0.3f, "48a: the step-20 kick sounds in bar 2");
+        }
+
+        // item 48b/47/50/54: a clip longer than the pattern plays end to end
+        // under the audio view's own transport; seek lands mid-clip; the
+        // sounding light follows the clip
+        {
+            auto e = fresh();
+            e->clearPattern();
+            const int clipLen = sr * 3; // 3 s > one pattern (2 bars = 2.67 s at 90 bpm)
+            std::vector<float> vox ((size_t) clipLen);
+            for (int i = 0; i < clipLen; ++i)
+                vox[(size_t) i] = 0.5f * std::sin (2.0f * 3.14159265f * 330.0f * (float) i / (float) sr);
+            e->setVocalTake (vox);
+            const int slot = e->placeTakeAsClip();
+            CHECK (slot >= 0, "48b: long clip placed");
+            e->setAudioPlaying (true);
+            const auto heard = render (*e, clipLen + sr / 2);
+            CHECK (peakRange (heard, clipLen - sr / 2, clipLen) > 0.1f,
+                   "48b: audio-only transport plays the clip's tail, past the loop");
+            CHECK ((e->soundingClipMask() & (1u << slot)) == 0u, "54: clip light is off after it ends");
+
+            auto e2 = fresh();
+            e2->clearPattern();
+            e2->setVocalTake (vox);
+            e2->placeTakeAsClip();
+            e2->setAudioPlayhead (clipLen - sr / 4);
+            e2->setAudioPlaying (true);
+            const auto tail = render (*e2, sr / 8); // stop mid-clip: it must still be lit
+            CHECK (peakOf (tail) > 0.1f, "50: audio playhead seek lands inside the clip");
+            CHECK (e2->audioPosition() >= clipLen - sr / 4, "50: audio position follows the playhead");
+            CHECK ((e2->soundingClipMask() & 1u) != 0u, "54: sounding clip is lit while it plays");
+        }
+
+        // item 51: clip delete at the engine level (what the view calls)
+        {
+            auto e = fresh();
+            e->setVocalTake (std::vector<float> (44100, 0.4f));
+            const int slot = e->placeTakeAsClip();
+            CHECK (e->audioClipCount() == 1, "51: one clip before delete");
+            e->clearAudioClip (slot);
+            CHECK (e->audioClipCount() == 0 && ! e->getAudioClip (slot).active, "51: clip deleted");
+        }
+
+        // item 40: a kit row bound to a sample plays the sample, not the
+        // synth drum; clearing the binding brings the synth back
+        {
+            auto e = fresh();
+            e->clearPattern();
+            std::vector<float> burst (4000);
+            for (int i = 0; i < 4000; ++i)
+                burst[(size_t) i] = 0.7f * std::sin (2.0f * 3.14159265f * 3000.0f * (float) i / (float) sr);
+            e->setKitSample (BoomBapEngine::Kick, burst, sr);
+            CHECK (e->kitHasSample (BoomBapEngine::Kick), "40: kick row bound to a sample");
+            e->setStep (BoomBapEngine::Kick, 0, 127);
+            e->setPlaying (true);
+            const auto bound = render (*e, 8000);
+            auto crossings = [] (const std::vector<float>& v, int count)
+            {
+                int zc = 0;
+                for (int i = 1; i < count && i < (int) v.size(); ++i)
+                    if ((v[(size_t) (i - 1)] < 0.0f) != (v[(size_t) i] < 0.0f)) ++zc;
+                return zc;
+            };
+            const int zcBound = crossings (bound, 4000);
+            CHECK (peakOf (bound) > 0.2f && zcBound > 200,
+                   "40: bound row plays the SAMPLE (3 kHz burst), not the synth kick");
+            e->setPlaying (false);
+            render (*e, 512); // let the stop register, like the live audio thread would
+            e->clearKitSample (BoomBapEngine::Kick);
+            CHECK (! e->kitHasSample (BoomBapEngine::Kick), "40: binding cleared (reset)");
+            e->setPlaying (true);
+            const auto synth = render (*e, 8000);
+            CHECK (peakOf (synth) > 0.2f && crossings (synth, 4000) < 150,
+                   "40: reset row plays the synth kick again");
+        }
+
+        // item 39: the track list grows; added rows store steps; a row past
+        // the pad bank holds and plays its own sample
+        {
+            auto e = fresh();
+            e->clearPattern();
+            CHECK (e->getNumTracks() == 8, "39: projects start with 8 rows");
+            const int added = e->addTrack();
+            CHECK (added == 8 && e->getNumTracks() == 9, "39: addTrack grows the list");
+            e->setStep (added, 0, 127);
+            CHECK (e->getStep (added, 0) == 127, "39: the added row stores steps");
+            while (e->getNumTracks() <= 21) e->addTrack();
+            e->loadSample (21, std::vector<float> (6000, 0.5f), sr);
+            CHECK (e->rowHasOwnSample (21), "39: own-buffer row holds its sample");
+            e->setStep (21, 0, 127);
+            e->setPlaying (true);
+            CHECK (peakOf (render (*e, 8000)) > 0.1f, "39: own-buffer row sounds from its step");
+            auto e2 = fresh();
+            e2->applySettings (e->getSettings());
+            CHECK (e2->getNumTracks() == e->getNumTracks(), "39: numTracks round-trips through settings");
+        }
+
+        // items 48/39 compat: steps beyond 15 in an old project start empty
+        {
+            ProjectSettings old;
+            for (int t = 0; t < 8; ++t)
+                for (int s = 0; s < 32; ++s) old.patData[0][t][s] = 0;
+            old.patData[0][BoomBapEngine::Kick][3] = 127;
+            old.numTracks = 8;
+            auto e = fresh();
+            e->applySettings (old);
+            CHECK (e->getStep (BoomBapEngine::Kick, 3) == 127, "compat: old step lands in place");
+            bool bar2Empty = true;
+            for (int s = 16; s < 32; ++s)
+                bar2Empty = bar2Empty && e->getStep (BoomBapEngine::Kick, s) == 0;
+            CHECK (bar2Empty, "compat: extended steps start empty");
+        }
+
+        // item 53: recording peaks are available live and grow as it records
+        {
+            auto e = fresh();
+            e->clearPattern();
+            std::vector<float> in ((size_t) sr);
+            for (int i = 0; i < sr; ++i)
+                in[(size_t) i] = 0.5f * std::sin (2.0f * 3.14159265f * 220.0f * (float) i / (float) sr);
+            e->startRecording();
+            render (*e, sr / 2, &in);
+            float mins[512], maxs[512];
+            const int n1 = e->copyRecordingPeaks (mins, maxs, 512, 1024);
+            CHECK (n1 > 10 && e->isCapturing(), "53: live peaks available mid-recording");
+            render (*e, sr / 2, &in);
+            const int n2 = e->copyRecordingPeaks (mins, maxs, 512, 1024);
+            CHECK (n2 > n1, "53: the peak count grows as the take records");
+            float pk = 0.0f;
+            for (int i = 0; i < n2; ++i) pk = std::max (pk, maxs[i]);
+            CHECK (pk > 0.2f, "53: live peaks carry the signal");
+            e->stopRecording();
+        }
+
+        // item 46: the waveform audition plays - and the global stop kills it
+        {
+            auto e = fresh();
+            e->clearPattern();
+            e->startAudition (std::vector<float> ((size_t) sr * 5, 0.5f), sr);
+            CHECK (peakOf (render (*e, 4096)) > 0.2f && e->isAuditionPlaying(), "46: audition sounds");
+            e->stopAllSound();
+            CHECK (latePeak (render (*e, 8192), 2048) < 1.0e-3f, "46: stop silences the audition");
+        }
+
+        // item 56: one press of Record = ONE take landing as ONE clip -
+        // even recorded across a loop boundary, and even though several
+        // UI paths ask for the placement. The raw take's loop is an
+        // explicit opt-in, off by default.
+        {
+            auto e = fresh();
+            e->clearPattern();
+            const int recLen = sr * 7; // the 2-bar loop at 90 bpm is 5.33 s
+            std::vector<float> in ((size_t) recLen);
+            for (int i = 0; i < recLen; ++i)
+                in[(size_t) i] = 0.5f * std::sin (2.0f * 3.14159265f * 220.0f * (float) i / (float) sr);
+            e->startRecording();
+            render (*e, recLen, &in);
+            e->stopRecording(); // finishTake runs inside
+
+            CHECK (e->takeSeconds() > 2.0 * 240.0 / 90.0,
+                   "56: the take recorded across the loop boundary, whole");
+            CHECK (! e->takeEnabled(), "56: the raw take does NOT loop on its own (opt-in off)");
+
+            const int first = e->placeTakeAsClip(); // the record button asks
+            e->placeTakeAsClip();                   // the transport stop asks
+            e->placeTakeAsClip();                   // the UI timer / add button asks
+            CHECK (first >= 0 && e->audioClipCount() == 1,
+                   "56: repeated placement asks stack nothing - exactly one clip");
+            CHECK (e->takeIsPlaced(), "56: the take knows it is homed");
+            CHECK (e->getAudioClip (first).lengthSamples == (long long) e->getTakeData().size(),
+                   "56: the clip is the whole take");
+
+            // no doubled raw take beside its clip: park the clip a minute
+            // out and play - only an armed raw loop could sound now
+            e->moveAudioClip (first, (long long) sr * 60);
+            e->setPlaying (true);
+            CHECK (peakRange (render (*e, sr), 0, sr) < 0.01f,
+                   "56: silence beside the clip - no doubling");
+            e->setPlaying (false);
+            render (*e, 512);
+            e->setTakeEnabled (true); // the explicit opt-in
+            e->setPlaying (true);
+            CHECK (peakRange (render (*e, sr), 0, sr) > 0.1f,
+                   "56: 'Loop take' ON plays the raw take, by choice");
+            e->setTakeEnabled (false);
+            e->setPlaying (false);
+            render (*e, 512);
+
+            // a NEW recording is a new take and earns its own clip
+            e->startRecording();
+            render (*e, sr, &in);
+            e->stopRecording();
+            CHECK (! e->takeIsPlaced(), "56: a new take is not pre-homed");
+            CHECK (e->placeTakeAsClip() >= 0 && e->audioClipCount() == 2,
+                   "56: the new take lands as its own clip");
+        }
+
+        // item 58: a project already carrying item 56's stacked duplicate
+        // clips heals on load - the twins collapse to one clip, distinct
+        // fragments are untouched
+        {
+            ProjectSettings stacked;
+            stacked.audioClips[0].active = true;
+            stacked.audioClips[0].startSamples = 1000;
+            stacked.audioClips[0].sourceStart = 0;
+            stacked.audioClips[0].lengthSamples = 44100;
+            stacked.audioClips[1] = stacked.audioClips[0]; // the item-56 twin
+            stacked.audioClips[2].active = true;           // a real fragment
+            stacked.audioClips[2].startSamples = 50000;
+            stacked.audioClips[2].sourceStart = 22050;
+            stacked.audioClips[2].lengthSamples = 22050;
+            auto e = fresh();
+            e->applySettings (stacked);
+            CHECK (e->audioClipCount() == 2,
+                   "58: stacked duplicates collapse on load; real clips stay");
+            CHECK (e->getAudioClip (0).active && e->getAudioClip (2).active,
+                   "58: the kept clips are the original and the fragment");
+        }
+
+        // ---- item 60: MULTIPLE audio tracks ----
+        {
+            auto e = fresh();
+            std::vector<float> take (44100, 0.0f);
+            for (int i = 0; i < 44100; ++i) take[(size_t) i] = 0.5f * std::sin (6.283185307179586 * 220.0 * i / 44100.0);
+            e->setVocalTake (take);
+            CHECK (e->addAudioTrack() == 2, "60: a second audio track can be added");
+            e->setRecTargetTrack (1);
+            const int slot = e->placeTakeAsClip();
+            CHECK (slot >= 0 && e->getAudioClip (slot).track == 1,
+                   "60: the take lands on the ARMED track");
+            const auto st = e->getSettings();
+            CHECK (st.numAudioTracks == 2 && st.audioClips[(size_t) slot].track == 1,
+                   "60: track count and clip track persist in settings");
+
+            // the clip sounds through its own channel; muting THAT track
+            // silences it, muting the other does not
+            std::vector<float> l (8192), r (8192);
+            auto renderAudio = [&] (double seconds)
+            {
+                double peak = 0.0;
+                const int blocks = (int) (seconds * 44100.0 / 512.0);
+                for (int b = 0; b < blocks; ++b)
+                {
+                    e->process (nullptr, l.data(), r.data(), 512);
+                    for (float v : l) peak = std::max (peak, (double) std::abs (v));
+                }
+                return peak;
+            };
+            e->setAudioPlayhead (0);
+            e->setAudioPlaying (true);
+            const double sounding = renderAudio (0.5);
+            e->setAudioTrackMute (1, true);
+            e->setAudioPlayhead (0);
+            const double muted = renderAudio (0.5);
+            e->setAudioTrackMute (1, false);
+            e->setAudioTrackMute (0, true);
+            e->setAudioPlayhead (0);
+            const double otherMuted = renderAudio (0.5);
+            e->setAudioPlaying (false);
+            CHECK (sounding > 0.05 && muted < 0.005 && otherMuted > 0.05,
+                   "60: per-track mute gates its own clips only");
+
+            // the same span on a DIFFERENT track is a legitimate double,
+            // not an item-58 stack: the heal keeps both
+            ProjectSettings twoTracks;
+            twoTracks.numAudioTracks = 2;
+            twoTracks.audioClips[0].active = true;
+            twoTracks.audioClips[0].startSamples = 1000;
+            twoTracks.audioClips[0].lengthSamples = 44100;
+            twoTracks.audioClips[0].track = 0;
+            twoTracks.audioClips[1] = twoTracks.audioClips[0];
+            twoTracks.audioClips[1].track = 1;
+            auto e2 = fresh();
+            e2->applySettings (twoTracks);
+            CHECK (e2->audioClipCount() == 2,
+                   "60/58: identical spans on different tracks both survive the heal");
+        }
+
+        if (failures > 0)
+        {
+            std::printf ("FIX PASS 2 CHECKS FAILED: %d\n", failures);
+            return 1;
+        }
+        std::printf ("Fix pass 2 checks: ok\n");
     }
 
     std::printf ("engine checks passed\n");

@@ -41,7 +41,8 @@ static bool sameSettings (const ProjectSettings& a, const ProjectSettings& b)
                     && near (a.padTune[p], b.padTune[p]) && near (a.padGain[p], b.padGain[p])
                     && near (a.padVelSens[p], b.padVelSens[p]) && a.padReverse[p] == b.padReverse[p]
                     && a.padMuteGroup[p] == b.padMuteGroup[p];
-    same = same && a.currentPattern == b.currentPattern && a.songLength == b.songLength;
+    same = same && a.currentPattern == b.currentPattern && a.songLength == b.songLength
+                && a.numTracks == b.numTracks;
     for (int p = 0; p < ProjectSettings::kPatterns; ++p)
     {
         same = same && a.patMelodySource[p] == b.patMelodySource[p];
@@ -190,6 +191,48 @@ int main()
            "pre-fix-pass file loads");
     check (! oldf.settings.audioClips[0].active && oldf.settings.audioGain[0] == 0.9f,
            "old files get the default audio track and no clips");
+
+    std::printf ("Fix pass 2: track count, row samples, 32 steps\n");
+    ProjectData td;
+    td.settings.numTracks = 14;
+    td.settings.patData[1][13][31] = 127;  // an added row, last step of the 2-bar pattern
+    td.settings.patData[0][0][20] = 90;
+    td.rowSamplePaths[0] = kick.getFullPathName();   // kit replacement on the kick row
+    td.rowSamplePaths[23] = kick.getFullPathName();  // own-buffer row (track 24)
+    ProjectData tback;
+    check (projectFromJson (projectToJson (td, projectA), projectA, tback, err), "fix-pass-2 project parses");
+    check (tback.settings.numTracks == 14, "track count survives");
+    check (tback.settings.patData[1][13][31] == 127 && tback.settings.patData[0][0][20] == 90,
+           "steps on added rows and in bar 2 survive");
+    check (tback.rowSamplePaths[0] == td.rowSamplePaths[0], "kit row sample path survives");
+    check (tback.rowSamplePaths[23] == td.rowSamplePaths[23], "own-row sample path survives");
+    check (tback.rowSamplePaths[5].isEmpty(), "pad-backed rows keep their paths in the pad entries");
+
+    // a fix-pass-1-era file: 16 steps per row, no numTracks key
+    ProjectData fp1;
+    check (projectFromJson ("{\"format\":\"boombap-project\",\"version\":1,\"patterns\":[{\"steps\":"
+                             "[[127,0,0,0,90,0,0,0,0,0,0,0,0,0,0,0]],\"melody\":{\"source\":0,\"notes\":[]},"
+                             "\"synth\":[],\"piano\":[]}]}",
+                             projectA, fp1, err), "16-step file loads");
+    check (fp1.settings.patData[0][0][0] == 127 && fp1.settings.patData[0][0][4] == 90,
+           "16-step rows land in place");
+    check (fp1.settings.patData[0][0][16] == 0 && fp1.settings.numTracks == 8,
+           "extension steps start empty; track count defaults to 8");
+
+    // item 60: audio tracks and clip lanes round-trip; an older file
+    // without them defaults to one track, clips on track 0
+    td.settings.numAudioTracks = 3;
+    td.settings.audioClips[0].active = true;
+    td.settings.audioClips[0].startSamples = 2048;
+    td.settings.audioClips[0].lengthSamples = 44100;
+    td.settings.audioClips[0].track = 2;
+    ProjectData aback;
+    check (projectFromJson (projectToJson (td, projectA), projectA, aback, err), "item-60 project parses");
+    check (aback.settings.numAudioTracks == 3, "audio track count survives");
+    check (aback.settings.audioClips[0].active && aback.settings.audioClips[0].track == 2,
+           "a clip's track survives");
+    check (fp1.settings.numAudioTracks == 1 && fp1.settings.audioClips[0].track == 0,
+           "older files default to one audio track, clips on track 0");
 
     root.deleteRecursively();
     std::printf (failures == 0 ? "project file checks passed\n" : "%d CHECK(S) FAILED\n", failures);
