@@ -1,0 +1,176 @@
+#pragma once
+#include <juce_gui_basics/juce_gui_basics.h>
+#include "Engine/BoomBapEngine.h"
+#include "BoomBapLookAndFeel.h"
+
+// The playlist: a chain of patterns (up to 32 bars) played in order when song
+// mode is on. Sounds are global - the chain only chooses which pattern plays.
+// Click a slot to cycle its pattern, click the + slot to append the pattern
+// being edited in the main window, right-click a slot to remove it.
+class PlaylistComponent : public juce::Component, private juce::Timer
+{
+public:
+    explicit PlaylistComponent (boombap::BoomBapEngine& eng) : engine (eng)
+    {
+        modeToggle.setToggleState (engine.isSongMode(), juce::dontSendNotification);
+        modeToggle.onClick = [this] { engine.setSongMode (modeToggle.getToggleState()); refreshStatus(); repaint(); };
+        addAndMakeVisible (modeToggle);
+
+        clearButton.onClick = [this] { engine.setSongLength (0); refreshStatus(); repaint(); };
+        addAndMakeVisible (clearButton);
+
+        status.setColour (juce::Label::textColourId, boombap::ui::text());
+        addAndMakeVisible (status);
+
+        hint.setText ("Click a slot to change its pattern. Click + to add the pattern you are editing. "
+                      "Right-click a slot to remove it. In song mode the export is one full pass.",
+                      juce::dontSendNotification);
+        hint.setColour (juce::Label::textColourId, boombap::ui::muted());
+        addAndMakeVisible (hint);
+
+        refreshStatus();
+        startTimerHz (15);
+    }
+
+    ~PlaylistComponent() override { stopTimer(); }
+
+    void refreshFromEngine()
+    {
+        modeToggle.setToggleState (engine.isSongMode(), juce::dontSendNotification);
+        refreshStatus();
+        repaint();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace boombap::ui;
+        g.fillAll (bg());
+
+        const int len = engine.getSongLength();
+        const int playPos = (engine.isSongMode() && engine.isPlaying()) ? engine.getPlaySongPos() : -1;
+
+        for (int i = 0; i < kSlots; ++i)
+        {
+            const auto r = slotRect (i);
+            if (i < len)
+            {
+                g.setColour (i == playPos ? accent() : panelAlt());
+                g.fillRoundedRectangle (r, 5.0f);
+                g.setColour (i == playPos ? juce::Colour (0xff14100a) : text());
+                g.setFont (juce::Font (15.0f, juce::Font::bold));
+                g.drawText (juce::String::charToString ((juce::juce_wchar) ('A' + engine.getSongSlot (i))),
+                            r, juce::Justification::centred);
+            }
+            else if (i == len)
+            {
+                g.setColour (border());
+                g.drawRoundedRectangle (r, 5.0f, 1.2f);
+                g.setColour (muted());
+                g.setFont (juce::Font (15.0f));
+                g.drawText ("+", r, juce::Justification::centred);
+            }
+            else
+            {
+                g.setColour (muted().withAlpha (0.35f));
+                g.fillEllipse (r.getCentreX() - 2.0f, r.getCentreY() - 2.0f, 4.0f, 4.0f);
+            }
+        }
+    }
+
+    void resized() override
+    {
+        modeToggle.setBounds (16, 12, 120, 26);
+        clearButton.setBounds (148, 12, 110, 26);
+        status.setBounds (270, 12, 374, 26);
+        hint.setBounds (16, 152, getWidth() - 32, 34);
+    }
+
+    void mouseDown (const juce::MouseEvent& e) override
+    {
+        const int slot = slotAt (e.x, e.y);
+        if (slot < 0) return;
+        const int len = engine.getSongLength();
+
+        if (e.mods.isRightButtonDown())
+        {
+            if (slot < len)
+            {
+                for (int i = slot; i < len - 1; ++i) engine.setSongSlot (i, engine.getSongSlot (i + 1));
+                engine.setSongLength (len - 1);
+            }
+        }
+        else if (slot < len)
+        {
+            engine.setSongSlot (slot, (engine.getSongSlot (slot) + 1) % boombap::BoomBapEngine::kPatterns);
+        }
+        else if (slot == len)
+        {
+            engine.setSongSlot (slot, engine.getEditPattern());
+            engine.setSongLength (len + 1);
+        }
+        refreshStatus();
+        repaint();
+    }
+
+private:
+    static constexpr int kSlots = boombap::BoomBapEngine::kSongSlots;
+
+    juce::Rectangle<float> slotRect (int i) const
+    {
+        const int col = i % 16, row = i / 16;
+        return { (float) (16 + col * 38), (float) (52 + row * 44), 34.0f, 34.0f };
+    }
+
+    int slotAt (int x, int y) const
+    {
+        for (int i = 0; i < kSlots; ++i)
+            if (slotRect (i).contains ((float) x, (float) y)) return i;
+        return -1;
+    }
+
+    void refreshStatus()
+    {
+        juce::String text;
+        const int len = engine.getSongLength();
+        if (! engine.isSongMode())
+            text = "Pattern mode: the selected pattern loops.";
+        else if (len == 0)
+            text = "Song mode is on, but the chain is empty - add patterns below.";
+        else
+        {
+            text = "Song: " + juce::String (len) + (len == 1 ? " bar" : " bars") + " - ";
+            for (int i = 0; i < len; ++i)
+            {
+                if (i > 0) text += " ";
+                text += juce::String::charToString ((juce::juce_wchar) ('A' + engine.getSongSlot (i)));
+            }
+        }
+        if (status.getText() != text) status.setText (text, juce::dontSendNotification);
+    }
+
+    void timerCallback() override
+    {
+        const int pos = (engine.isSongMode() && engine.isPlaying()) ? engine.getPlaySongPos() : -1;
+        if (pos != lastPlayPos) { lastPlayPos = pos; repaint(); }
+    }
+
+    boombap::BoomBapEngine& engine;
+    juce::ToggleButton modeToggle { "Song mode" };
+    juce::TextButton clearButton { "Clear song" };
+    juce::Label status, hint;
+    int lastPlayPos = -2;
+};
+
+// The playlist lives in its own window; closing it just hides it.
+class PlaylistWindow : public juce::DocumentWindow
+{
+public:
+    PlaylistWindow (const juce::String& name, juce::Colour background)
+        : juce::DocumentWindow (name, background, juce::DocumentWindow::closeButton)
+    {
+        setUsingNativeTitleBar (true);
+        setResizable (false, false);
+    }
+
+    void closeButtonPressed() override { setVisible (false); }
+};
