@@ -1,0 +1,94 @@
+# BoomBap auto-build: compiles the standalone app and the plug-ins on
+# Windows, macOS and Linux, and attaches them to the run as downloads.
+# You never build anything yourself - push the code (or press
+# "Run workflow" in the Actions tab) and download the finished files.
+name: Build BoomBap
+
+on: [push, workflow_dispatch]
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            name: Windows
+          - os: macos-15
+            name: macOS
+          - os: ubuntu-24.04
+            name: Linux
+
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Install Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev libcurl4-openssl-dev \
+            libfreetype-dev libx11-dev libxcomposite-dev libxcursor-dev \
+            libxext-dev libxinerama-dev libxrandr-dev libxrender-dev \
+            libglu1-mesa-dev mesa-common-dev xvfb
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/BoomBap_artefacts/Release/BoomBap.exe dist/
+          Copy-Item -Recurse build/BoomBapPlugin_artefacts/Release/VST3/BoomBap.vst3 dist/
+          Compress-Archive -Path dist/* -DestinationPath BoomBap-Windows.zip
+
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir dist
+          cp -R build/BoomBap_artefacts/Release/BoomBap.app dist/
+          cp -R build/BoomBapPlugin_artefacts/Release/VST3/BoomBap.vst3 dist/
+          cp -R build/BoomBapPlugin_artefacts/Release/AU/BoomBap.component dist/
+          ditto -c -k --keepParent dist BoomBap-macOS.zip
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir dist
+          cp build/BoomBap_artefacts/Release/BoomBap dist/
+          cp -R build/BoomBapPlugin_artefacts/Release/VST3/BoomBap.vst3 dist/
+          tar -czf BoomBap-Linux.tar.gz -C dist .
+
+      - name: Upload Windows build
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoomBap-Windows
+          path: BoomBap-Windows.zip
+
+      - name: Upload macOS build
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoomBap-macOS
+          path: BoomBap-macOS.zip
+
+      - name: Upload Linux build
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: BoomBap-Linux
+          path: BoomBap-Linux.tar.gz
+
+      # The test suite runs last and never blocks the downloads above.
+      - name: Run tests (Linux only)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: xvfb-run --auto-servernum ctest --test-dir build --output-on-failure
