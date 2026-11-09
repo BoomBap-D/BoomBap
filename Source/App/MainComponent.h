@@ -140,6 +140,9 @@ public:
     void navForward();
     int clockFormatValue() const { return clockFormat; }
     void setClockFormat (int fmt);
+    // Round 4 (item 99b): test seams for the mode buttons.
+    juce::TextButton& patternModeButtonForTest() { return patternModeButton; }
+    juce::TextButton& songModeButtonForTest()    { return songModeButton; }
     // Round 2 (item 96d): the Station's EDIT SAMPLE doorway.
     void editChannel (int ch);
     bool channelHasEditor (int ch) const;
@@ -271,6 +274,14 @@ private:
     boombap::TransportNav transportNav;
     TimeClock mainClock;
     int clockFormat = 0;
+    // Round 4 (item 99b): PATTERN / SONG mode buttons on the main page -
+    // PATTERN loops the edited pattern, SONG walks the playlist's
+    // arrangement. The mode persists in the project (the engine holds
+    // it as project state now); the timer keeps the buttons honest
+    // when undo or a project load flips it behind their backs.
+    juce::TextButton patternModeButton { "PATTERN" }, songModeButton { "SONG" };
+    bool lastSongModeShown = false;
+    void refreshModeButtons();
     juce::TextButton audioButton { "Audio..." };
     juce::TextButton metroButton { "METRO" };
     LabeledSlider metroVol;

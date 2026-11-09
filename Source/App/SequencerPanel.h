@@ -24,6 +24,7 @@ public:
         std::function<void (int)> onDeleteRow;  // a user row's visible X (item 87; the action is item 69's)
         std::function<void()> onPatternChanged; // pattern A-H switched (the roll follows)
         std::function<void()> onChange;         // a row was added
+        std::function<void (bool)> onGhostToggled; // Round 4 (item 99a): persist the ghost strip's switch
         // Pass 2: undo gestures (item 38) + channel selection (the Station follows)
         std::function<void()> onBeforeChange;
         std::function<void()> onAfterChange;
@@ -63,6 +64,20 @@ public:
             if (callbacks.onAfterChange) callbacks.onAfterChange();
         };
         addAndMakeVisible (addTrackButton);
+
+        // Round 4 (item 99a): the ghost roll's switch. The strip itself
+        // is laid out by layoutRows (it borrows height only when the
+        // selected row owns a pitched lane).
+        ghostToggle.setButtonText ("Ghost roll");
+        ghostToggle.setToggleState (ghostEnabled, juce::dontSendNotification);
+        ghostToggle.onClick = [this]
+        {
+            ghostEnabled = ghostToggle.getToggleState();
+            layoutRows();
+            if (callbacks.onGhostToggled) callbacks.onGhostToggled (ghostEnabled);
+        };
+        addAndMakeVisible (ghostToggle);
+        gridContent.addAndMakeVisible (ghostStrip);
 
         viewport.setViewedComponent (&gridContent, false);
         viewport.setScrollBarsShown (true, false);
@@ -194,7 +209,20 @@ public:
         for (int t = 0; t < n; ++t)
             for (int s = 0; s < kSteps; ++s)
                 rows[t].steps[s].setVelocity (engine.getStep (t, s));
+        ghostStrip.repaint();
     }
+
+    // Round 4 (item 99a): the ghost strip's switch, settable from the
+    // owner's persisted preference as well as the header toggle.
+    void setGhostEnabled (bool on)
+    {
+        ghostEnabled = on;
+        ghostToggle.setToggleState (on, juce::dontSendNotification);
+        layoutRows();
+    }
+    bool isGhostEnabled() const { return ghostEnabled; }
+    bool ghostStripShowing() const { return ghostStrip.isVisible(); }
+    juce::Component& ghostStripForTest() { return ghostStrip; }
 
     void refreshPatternUi()
     {
@@ -257,6 +285,8 @@ public:
             rows[t].name.setColour (juce::Label::textColourId,
                                     sel ? juce::Colour (0xff14100a) : juce::Colours::white);
         }
+        ghostStrip.setTrack (selectedRow);
+        layoutRows(); // the ghost band borrows its height from the selected row
     }
     int getSelectedRow() const { return selectedRow; }
 
@@ -277,6 +307,7 @@ public:
             for (int t = 0; t < n; ++t)
                 for (int st = 0; st < kSteps; ++st)
                     rows[t].steps[st].setPlaying (st == s);
+            ghostStrip.repaint();
         }
         for (int t = 0; t < n; ++t)
         {
@@ -320,6 +351,7 @@ public:
         for (int i = 0; i < 8; ++i)
             patternButtons[(size_t) i].setBounds (RB (88 + i * 40, 4, 36, 24));
         addTrackButton.setBounds (RB (1396, 4, 132, 24));
+        ghostToggle.setBounds (RB (1224, 4, 160, 24));
         viewport.setBounds (RB (8, 50, 1528, 282));
         layoutRows();
     }
@@ -373,10 +405,17 @@ private:
     // never toggled - re-entering a cell (above all the starting cell)
     // cannot flip it back, which is the classic paint-drag bug - and
     // the walk from the last cell fills gaps on fast drags.
+    // The top of a row in content space: rows below the selected one
+    // sit one ghost band lower while the strip is showing.
+    int rowTopY (int t) const
+    {
+        return t * lastRowH + (t > selectedRow ? layoutGhostH : 0);
+    }
+
     void applySwipe (juce::Point<float> p)
     {
         if (! swipeHeld || swipeTrack < 0 || lastRowH <= 0) return;
-        const int rowY = swipeTrack * lastRowH;
+        const int rowY = rowTopY (swipeTrack);
         if (p.y < (float) rowY || p.y >= (float) (rowY + lastRowH)) return; // the press's own row only
         const float vx = p.x / contentScaleX;
         int s = -1;
@@ -402,8 +441,14 @@ private:
         const int n = engine.getNumTracks();
         const int rowH = juce::jmax (28, juce::roundToInt (35.0f * scaleY));
         lastRowH = rowH;
+        // Round 4 (item 99a): the ghost band exists only while the
+        // selected row owns a pitched lane - an empty strip under a
+        // lane-less row would be furniture, not information.
+        const bool ghostActive = ghostEnabled && selectedRow >= 0
+                              && engine.trackHasGhostLane (selectedRow);
+        layoutGhostH = ghostActive ? 20 : 0;
         gridContent.setSize (juce::jmax (200, viewport.getWidth()),
-                             juce::jmax (viewport.getHeight(), n * rowH));
+                             juce::jmax (viewport.getHeight(), n * rowH + layoutGhostH));
         contentScaleX = (float) gridContent.getWidth() / 1528.0f;
         const float cx = contentScaleX;
         auto CB = [&] (float x, int y, float w, int h)
@@ -428,7 +473,7 @@ private:
             row.meter.setVisible (vis);
             for (int s = 0; s < kSteps; ++s) row.steps[s].setVisible (vis);
             if (! vis) continue;
-            const int y = t * rowH;
+            const int y = rowTopY (t);
             const int h = rowH - 5;
             row.name.setBounds (CB (12, y + 2, 88, h));
             row.load.setBounds (CB (104, y + 2, 54, h));
@@ -441,8 +486,73 @@ private:
                 row.steps[s].setBounds (CB (stepX (s), y + 2, 32, h));
             row.meter.setBounds (CB (1476, y + rowH / 2 - 4, 44, 8));
         }
+        // Round 4 (item 99a): the strip sits in the band under the
+        // selected row's steps, spanning exactly the step columns.
+        ghostStrip.setVisible (layoutGhostH > 0);
+        if (layoutGhostH > 0)
+        {
+            const float cx = contentScaleX;
+            const int y = rowTopY (selectedRow) + rowH - 2;
+            ghostStrip.setBounds (juce::roundToInt (stepX (0) * cx), y,
+                                  juce::roundToInt ((stepX (kSteps - 1) + 32.0f - stepX (0)) * cx), 18);
+        }
         repaint();
     }
+
+    // Round 4 (item 99a): the GHOST STRIP - the selected row's pitched
+    // lane drawn lightly under its step boxes: one mini tick per step,
+    // its height inside the strip following the note's pitch. It reads
+    // the engine live (ghostNoteValue is the data path), so roll edits
+    // show here without a second copy of the data.
+    class GhostStrip : public juce::Component
+    {
+    public:
+        explicit GhostStrip (boombap::BoomBapEngine& eng) : engine (eng) {}
+        void setTrack (int t) { track = t; repaint(); }
+
+        void paint (juce::Graphics& g) override
+        {
+            using namespace boombap::ui;
+            if (track < 0) return;
+            const float w = (float) getWidth(), h = (float) getHeight();
+            g.setColour (border().withAlpha (0.35f));
+            g.fillRect (0.0f, h - 1.0f, w, 1.0f);
+            const int playStep = engine.isPlaying() ? engine.currentStep() : -1;
+            // The strip draws the lane's CONTOUR: its pitch range is
+            // auto-ranged to the strip's height (an absolute ±24 map
+            // squeezed close intervals into a single pixel - a flat
+            // line that said "notes exist" and nothing about the tune).
+            int lo = 1000, hi = -1000;
+            for (int s = 0; s < boombap::BoomBapEngine::kSteps; ++s)
+            {
+                const int v = engine.ghostNoteValue (track, s);
+                if (v == 0) continue;
+                lo = juce::jmin (lo, v - 25);
+                hi = juce::jmax (hi, v - 25);
+            }
+            if (hi < lo) return; // the lane is empty under this row
+            if (hi == lo) { lo -= 1; hi += 1; }
+            // Ticks sit under their own step boxes: the columns are not
+            // uniform (a wider gap every beat), so the strip maps the
+            // panel's own stepX across its width instead of dividing it.
+            const float span = stepX (boombap::BoomBapEngine::kSteps - 1) + 32.0f - stepX (0);
+            for (int s = 0; s < boombap::BoomBapEngine::kSteps; ++s)
+            {
+                const int v = engine.ghostNoteValue (track, s);
+                if (v == 0) continue;
+                const float x = (stepX (s) - stepX (0)) / span * w;
+                const float cellW = 32.0f / span * w;
+                const float semitone = (float) (v - 25);
+                const float y = (h - 4.0f) - ((semitone - (float) lo) / (float) (hi - lo)) * (h - 5.0f);
+                g.setColour (accent().withAlpha (s == playStep ? 0.95f : 0.5f));
+                g.fillRect (x + cellW * 0.18f, y, cellW * 0.64f, 2.2f);
+            }
+        }
+
+    private:
+        boombap::BoomBapEngine& engine;
+        int track = -1;
+    };
 
     boombap::BoomBapEngine& engine;
     Callbacks callbacks;
@@ -450,9 +560,13 @@ private:
     juce::Label patternLabel;
     std::array<juce::TextButton, 8> patternButtons;
     juce::TextButton addTrackButton { "+ TRACK" };
+    juce::ToggleButton ghostToggle;
     juce::Viewport viewport;
     juce::Component gridContent;
+    GhostStrip ghostStrip { engine };
     Row rows[kTracks];
+    bool ghostEnabled = true; // item 99a: the default is ruled by the round's screenshot verdict
+    int layoutGhostH = 0;
 
     float scaleY = 1.0f, contentScaleX = 1.0f;
     float meterShown[kTracks] = {};

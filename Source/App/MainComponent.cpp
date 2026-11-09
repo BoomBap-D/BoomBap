@@ -154,6 +154,20 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     // the project bar's compact clock - the Station's big clock's twin
     mainClock.onCycleFormat = [this] { setClockFormat ((clockFormat + 1) % 3); };
     addAndMakeVisible (mainClock);
+    // Round 4 (item 99b): PATTERN / SONG mode buttons on the main page.
+    patternModeButton.onClick = [this]
+    {
+        runUndoable ([this] { engine.setSongMode (false); });
+        refreshModeButtons();
+    };
+    songModeButton.onClick = [this]
+    {
+        runUndoable ([this] { engine.setSongMode (true); });
+        refreshModeButtons();
+    };
+    addAndMakeVisible (patternModeButton);
+    addAndMakeVisible (songModeButton);
+    refreshModeButtons();
     clearButton.onClick = [this] { runUndoable ([this] { engine.clearPattern(); refreshGrid(); }); };
     resetButton.onClick = [this] { runUndoable ([this] { engine.loadDefaultPattern(); refreshGrid(); }); };
 
@@ -297,11 +311,23 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         scb.onBeforeChange = [this] { beginUndoGesture(); };
         scb.onAfterChange = [this] { endUndoGesture(); };
         scb.onSelectRow = [this] (int t) { selectChannel (t); };
+        // Round 4 (item 99a): the ghost strip's switch persists in the
+        // app settings, like the clock format.
+        scb.onGhostToggled = [] (bool on)
+        {
+            auto props = boombap::appPropertiesFile();
+            props->setValue ("ghostRoll", on ? 1 : 0);
+            props->saveIfNeeded();
+        };
         sequencerPanel = std::make_unique<SequencerPanel> (engine, scb);
     }
     sequencerPanel->setLookAndFeel (&lookAndFeel);
     addAndMakeVisible (sequencerPanel.get());
     sequencerPanel->setSelectedRow (selectedChannel); // item 86: the initial light (channel 0)
+    {
+        auto props = boombap::appPropertiesFile();
+        sequencerPanel->setGhostEnabled (props->getIntValue ("ghostRoll", 1) != 0);
+    }
 
     // The MPC PANEL tab: its own pad bank instance (pads + the selected
     // pad's waveform and trim, item 44) - same engine, same samples as
@@ -743,6 +769,24 @@ void MainComponent::setClockFormat (int fmt)
     props->saveIfNeeded();
 }
 
+// Round 4 (item 99b): the mode buttons wear the one active mode - the
+// accent fill, like the sequencer's pattern buttons.
+void MainComponent::refreshModeButtons()
+{
+    const bool song = engine.isSongMode();
+    lastSongModeShown = song;
+    auto style = [] (juce::TextButton& b, bool on)
+    {
+        b.setColour (juce::TextButton::buttonColourId,
+                     on ? boombap::ui::accent() : boombap::ui::panelAlt());
+        b.setColour (juce::TextButton::textColourOffId,
+                     on ? juce::Colour (0xff14100a) : boombap::ui::text());
+    };
+    style (patternModeButton, ! song);
+    style (songModeButton, song);
+    if (playlist != nullptr) playlist->refreshFromEngine(); // its status line names the mode
+}
+
 // Round 2 (item 96d): the Station's EDIT SAMPLE doorway - a sample
 // lane opens the pad bank on that pad (the pad/sample editor), an
 // instrument lane opens its piano roll. Pure audio lanes, the buses
@@ -1048,6 +1092,10 @@ void MainComponent::timerCallback()
         playButton.setColour (TextButton::buttonColourId,
                               playingNow ? boombap::ui::accentHi() : boombap::ui::accent());
     }
+
+    // Round 4 (item 99b): undo, redo and project loads can flip the
+    // mode behind the buttons' backs - the buttons follow the engine.
+    if (engine.isSongMode() != lastSongModeShown) refreshModeButtons();
 
     if (++dirtyTick >= 8) { dirtyTick = 0; updateProjectLabel(); }
 
@@ -1365,6 +1413,8 @@ void MainComponent::resized()
     tabButtons[0].setBounds (RB (20, 178, 190, 28));
     tabButtons[1].setBounds (RB (218, 178, 150, 28));
     tabButtons[2].setBounds (RB (376, 178, 210, 28));
+    patternModeButton.setBounds (RB (1096, 178, 140, 28)); // item 99b
+    songModeButton.setBounds (RB (1244, 178, 140, 28));
     popOutButton.setBounds (RB (1420, 178, 112, 28));
     tabPoppedLabel.setBounds (RB (16, 212, 1528, 336));
     if (sequencerPanel != nullptr && ! tabPoppedOut[0])

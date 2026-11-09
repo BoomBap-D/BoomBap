@@ -19,6 +19,7 @@
 #include "../../Core/Instruments/Piano.h"
 #include "ProjectSettings.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <memory>
@@ -41,6 +42,8 @@ public:
     static constexpr int kPads   = MpcPads::kNumPads;
     static constexpr int kPatterns  = ProjectSettings::kPatterns;
     static constexpr int kSongSlots = ProjectSettings::kSongSlots;
+    static constexpr int kSongLanes = ProjectSettings::kSongLanes;       // Round 4 (item 99c)
+    static constexpr int kMaxSongBlocks = ProjectSettings::kMaxSongBlocks;
     static constexpr int kMaxTakeSeconds = 120;
     static constexpr int kAudioTracks   = ProjectSettings::kAudioTracks;
     static constexpr int kMaxAudioClips = ProjectSettings::kMaxAudioClips;
@@ -153,6 +156,11 @@ public:
         for (auto& n : patSynth) n.store (0);
         for (auto& n : patPiano) n.store (0);
         for (auto& n : songChainA) n.store (0);
+        for (auto& a : blkActiveA) a.store (false);
+        for (auto& n : blkPatternA) n.store (0);
+        for (auto& n : blkLaneA) n.store (0);
+        for (auto& n : blkStartA) n.store (0);
+        for (auto& n : blkLenA) n.store (2);
         for (auto& b : kitBoundA) b.store (false);
         for (auto& b : ownBoundA) b.store (false);
         for (auto& g : audioGainA) g.store (0.9f);
@@ -216,6 +224,16 @@ public:
         for (int i = 0; i < kSongSlots; ++i) songChainA[i].store (o.songChainA[i].load());
         songLength.store (o.songLength.load());
         songMode.store (o.songMode.load());
+        for (int i = 0; i < kMaxSongBlocks; ++i) // item 99c: the export clone plays the arrangement too
+        {
+            blkPatternA[i].store (o.blkPatternA[i].load());
+            blkLaneA[i].store (o.blkLaneA[i].load());
+            blkStartA[i].store (o.blkStartA[i].load());
+            blkLenA[i].store (o.blkLenA[i].load());
+            blkActiveA[i].store (o.blkActiveA[i].load());
+        }
+        refreshSongTotalBars();
+        blocksRevisionA.fetch_add (1);
         kickTune.store (o.kickTune.load()); kickDecay.store (o.kickDecay.load());
         snareSnappy.store (o.snareSnappy.load());
         openHatDecay.store (o.openHatDecay.load()); clapTail.store (o.clapTail.load());
@@ -300,6 +318,12 @@ public:
         p.currentPattern = editPattern.load();
         for (int i = 0; i < kSongSlots; ++i) p.songChain[i] = songChainA[i].load();
         p.songLength = songLength.load();
+        // Round 4 (items 99b/99c): the mode and the arrangement ride the
+        // snapshot too; the chain fields are re-derived from the blocks
+        // so a saved file's two song forms can never disagree.
+        p.songMode = songMode.load();
+        for (int i = 0; i < kMaxSongBlocks; ++i) p.songBlocks[i] = getSongBlock (i);
+        p.refreshChainMirror();
         p.kickTuneHz = kickTune.load();       p.kickDecayMs = kickDecay.load();
         p.snareSnappy = snareSnappy.load();
         p.openHatDecayMs = openHatDecay.load(); p.clapTailMs = clapTail.load();
@@ -367,6 +391,11 @@ public:
     void applySettings (ProjectSettings p)
     {
         p.sanitize();
+        // Round 4 (item 99c): a chain-only project becomes blocks here -
+        // the backwards-compatibility lift. The mirror keeps the legacy
+        // fields honest for the file writer and older readers.
+        p.convertChainToBlocks();
+        p.refreshChainMirror();
         numTracksA.store (p.numTracks);
         bpm.store (p.bpm);  swing.store (p.swing);  masterDb.store (p.masterDb);
         for (int t = 0; t < kTracks; ++t)
@@ -392,6 +421,18 @@ public:
         editPattern.store (p.currentPattern);
         for (int i = 0; i < kSongSlots; ++i) songChainA[i].store (p.songChain[i]);
         songLength.store (p.songLength);
+        songMode.store (p.songMode); // item 99b: the mode is project state now
+        for (int i = 0; i < kMaxSongBlocks; ++i)
+        {
+            const auto& b = p.songBlocks[i];
+            blkPatternA[(size_t) i].store (b.pattern);
+            blkLaneA[(size_t) i].store (b.lane);
+            blkStartA[(size_t) i].store (b.startBar);
+            blkLenA[(size_t) i].store (b.lengthBars);
+            blkActiveA[(size_t) i].store (b.active);
+        }
+        refreshSongTotalBars();
+        blocksRevisionA.fetch_add (1);
         kickTune.store (p.kickTuneHz);        kickDecay.store (p.kickDecayMs);
         snareSnappy.store (p.snareSnappy);
         openHatDecay.store (p.openHatDecayMs); clapTail.store (p.clapTailMs);
@@ -644,6 +685,144 @@ public:
     bool isSongMode() const      { return songMode.load(); }
     int  getPlayPattern() const  { return playPattern.load(); }  // the pattern sounding right now
     int  getPlaySongPos() const  { return playSongPos.load(); }  // chain position, -1 in pattern mode
+
+    // ---------------- Round 4 (item 99c): the arrangement ----------------
+    // Pattern blocks on lanes over a bar timeline - the playlist's real
+    // model. When any block exists it, not the legacy chain, is what
+    // song mode plays (applySettings converts a chain-only project into
+    // blocks, so the two never fight). Blocks live in atomics: the UI
+    // writes them, the audio thread reads them through an RT snapshot.
+    using SongBlock = ProjectSettings::SongBlock;
+
+    int songBlockCount() const
+    {
+        int n = 0;
+        for (const auto& a : blkActiveA) if (a.load()) ++n;
+        return n;
+    }
+    SongBlock getSongBlock (int i) const
+    {
+        SongBlock b;
+        if (i < 0 || i >= kMaxSongBlocks) return b;
+        b.active     = blkActiveA[(size_t) i].load();
+        b.pattern    = blkPatternA[(size_t) i].load();
+        b.lane       = blkLaneA[(size_t) i].load();
+        b.startBar   = blkStartA[(size_t) i].load();
+        b.lengthBars = blkLenA[(size_t) i].load();
+        return b;
+    }
+    void setSongBlock (int i, const SongBlock& b)
+    {
+        if (i < 0 || i >= kMaxSongBlocks) return;
+        blkPatternA[(size_t) i].store (std::clamp (b.pattern, 0, kPatterns - 1));
+        blkLaneA[(size_t) i].store (std::clamp (b.lane, 0, kSongLanes - 1));
+        blkStartA[(size_t) i].store (std::max (0, b.startBar));
+        blkLenA[(size_t) i].store (std::max (1, b.lengthBars));
+        blkActiveA[(size_t) i].store (b.active);
+        refreshSongTotalBars();
+        blocksRevisionA.fetch_add (1);
+    }
+    // First free slot, or -1 when the arrangement is full.
+    int addSongBlock (const SongBlock& b)
+    {
+        for (int i = 0; i < kMaxSongBlocks; ++i)
+            if (! blkActiveA[(size_t) i].load()) { setSongBlock (i, b); return i; }
+        return -1;
+    }
+    void removeSongBlock (int i)
+    {
+        if (i < 0 || i >= kMaxSongBlocks) return;
+        blkActiveA[(size_t) i].store (false);
+        refreshSongTotalBars();
+        blocksRevisionA.fetch_add (1);
+    }
+    void clearSongBlocks()
+    {
+        for (auto& a : blkActiveA) a.store (false);
+        refreshSongTotalBars();
+        blocksRevisionA.fetch_add (1);
+    }
+    // The arrangement's length in bars (0 = no arrangement).
+    int  songTotalBars() const   { return songTotalBarsA.load(); }
+    bool hasArrangement() const  { return songTotalBarsA.load() > 0; }
+    // The song bar under the playhead in arrangement playback (-1 else).
+    int  getPlaySongBar() const  { return playSongBarA.load(); }
+
+    // One block sounding at one song step: its pattern, the step inside
+    // the pattern (the pattern loops inside a longer block), its lane,
+    // and its block index.
+    struct BlockHit { int pattern = 0, localStep = 0, lane = 0, block = -1; };
+
+    // The arrangement resolution, pure so the tests can pin it: every
+    // block covering the absolute song step, ordered by lane (array
+    // order breaks a same-lane tie, which the playlist's no-overlap
+    // rule already prevents). Playback merge rule (item 99c): drum and
+    // sample rows take the MAX velocity across hits and trigger once -
+    // the same pattern on two lanes never double-triggers a row; the
+    // monophonic melody/synth/piano lanes take the lowest lane's note.
+    static int resolveSongStep (const SongBlock* blocks, int numBlocks,
+                                long long songStep, BlockHit* out, int maxOut)
+    {
+        int n = 0;
+        for (int i = 0; i < numBlocks && n < maxOut; ++i)
+        {
+            const SongBlock& b = blocks[i];
+            if (! b.active) continue;
+            const long long start = (long long) b.startBar * 16;
+            const long long len = (long long) b.lengthBars * 16;
+            if (songStep < start || songStep >= start + len) continue;
+            out[n].pattern = b.pattern;
+            out[n].localStep = (int) ((songStep - start) % kSteps);
+            out[n].lane = b.lane;
+            out[n].block = i;
+            ++n;
+        }
+        std::sort (out, out + n, [] (const BlockHit& a, const BlockHit& b)
+        {
+            return a.lane != b.lane ? a.lane < b.lane : a.block < b.block;
+        });
+        return n;
+    }
+
+    // Can `candidate` sit in the arrangement without overlapping a
+    // block on its own lane? (Other lanes may overlap freely - they
+    // sound together.) `ignore` is the block being moved, or -1.
+    bool arrangementCanPlace (const SongBlock& candidate, int ignore) const
+    {
+        if (! candidate.active) return true;
+        const long long cs = candidate.startBar, ce = cs + candidate.lengthBars;
+        for (int i = 0; i < kMaxSongBlocks; ++i)
+        {
+            if (i == ignore) continue;
+            const auto b = getSongBlock (i);
+            if (! b.active || b.lane != candidate.lane) continue;
+            if (cs < (long long) b.startBar + b.lengthBars && (long long) b.startBar < ce)
+                return false;
+        }
+        return true;
+    }
+
+    // ---------------- Round 4 (item 99a): the ghost roll's data ----------------
+    // The pitched-lane note a sequencer row owns at a step of the EDIT
+    // pattern (0 = none, else the lane value, semitone offset + 25).
+    // The melody lane belongs to whichever source the pattern chose:
+    // the kick owns it when the source is 0, pad row Sample1+i owns it
+    // when the source is i+1. Rows with no pitched lane read 0.
+    int ghostNoteValue (int track, int step) const
+    {
+        if (step < 0 || step >= kSteps) return 0;
+        int src = -1;
+        if (track == Kick) src = 0;
+        else if (track >= Sample1 && track < Sample1 + kPads) src = track - Sample1 + 1;
+        else return 0;
+        const int pat = editPattern.load();
+        if (patMelodySource[(size_t) pat].load() != src) return 0;
+        return patMelody[(size_t) pat * kSteps + (size_t) step].load();
+    }
+    bool trackHasGhostLane (int track) const
+    {
+        return track == Kick || (track >= Sample1 && track < Sample1 + kPads);
+    }
 
     // ---------------- piano roll (one monophonic melody lane) ----------------
     // Note values match ProjectSettings: 0 = off, else semitone offset + 25.
@@ -1259,8 +1438,15 @@ public:
     long long transportLengthSamples() const
     {
         const long long pattern = (long long) std::llround (stepSamples() * (double) kSteps);
-        if (songMode.load() && songLength.load() > 0)
-            return pattern * (long long) songLength.load();
+        if (songMode.load())
+        {
+            // Round 4 (item 99c): the arrangement sets the song's length
+            // when it exists; the legacy chain otherwise.
+            if (songTotalBarsA.load() > 0)
+                return (long long) std::llround (stepSamples() * 16.0 * (double) songTotalBarsA.load());
+            if (songLength.load() > 0)
+                return pattern * (long long) songLength.load();
+        }
         return pattern;
     }
     // The skip arithmetic, pure so the tests can pin it: move `steps`
@@ -1306,7 +1492,41 @@ public:
         // tick - at an exact boundary that is 0, which is precisely the
         // old play-from-the-top behaviour (tick 0 sounds at sample 0),
         // and the phase against the sample-counted audio clips is exact.
-        if (songMode.load() && songLength.load() > 0)
+        if (songMode.load() && songTotalBarsA.load() > 0)
+        {
+            // Round 4 (item 99c): park inside the ARRANGEMENT. The song
+            // position is an absolute step; the window and tick fall out
+            // of it, and the sounding pattern is whichever block covers
+            // the parked step (lowest lane first).
+            refreshRtBlocksIfNeeded();
+            const long long totalSteps = (long long) songTotalBarsA.load() * 16;
+            const long long stepPos = wholeTicks / kTicksPer16th;
+            if (stepPos >= totalSteps)
+            {
+                // parked at the very end: sit on the song's final tick,
+                // which fires at once and wraps the arrangement
+                const long long lastStep = totalSteps - 1;
+                songWindow = (int) (lastStep / kSteps);
+                tick = (int) ((lastStep % kSteps) * kTicksPer16th + (kTicksPer16th - 1));
+                samplesToNextTick = 0.0;
+            }
+            else
+            {
+                songWindow = (int) (stepPos / kSteps);
+                tick = (int) (wholeTicks % ticksPerPattern);
+                samplesToNextTick = -fracTick * samplesPerTick;
+            }
+            barsDone = songWindow;
+            songPos = 0;
+            placedFresh = true;
+            const long long curStep = (long long) songWindow * kSteps + tick / kTicksPer16th;
+            BlockHit hits[16];
+            const int nh = resolveSongStep (rtBlocks, kMaxSongBlocks, curStep, hits, 16);
+            activePattern = nh > 0 ? hits[0].pattern : editPattern.load();
+            playSongPos.store (nh > 0 ? hits[0].block : -1);
+            playSongBarA.store ((int) (curStep / 16));
+        }
+        else if (songMode.load() && songLength.load() > 0)
         {
             long long patterns = wholeTicks / ticksPerPattern;
             if (patterns >= (long long) songLength.load())
@@ -1326,6 +1546,7 @@ public:
             barsDone = (int) patterns;
             activePattern = chainAt (songPos);
             playSongPos.store (songPos);
+            playSongBarA.store (-1); // the bar readout belongs to the arrangement
         }
         else
         {
@@ -1333,8 +1554,10 @@ public:
             samplesToNextTick = -fracTick * samplesPerTick;
             barsDone = (int) (wholeTicks / ticksPerPattern);
             songPos = 0;
+            songWindow = 0;
             activePattern = editPattern.load();
             playSongPos.store (-1);
+            playSongBarA.store (-1);
         }
         playPattern.store (activePattern);
         // While stopped the play step stays -1 (no playhead); the grid
@@ -1529,8 +1752,24 @@ public:
                 {
                     if (tick == 0)
                     {
-                        // bar line: advance the song chain, or follow the edited pattern
-                        if (songMode.load() && songLength.load() > 0)
+                        // bar line: advance the arrangement window, the
+                        // song chain, or follow the edited pattern
+                        if (songMode.load() && songTotalBarsA.load() > 0)
+                        {
+                            // Round 4 (item 99c): the transport counts
+                            // 32-step windows across the arrangement;
+                            // fireTick resolves the blocks per step.
+                            refreshRtBlocksIfNeeded();
+                            const int totalWindows = (songTotalBarsA.load() * 16 + kSteps - 1) / kSteps;
+                            if (barsDone > 0 && ! placedFresh && totalWindows > 1)
+                                songWindow = (songWindow + 1) % totalWindows;
+                            BlockHit hits[16];
+                            const int nh = resolveSongStep (rtBlocks, kMaxSongBlocks,
+                                                            (long long) songWindow * kSteps, hits, 16);
+                            activePattern = nh > 0 ? hits[0].pattern : editPattern.load();
+                            playSongPos.store (nh > 0 ? hits[0].block : -1);
+                        }
+                        else if (songMode.load() && songLength.load() > 0)
                         {
                             if (barsDone > 0 && songLength.load() > 1)
                                 songPos = (songPos + 1) % songLength.load();
@@ -1553,7 +1792,20 @@ public:
                         takeStartPosA.store (transportSamples);
                     }
                     fireTick (tick, swingNow, samplesOk, samplesPerTick);
-                    tick = (tick + 1) % (kSteps * kTicksPer16th);
+                    ++tick;
+                    if (songMode.load() && songTotalBarsA.load() > 0)
+                    {
+                        // Round 4 (item 99c): the song wraps at its TRUE
+                        // end, which can fall mid-window (a 5-bar song
+                        // ends at step 80, inside window 3) - the next
+                        // tick becomes the wrap branch's tick 0.
+                        const long long nextStep = (long long) songWindow * kSteps
+                                                 + tick / kTicksPer16th;
+                        if (tick >= kSteps * kTicksPer16th
+                            || nextStep >= (long long) songTotalBarsA.load() * 16)
+                            tick = 0;
+                    }
+                    else tick %= (kSteps * kTicksPer16th);
                     samplesToNextTick += samplesPerTick;
                 }
                 samplesToNextTick -= 1.0;
@@ -2047,7 +2299,18 @@ private:
 
     void fireTick (int t, float swingPercent, bool samplesOk, double samplesPerTick)
     {
+        placedFresh = false; // consumed: the park's own tick-0 has passed
         playStep.store (t / kTicksPer16th);
+        // Round 4 (item 99c): in song mode with an arrangement, each step
+        // resolves the blocks covering it instead of following the one
+        // active pattern. The RT block snapshot refreshes here, once
+        // per tick, only when the UI changed something.
+        const bool arrange = songMode.load() && songTotalBarsA.load() > 0;
+        if (arrange)
+        {
+            refreshRtBlocksIfNeeded();
+            playSongBarA.store ((songWindow * kSteps + t / kTicksPer16th) / 16);
+        }
         for (int s = 0; s < kSteps; ++s)
         {
             const int base = s * kTicksPer16th;
@@ -2060,6 +2323,49 @@ private:
                 clickSamplesLeft = (int) (0.03 * sr);
             }
             const int activeTracks = numTracksA.load();
+            if (arrange)
+            {
+                const long long songStep = (long long) songWindow * kSteps + s;
+                if (songStep >= (long long) songTotalBarsA.load() * 16) continue;
+                BlockHit hits[16];
+                const int nh = resolveSongStep (rtBlocks, kMaxSongBlocks, songStep, hits, 16);
+                if (nh == 0) continue;
+                // rows: the max velocity across hits, one trigger per row
+                for (int tr = 0; tr < activeTracks; ++tr)
+                {
+                    int v = 0;
+                    for (int h = 0; h < nh; ++h)
+                        v = std::max (v, (int) patGrid[(size_t) gIdx (hits[h].pattern, tr, hits[h].localStep)].load());
+                    if (v > 0) trigger (tr, v / 127.0f, samplesOk);
+                }
+                // the monophonic lanes: the lowest lane with a note wins
+                for (int h = 0; h < nh; ++h)
+                {
+                    const int mv = patMelody[(size_t) hits[h].pattern * kSteps + (size_t) hits[h].localStep].load();
+                    if (mv == 0) continue;
+                    const float semitones = (float) (mv - 25);
+                    const int src = patMelodySource[(size_t) hits[h].pattern].load();
+                    if (src == 0) kick.triggerPitched (0.9f, semitones);
+                    else if (samplesOk) pads.triggerWithTune (src - 1, 0.9f, semitones);
+                    break;
+                }
+                for (int h = 0; h < nh; ++h)
+                {
+                    const int sv = patSynth[(size_t) hits[h].pattern * kSteps + (size_t) hits[h].localStep].load();
+                    if (sv == 0) continue;
+                    synth.noteOn ((float) (sv - 25), 0.9f,
+                                  (int) (samplesPerTick * kTicksPer16th * 0.9));
+                    break;
+                }
+                for (int h = 0; h < nh; ++h)
+                {
+                    const int pv = patPiano[(size_t) hits[h].pattern * kSteps + (size_t) hits[h].localStep].load();
+                    if (pv == 0) continue;
+                    piano.noteOn ((float) (pv - 25), 0.9f);
+                    break;
+                }
+                continue;
+            }
             for (int tr = 0; tr < activeTracks; ++tr)
             {
                 const int v = patGrid[(size_t) gIdx (activePattern, tr, s)].load();
@@ -2270,6 +2576,41 @@ private:
     std::array<std::atomic<int>, kPatterns> patMelodySource;
     std::array<std::atomic<int>, kPatterns * kSteps> patSynth, patPiano;
     std::array<std::atomic<int>, kSongSlots> songChainA;
+
+    // Round 4 (item 99c): the arrangement's atomics (see the API above).
+    std::array<std::atomic<bool>, kMaxSongBlocks> blkActiveA;
+    std::array<std::atomic<int>, kMaxSongBlocks> blkPatternA, blkLaneA, blkStartA, blkLenA;
+    std::atomic<int> songTotalBarsA { 0 };
+    std::atomic<int> blocksRevisionA { 0 };
+    std::atomic<int> playSongBarA { -1 };
+    // Audio thread only: the RT snapshot of the blocks + the current
+    // 32-step window of the song (arrangement playback counts windows,
+    // because blocks align to bars, not to pattern boundaries).
+    SongBlock rtBlocks[kMaxSongBlocks];
+    int rtBlocksRevision = -1;
+    int songWindow = 0;
+    // Set by placeTransportAt: the tick-0 that fires AT a parked window
+    // boundary is the park itself, not a completed window - the
+    // arrangement's advance must not skip the parked window for it.
+    // fireTick clears it (the advance branch runs before fireTick in
+    // the same pass, so the flag survives exactly one tick-0).
+    bool placedFresh = false;
+
+    void refreshSongTotalBars()
+    {
+        int bars = 0;
+        for (int i = 0; i < kMaxSongBlocks; ++i)
+            if (blkActiveA[(size_t) i].load())
+                bars = std::max (bars, blkStartA[(size_t) i].load() + blkLenA[(size_t) i].load());
+        songTotalBarsA.store (bars);
+    }
+    void refreshRtBlocksIfNeeded()
+    {
+        const int rev = blocksRevisionA.load();
+        if (rev == rtBlocksRevision) return;
+        rtBlocksRevision = rev;
+        for (int i = 0; i < kMaxSongBlocks; ++i) rtBlocks[i] = getSongBlock (i);
+    }
 
     // pad capture (item 31)
     std::atomic<bool> padCaptureOn { true };

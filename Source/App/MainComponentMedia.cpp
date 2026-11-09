@@ -458,7 +458,7 @@ void MainComponent::openPlaylist()
         playlistWindow = std::make_unique<PlaylistWindow> ("BoomBap Playlist", boombap::ui::bg());
         playlistWindow->setLookAndFeel (&lookAndFeel);
         playlistWindow->setContentNonOwned (playlist.get(), false); // the unique_ptr owns it - the window must not delete it too
-        playlistWindow->centreWithSize (700, 320);
+        playlistWindow->centreWithSize (980, 480); // item 99c: the arrangement needs room the chain never did
     }
     playlist->refreshFromEngine();
     playlistWindow->setVisible (true);

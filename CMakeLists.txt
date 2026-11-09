@@ -378,6 +378,30 @@ if(BOOMBAP_BUILD_TESTS)
     endif()
     add_test(NAME round3 COMMAND Round3Test)
 
+    # round-4 test (Breakdown #1 items 98/99: the piano roll as a real
+    # editor - steps-as-notes, octave shift, track drop-down, zoom,
+    # chord/progression stamps - the playlist as a track-view
+    # arrangement with measured song playback, legacy-chain conversion,
+    # the ghost roll's data path, and the PATTERN/SONG buttons)
+    add_executable(Round4Test
+        Tests/Round4Test.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(Round4Test PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(Round4Test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(Round4Test PRIVATE X11)
+    endif()
+    add_test(NAME round4 COMMAND Round4Test)
+
     # recent-projects list test (storage logic, no UI)
     add_executable(RecentProjectsTest Tests/RecentProjectsTest.cpp)
     target_link_libraries(RecentProjectsTest PRIVATE juce::juce_gui_extra juce::juce_gui_basics)

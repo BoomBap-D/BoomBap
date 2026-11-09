@@ -428,10 +428,11 @@ void MainComponent::exportTo (const File& file)
     // Fix pass item 34: choosing "Whole song" does the same pass even when
     // song mode is off (and renders one bar of pattern if the playlist is
     // still empty).
-    const bool wantWholeSong = exportBars.getSelectedId() == 100 && engine.getSongLength() > 0;
-    const bool songExport = engine.isSongMode() && engine.getSongLength() > 0;
-    // a playlist slot is one pattern = two bars now (item 48)
-    const int bars = (songExport || wantWholeSong) ? engine.getSongLength() * 2 : exportBars.getSelectedId();
+    // Round 4 (item 99c): the song's length is the arrangement's bar
+    // count now (a converted legacy chain reports the same number).
+    const bool wantWholeSong = exportBars.getSelectedId() == 100 && engine.songTotalBars() > 0;
+    const bool songExport = engine.isSongMode() && engine.songTotalBars() > 0;
+    const int bars = (songExport || wantWholeSong) ? engine.songTotalBars() : exportBars.getSelectedId();
     const bool normalize = normalizeToggle.getToggleState();
     const double sampleRate = engine.getSampleRate();
 

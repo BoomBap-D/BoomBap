@@ -109,8 +109,90 @@ struct ProjectSettings
     int   currentPattern = 0;                        // the pattern being edited
 
     // Playlist: a chain of pattern indices played in order in song mode.
+    // Round 4 (item 99c): this is the LEGACY form, kept so old files and
+    // old builds still read a song. The arrangement below is the real
+    // model now; convertChainToBlocks() lifts a chain into blocks on
+    // load, and refreshChainMirror() writes back the chain a lane-1
+    // arrangement reduces to, so the two never disagree in a saved file.
     int   songChain[kSongSlots];
     int   songLength = 0;                            // 0 = no song, pattern mode only
+
+    // Round 4 (item 99b): PATTERN / SONG mode persists in the project.
+    bool  songMode = false;
+
+    // Round 4 (item 99c): the arrangement - pattern blocks laid on
+    // lanes over a bar timeline. A block sounds its pattern from its
+    // start bar for its length in bars; a pattern is two bars, so a
+    // longer block loops the pattern inside itself and a shorter one
+    // trims it. Blocks on the same lane never overlap (the playlist
+    // enforces it); blocks on different lanes sound together.
+    struct SongBlock
+    {
+        bool active = false;
+        int  pattern = 0;    // 0..kPatterns-1
+        int  lane = 0;       // 0..kSongLanes-1
+        int  startBar = 0;
+        int  lengthBars = 2;
+    };
+    static constexpr int kSongLanes = 4;
+    static constexpr int kMaxSongBlocks = 64;
+    SongBlock songBlocks[kMaxSongBlocks];
+
+    bool hasBlocks() const
+    {
+        for (const auto& b : songBlocks) if (b.active) return true;
+        return false;
+    }
+    // The song's length in bars, from the blocks alone (0 = no arrangement).
+    int arrangementBars() const
+    {
+        int bars = 0;
+        for (const auto& b : songBlocks)
+            if (b.active) bars = std::max (bars, b.startBar + b.lengthBars);
+        return bars;
+    }
+    // Lifts the legacy chain into lane-1 blocks (each slot = one 2-bar
+    // block). A no-op when blocks already exist or there is no chain:
+    // nothing the owner made is lost either way.
+    void convertChainToBlocks()
+    {
+        if (hasBlocks()) return;
+        const int n = std::clamp (songLength, 0, kSongSlots);
+        for (int i = 0; i < n && i < kMaxSongBlocks; ++i)
+        {
+            auto& b = songBlocks[(size_t) i];
+            b.active = true;
+            b.pattern = std::clamp (songChain[i], 0, kPatterns - 1);
+            b.lane = 0;
+            b.startBar = i * 2;
+            b.lengthBars = 2;
+        }
+    }
+    // Rewrites songChain/songLength as the chain the arrangement reduces
+    // to, for readers that only know the legacy form (older builds).
+    // Representable only when lane 1 alone tiles the song contiguously
+    // from bar 0 in exact 2-bar blocks; anything richer honestly reads
+    // as "no chain" (length 0) rather than a wrong one. No blocks: the
+    // legacy fields stand untouched.
+    void refreshChainMirror()
+    {
+        if (! hasBlocks()) return;
+        const SongBlock* order[kMaxSongBlocks];
+        int count = 0;
+        for (const auto& b : songBlocks) if (b.active) order[count++] = &b;
+        std::sort (order, order + count,
+                   [] (const SongBlock* a, const SongBlock* b) { return a->startBar < b->startBar; });
+        bool ok = count <= kSongSlots;
+        for (int i = 0; ok && i < count; ++i)
+            if (order[i]->lane != 0 || order[i]->lengthBars != 2 || order[i]->startBar != i * 2)
+                ok = false;
+        if (ok)
+        {
+            for (int i = 0; i < count; ++i) songChain[i] = order[i]->pattern;
+            songLength = count;
+        }
+        else songLength = 0;
+    }
     float trackGain[kTracks];
     bool  trackMute[kTracks];
     bool  trackSolo[kTracks];
@@ -260,6 +342,13 @@ struct ProjectSettings
         currentPattern = std::clamp (currentPattern, 0, kPatterns - 1);
         for (int i = 0; i < kSongSlots; ++i) songChain[i] = std::clamp (songChain[i], 0, kPatterns - 1);
         songLength = std::clamp (songLength, 0, kSongSlots);
+        for (auto& b : songBlocks)
+        {
+            b.pattern    = std::clamp (b.pattern, 0, kPatterns - 1);
+            b.lane       = std::clamp (b.lane, 0, kSongLanes - 1);
+            b.startBar   = std::clamp (b.startBar, 0, 4096);
+            b.lengthBars = std::clamp (b.lengthBars, 1, 4096);
+        }
         kickTuneHz = std::clamp (kickTuneHz, 40.0f, 70.0f);
         kickDecayMs = std::clamp (kickDecayMs, 200.0f, 1200.0f);
         snareSnappy = std::clamp (snareSnappy, 0.0f, 1.0f);

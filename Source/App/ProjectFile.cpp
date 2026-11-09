@@ -66,6 +66,16 @@ String projectToJson (const ProjectData& d, const File& projectFile)
     Array<var> chain;
     for (int i = 0; i < ProjectSettings::kSongSlots; ++i) chain.add (s.songChain[i]);
 
+    // Round 4 (item 99c): the arrangement. Only active blocks are
+    // written; the legacy chain above stays as the mirror the settings
+    // derived from them (refreshChainMirror), so older builds still
+    // read the song a lane-1 arrangement reduces to.
+    Array<var> blocks;
+    for (const auto& b : s.songBlocks)
+        if (b.active)
+            blocks.add (object ({ { "pattern", b.pattern }, { "lane", b.lane },
+                                  { "startBar", b.startBar }, { "lengthBars", b.lengthBars } }));
+
     for (size_t i = 0; i < d.samplePaths.size(); ++i)
     {
         if (d.samplePaths[i].isEmpty()) continue;
@@ -207,7 +217,8 @@ String projectToJson (const ProjectData& d, const File& projectFile)
         { "master", object ({ { "gainDb", (double) s.masterDb } }) },
         { "patterns", var (patterns) },
         { "currentPattern", s.currentPattern },
-        { "song", object ({ { "length", s.songLength }, { "chain", var (chain) } }) },
+        { "song", object ({ { "length", s.songLength }, { "chain", var (chain) },
+                             { "mode", s.songMode }, { "blocks", var (blocks) } }) },
         { "tracks", var (tracks) },
         { "drums", object ({ { "kickTuneHz", (double) s.kickTuneHz }, { "kickDecayMs", (double) s.kickDecayMs },
                              { "snareSnappy", (double) s.snareSnappy }, { "openHatDecayMs", (double) s.openHatDecayMs },
@@ -307,6 +318,25 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
         if (auto* chainIn = song.getProperty ("chain", var()).getArray())
             for (int i = 0; i < ProjectSettings::kSongSlots && i < chainIn->size(); ++i)
                 s.songChain[i] = (int) std::lround (numberOr ((*chainIn)[i], 0.0));
+        // Round 4 (items 99b/99c): the mode and the arrangement. Files
+        // from before this round carry neither - the mode defaults off
+        // and the engine lifts the chain into blocks on apply.
+        s.songMode = getB (song, "mode", s.songMode);
+        if (auto* blocksIn = song.getProperty ("blocks", var()).getArray())
+        {
+            int bi = 0;
+            for (int i = 0; i < blocksIn->size() && bi < ProjectSettings::kMaxSongBlocks; ++i)
+            {
+                const var& bv = (*blocksIn)[i];
+                if (! bv.isObject()) continue;
+                auto& b = s.songBlocks[(size_t) bi++];
+                b.active = true;
+                b.pattern    = getI (bv, "pattern", 0);
+                b.lane       = getI (bv, "lane", 0);
+                b.startBar   = getI (bv, "startBar", 0);
+                b.lengthBars = getI (bv, "lengthBars", 2);
+            }
+        }
     }
     else if (auto* rows = root.getProperty ("pattern", var()).getArray())
     {
