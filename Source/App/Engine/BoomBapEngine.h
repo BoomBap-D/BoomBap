@@ -1050,6 +1050,122 @@ public:
         dirty.store (true);
         return n + 1;
     }
+    //======================================================================
+    // FIX PASS 3, item 69: whole-track deletion. Only rows the USER added
+    // can be deleted. Kit rows 0-4 are protected - they are the starter
+    // kit's skeleton (their samples stay replaceable per item 40 and
+    // Reset restores the built-ins, but the rows themselves stay), and
+    // pad rows 5-20 are bound to the sixteen physical pads: deleting one
+    // would orphan a pad. Everything a deleted row owns moves with it:
+    // its steps in every pattern, its mixer atomics, its Station strip
+    // and pan, its own sample slot. Rows above shift down one. Wrapped
+    // in the caller's snapshot undo gesture this is ONE undoable action,
+    // and redo re-applies the post-delete snapshot, so nothing the row
+    // held can return as a ghost.
+    bool removeTrack (int track)
+    {
+        const int n = numTracksA.load();
+        if (track < kFirstOwnRow || track >= n) return false;
+
+        for (int pt = 0; pt < kPatterns; ++pt)
+        {
+            for (int t = track; t < n - 1; ++t)
+                for (int s = 0; s < kSteps; ++s)
+                    patGrid[(size_t) gIdx (pt, t, s)].store (patGrid[(size_t) gIdx (pt, t + 1, s)].load());
+            for (int s = 0; s < kSteps; ++s)
+                patGrid[(size_t) gIdx (pt, n - 1, s)].store (0);
+        }
+        for (int t = track; t < n - 1; ++t)
+        {
+            trackGain[(size_t) t].store (trackGain[(size_t) (t + 1)].load());
+            trackMute[(size_t) t].store (trackMute[(size_t) (t + 1)].load());
+            trackSolo[(size_t) t].store (trackSolo[(size_t) (t + 1)].load());
+        }
+        trackGain[(size_t) (n - 1)].store (0.8f);
+        trackMute[(size_t) (n - 1)].store (false);
+        trackSolo[(size_t) (n - 1)].store (false);
+        {
+            std::lock_guard<std::mutex> lock (sampleMutex);
+            for (int t = track; t < n - 1; ++t)
+            {
+                ownData[(size_t) (t - kFirstOwnRow)]   = ownData[(size_t) (t + 1 - kFirstOwnRow)];
+                ownSrcSr[(size_t) (t - kFirstOwnRow)]  = ownSrcSr[(size_t) (t + 1 - kFirstOwnRow)];
+                ownBoundA[(size_t) (t - kFirstOwnRow)].store (ownBoundA[(size_t) (t + 1 - kFirstOwnRow)].load());
+            }
+            ownData[(size_t) (n - 1 - kFirstOwnRow)].reset();
+            ownSrcSr[(size_t) (n - 1 - kFirstOwnRow)] = 44100.0;
+            ownBoundA[(size_t) (n - 1 - kFirstOwnRow)].store (false);
+        }
+        {
+            std::lock_guard<std::mutex> lock (stationMutex);
+            for (int ch = track; ch < n - 1; ++ch)
+            {
+                station.strips[(size_t) ch] = station.strips[(size_t) (ch + 1)];
+                station.pan[(size_t) ch]    = station.pan[(size_t) (ch + 1)];
+            }
+            station.strips[(size_t) (n - 1)] = {};
+            station.pan[(size_t) (n - 1)] = 0.0f;
+        }
+        stationDirty.store (true);
+        stationRevision.fetch_add (1);
+        numTracksA.store (n - 1);
+        dirty.store (true);
+        return true;
+    }
+
+    // FIX PASS 3, item 69: delete an added audio lane whole - the lane,
+    // every clip on it, and its Station channel. Lane 0 is protected:
+    // it is the permanent home every recorded take lands on. Clips on
+    // lanes above shift down one lane; the take's homing follows its
+    // clip, and if the take's own clip died with the lane the take is
+    // un-homed (its audio untouched) so the established re-homing paths
+    // can place it again - no invisible audio either way (item 61).
+    bool removeAudioTrack (int track)
+    {
+        const int n = numAudioTracksA.load();
+        if (track < 1 || track >= n) return false;
+
+        const bool takeDies = takeIsPlaced() && takeClipSlot() >= 0
+                              && clipsA[(size_t) takeClipSlot()].track.load() == track;
+        for (int i = 0; i < kMaxAudioClips; ++i)
+        {
+            if (! clipsA[(size_t) i].active.load()) continue;
+            const int ct = clipsA[(size_t) i].track.load();
+            if (ct == track) clearAudioClip (i);
+            else if (ct > track) clipsA[(size_t) i].track.store (ct - 1);
+        }
+        if (takeDies) placedSerial = -2; // un-homed; its audio is untouched
+
+        for (int t = track; t < n - 1; ++t)
+        {
+            audioGainA[(size_t) t].store (audioGainA[(size_t) (t + 1)].load());
+            audioMuteA[(size_t) t].store (audioMuteA[(size_t) (t + 1)].load());
+            audioSoloA[(size_t) t].store (audioSoloA[(size_t) (t + 1)].load());
+        }
+        audioGainA[(size_t) (n - 1)].store (0.9f);
+        audioMuteA[(size_t) (n - 1)].store (false);
+        audioSoloA[(size_t) (n - 1)].store (false);
+        {
+            std::lock_guard<std::mutex> lock (stationMutex);
+            for (int ch = kAudioChannelBase + track; ch < kAudioChannelBase + n - 1; ++ch)
+            {
+                station.strips[(size_t) ch] = station.strips[(size_t) (ch + 1)];
+                station.pan[(size_t) ch]    = station.pan[(size_t) (ch + 1)];
+            }
+            station.strips[(size_t) (kAudioChannelBase + n - 1)] = {};
+            station.pan[(size_t) (kAudioChannelBase + n - 1)] = 0.0f;
+        }
+        stationDirty.store (true);
+        stationRevision.fetch_add (1);
+        const int rt = recTrackA.load();
+        if (rt == track) recTrackA.store (0);
+        else if (rt > track) recTrackA.store (rt - 1);
+        numAudioTracksA.store (n - 1);
+        clipRevision.fetch_add (1);
+        dirty.store (true);
+        return true;
+    }
+
     void setRecTargetTrack (int t) { recTrackA.store (std::clamp (t, 0, kAudioTracks - 1)); }
     int  getRecTargetTrack() const { return recTrackA.load(); }
     void setAudioClipTrack (int slot, int t)

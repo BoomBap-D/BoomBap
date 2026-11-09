@@ -4,6 +4,7 @@
 #include "BoomBapLookAndFeel.h"
 #include <cstdint>
 #include <functional>
+#include <set>
 
 // The AUDIO MULTITRACK view (items 32/35, made self-sufficient in fix
 // pass 2, multi-track in item 60): the top work area in its audio mode.
@@ -135,6 +136,13 @@ public:
                 if (onAfterChange) onAfterChange();
             };
             addChildComponent (s);
+
+            // Fix Pass 3 (item 69): whole-lane delete. Lane 0 never gets
+            // one - it is the permanent home every take lands on.
+            auto& del = laneDelete[(size_t) t];
+            del.setButtonText ("X");
+            del.onClick = [this, t] { deleteAudioTrack (t); };
+            addChildComponent (del);
         }
 
         laneScroll.addListener (this);
@@ -143,6 +151,7 @@ public:
         hintLabel.setColour (juce::Label::textColourId, boombap::ui::muted());
         hintLabel.setText ("Clip gestures, the same in every state: click selects - drag moves whole (across lanes too) - "
                            "edge-drag trims - Ctrl+click or right-click cuts - DELETE key or button removes the selected clip. "
+                           "Drag across empty lane space to select a group of clips at once. The X on a lane (tracks 2+) deletes the whole lane. "
                            "Click a track header to arm it for recording.",
                            juce::dontSendNotification);
         addAndMakeVisible (hintLabel);
@@ -184,9 +193,51 @@ public:
         repaint();
     }
 
+    // Fix Pass 3 (item 69): delete an added audio lane whole - the lane,
+    // every clip on it, its mixer settings and its Station channel - as
+    // one undoable action.
+    void deleteAudioTrack (int t)
+    {
+        if (t < 1) return; // lane 0 is protected in the engine too
+        if (onBeforeChange) onBeforeChange();
+        if (engine.removeAudioTrack (t))
+        {
+            if (selectedSlot >= 0 && ! engine.getAudioClip (selectedSlot).active)
+            {
+                selectedSlot = -1;
+                deleteButton.setEnabled (false);
+            }
+            marqueeSlots.clear();
+            dragSlot = -1;
+            dragMode = 0;
+            refreshFromEngine();
+            if (onChange) onChange();
+        }
+        if (onAfterChange) onAfterChange();
+        repaint();
+    }
+
     // Item 51: remove the selected clip (the DELETE button and key).
+    // Fix Pass 3 (item 69): with a marquee selection live, the whole
+    // selection goes together, as one undoable action.
     void deleteSelectedClip()
     {
+        if (! marqueeSlots.empty())
+        {
+            if (onBeforeChange) onBeforeChange();
+            for (int s : marqueeSlots)
+                engine.clearAudioClip (s);
+            marqueeSlots.clear();
+            selectedSlot = -1;
+            deleteButton.setEnabled (false);
+            dragSlot = -1;
+            dragMode = 0;
+            rebuildPeaks();
+            repaint();
+            if (onChange) onChange();
+            if (onAfterChange) onAfterChange();
+            return;
+        }
         if (selectedSlot < 0) return;
         if (! engine.getAudioClip (selectedSlot).active) { selectedSlot = -1; return; }
         if (onBeforeChange) onBeforeChange();
@@ -377,13 +428,14 @@ public:
                 if (r.getWidth() < 1.0f) continue;
                 const bool dragging = dragSlot == i;
                 const bool selected = selectedSlot == i;
+                const bool inMarquee = marqueeSlots.find (i) != marqueeSlots.end();
                 const bool sounding = (mask & (1u << i)) != 0u;
 
                 g.setColour (sounding ? accent().withAlpha (0.55f)
                                       : accent().withAlpha (dragging ? 0.85f : 0.22f));
                 g.fillRoundedRectangle (r, 6.0f);
-                g.setColour (sounding || selected ? juce::Colours::white : accent());
-                g.drawRoundedRectangle (r, 6.0f, (sounding || selected) ? 2.2f : 1.4f);
+                g.setColour (sounding || selected || inMarquee ? juce::Colours::white : accent());
+                g.drawRoundedRectangle (r, 6.0f, (sounding || selected || inMarquee) ? 2.2f : 1.4f);
 
                 const auto& pk = peaks[(size_t) i];
                 const long long dataLen = peakDataLen[(size_t) i];
@@ -420,6 +472,16 @@ public:
                 g.setColour (accentHi());
                 g.fillRect (r.getX(), r.getY(), 3.0f, r.getHeight());
                 g.fillRect (r.getRight() - 3.0f, r.getY(), 3.0f, r.getHeight());
+            }
+
+            // Fix Pass 3 (item 69): the rubber band while it is drawn.
+            if (marqueeActive && marqueeRectContent.getWidth() > 2.0f
+                && marqueeRectContent.getHeight() > 2.0f)
+            {
+                g.setColour (accent().withAlpha (0.16f));
+                g.fillRect (marqueeRectContent);
+                g.setColour (accent());
+                g.drawRect (marqueeRectContent, 1.2f);
             }
 
             if (! anyClip && ! capturing && numAudio > 0)
@@ -534,9 +596,25 @@ public:
         const int slot = clipAt (e.x, (int) contentY);
         if (slot < 0)
         {
-            if (selectedSlot >= 0) { selectedSlot = -1; deleteButton.setEnabled (false); repaint(); }
+            // Fix Pass 3 (item 69): pressing empty lane space starts a
+            // rubber-band selection; a plain click (no drag) just clears
+            // the current selection, exactly as it always did.
+            if (selectedSlot >= 0 || ! marqueeSlots.empty())
+            {
+                selectedSlot = -1;
+                marqueeSlots.clear();
+                deleteButton.setEnabled (false);
+            }
+            if (contentY >= kLanesY)
+            {
+                marqueeActive = true;
+                marqueeStartContent = { (float) e.x, contentY };
+                marqueeRectContent = { (float) e.x, contentY, 0.0f, 0.0f };
+            }
+            repaint();
             return;
         }
+        marqueeSlots.clear(); // a clip press replaces any marquee selection
         selectedSlot = slot;
         deleteButton.setEnabled (true);
         const auto clip = engine.getAudioClip (slot);
@@ -574,6 +652,16 @@ public:
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
+        if (marqueeActive)
+        {
+            const float cx = (float) e.x, cy = (float) e.y + scrollOffset;
+            marqueeRectContent = { juce::jmin (marqueeStartContent.x, cx),
+                                   juce::jmin (marqueeStartContent.y, cy),
+                                   std::abs (cx - marqueeStartContent.x),
+                                   std::abs (cy - marqueeStartContent.y) };
+            repaint();
+            return;
+        }
         if (dragSlot < 0) return;
         const double barSamples = engine.barSamples();
         const long long delta = (long long) std::llround ((e.x - dragStartX) / pxPerBar() * barSamples);
@@ -596,6 +684,20 @@ public:
 
     void mouseUp (const juce::MouseEvent&) override
     {
+        if (marqueeActive)
+        {
+            marqueeActive = false;
+            if (marqueeRectContent.getWidth() > 4.0f && marqueeRectContent.getHeight() > 4.0f)
+                for (int i = 0; i < boombap::BoomBapEngine::kMaxAudioClips; ++i)
+                {
+                    const auto clip = engine.getAudioClip (i);
+                    if (clip.active && clipRect (clip).intersects (marqueeRectContent))
+                        marqueeSlots.insert (i);
+                }
+            deleteButton.setEnabled (! marqueeSlots.empty());
+            repaint();
+            return;
+        }
         if (dragSlot >= 0)
         {
             dragSlot = -1;
@@ -696,9 +798,11 @@ private:
             laneLevel[(size_t) t].setBounds ((int) lane.getX() + 26, (int) lane.getBottom() - 24, 76, 18);
             laneMute[(size_t) t].setBounds ((int) lane.getX() + 108, (int) lane.getBottom() - 25, 46, 20);
             laneSolo[(size_t) t].setBounds ((int) lane.getX() + 158, (int) lane.getBottom() - 25, 46, 20);
+            laneDelete[(size_t) t].setBounds ((int) lane.getX() + 172, (int) lane.getY() + 3, 24, 16);
             laneLevel[(size_t) t].setVisible (inView);
             laneMute[(size_t) t].setVisible (inView);
             laneSolo[(size_t) t].setVisible (inView);
+            laneDelete[(size_t) t].setVisible (inView && t >= 1); // lane 0 is the take's home: no X
         }
     }
 
@@ -849,6 +953,7 @@ private:
     juce::TextButton deleteButton { "DELETE CLIP" };
     std::array<juce::Slider, boombap::BoomBapEngine::kAudioTracks> laneLevel;
     std::array<juce::TextButton, boombap::BoomBapEngine::kAudioTracks> laneMute, laneSolo;
+    std::array<juce::TextButton, boombap::BoomBapEngine::kAudioTracks> laneDelete; // item 69: whole-lane delete (lanes 2+)
     juce::ScrollBar laneScroll { true };
 
     std::array<std::vector<std::pair<float, float>>, boombap::BoomBapEngine::kMaxAudioClips> peaks;
@@ -867,6 +972,11 @@ private:
     float scrollOffset = 0.0f;
 
     int selectedSlot = -1;
+    // Fix Pass 3 (item 69): rubber-band multi-selection over clips.
+    std::set<int> marqueeSlots;
+    bool marqueeActive = false;
+    juce::Point<float> marqueeStartContent;
+    juce::Rectangle<float> marqueeRectContent;
     int dragSlot = -1, dragMode = 0, dragStartX = 0;
     float dragStartContentY = 0.0f;
     boombap::AudioClip dragOrig;

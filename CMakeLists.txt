@@ -217,6 +217,29 @@ if(BOOMBAP_BUILD_TESTS)
     endif()
     add_test(NAME dock_back COMMAND DockBackTest)
 
+    # window-frame test (Fix Pass 4, items 77/78: every window type
+    # wears the app-drawn dark title bar and the auxiliary windows
+    # float above the main window; includes the item-66 pop-out /
+    # dock-back battery re-run under the new frame path)
+    add_executable(WindowFramesTest
+        Tests/WindowFramesTest.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(WindowFramesTest PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(WindowFramesTest PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(WindowFramesTest PRIVATE X11)
+    endif()
+    add_test(NAME window_frames COMMAND WindowFramesTest)
+
     # micro-fix regression test (items 67-68: the docked multitrack's
     # lane scrollbar must actually scroll - its range model pinned the
     # start at 0 - and the mixer-order chips must render PLAYING as an
@@ -230,6 +253,53 @@ if(BOOMBAP_BUILD_TESTS)
         target_link_libraries(MicroFixTest PRIVATE X11)
     endif()
     add_test(NAME micro_fix COMMAND MicroFixTest)
+
+    # pad-load regression test (Fix Pass 3 item 75: every ordinary WAV
+    # variant - PCM depths, float, WAVE_FORMAT_EXTENSIBLE, BWF, header
+    # clutter, uppercase name - must travel the real pad load path and
+    # land on the pad; D's pad bank "couldn't load a wav")
+    add_executable(PadLoadTest
+        Tests/PadLoadTest.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(PadLoadTest PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(PadLoadTest PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(PadLoadTest PRIVATE X11)
+    endif()
+    add_test(NAME pad_load COMMAND PadLoadTest)
+
+    # fix-pass-3 regression test (items 69/71/72/74/76: track deletion
+    # and marquee clip delete as single undoable actions with no ghost
+    # clips, the step-sequencer swipe grammar driven with real mouse
+    # events, the pad bank's click-to-load waveform, rotary knobs and
+    # info strip)
+    add_executable(FixPass3Test
+        Tests/FixPass3Test.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(FixPass3Test PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(FixPass3Test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(FixPass3Test PRIVATE X11)
+    endif()
+    add_test(NAME fix_pass3 COMMAND FixPass3Test)
 
     # recent-projects list test (storage logic, no UI)
     add_executable(RecentProjectsTest Tests/RecentProjectsTest.cpp)

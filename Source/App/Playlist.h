@@ -198,7 +198,7 @@ public:
     PlaylistWindow (const juce::String& name, juce::Colour background)
         : juce::DocumentWindow (name, background, juce::DocumentWindow::closeButton)
     {
-        setUsingNativeTitleBar (true);
+        boombap::ui::applyAppWindowFrame (*this, true); // items 77/78: own dark frame, floats over main
         setResizable (true, true);
         setResizeLimits (520, 240, 10000, 10000);
     }

@@ -15,12 +15,24 @@ class StepButton : public juce::Component
 public:
     std::function<void (int)> onChange; // called with the new velocity (0, 90 or 127)
 
+    // Fix Pass 3 (item 76): swipe (paint-drag) hooks. onSwipeStart hears
+    // the value a press produced BEFORE onChange applies it, so the
+    // owner can hold one undo gesture open for the whole drag;
+    // onSwipeMove reports the pointer in the parent's coordinates during
+    // the drag; onSwipeEnd closes the gesture on release.
+    std::function<void (int)> onSwipeStart;
+    std::function<void (juce::Point<float>)> onSwipeMove;
+    std::function<void()> onSwipeEnd;
+
     void setVelocity (int v)  { if (velocity != v) { velocity = v; repaint(); } }
+    int  getVelocity() const  { return velocity; }
     void setBeatShade (bool b) { beatShade = b; }
     void setPlaying (bool p)  { if (playing != p) { playing = p; repaint(); } }
 
     void paint (juce::Graphics& g) override;
     void mouseDown (const juce::MouseEvent& e) override;
+    void mouseDrag (const juce::MouseEvent& e) override;
+    void mouseUp (const juce::MouseEvent& e) override;
 
 private:
     int velocity = 0;

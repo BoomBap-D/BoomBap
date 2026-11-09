@@ -29,7 +29,20 @@ void StepButton::mouseDown (const MouseEvent& e)
         v = velocity == 0 ? 90 : (velocity < 110 ? 127 : 0);
 
     setVelocity (v);
+    // Item 76: the swipe opens before the press's own change lands.
+    if (onSwipeStart) onSwipeStart (v);
     if (onChange) onChange (v);
+}
+
+void StepButton::mouseDrag (const MouseEvent& e)
+{
+    if (onSwipeMove && getParentComponent() != nullptr)
+        onSwipeMove (e.getEventRelativeTo (getParentComponent()).position);
+}
+
+void StepButton::mouseUp (const MouseEvent&)
+{
+    if (onSwipeEnd) onSwipeEnd();
 }
 
 //==============================================================================

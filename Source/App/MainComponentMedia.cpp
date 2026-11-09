@@ -22,29 +22,173 @@ void MainComponent::openSampleChooser (int track)
                           });
 }
 
+namespace
+{
+juce::uint16 rdU16le (const juce::uint8* p) { return (juce::uint16) (p[0] | (p[1] << 8)); }
+juce::uint32 rdU32le (const juce::uint8* p)
+{
+    return (juce::uint32) p[0] | ((juce::uint32) p[1] << 8)
+         | ((juce::uint32) p[2] << 16) | ((juce::uint32) p[3] << 24);
+}
+juce::uint64 rdU64le (const juce::uint8* p)
+{
+    return (juce::uint64) rdU32le (p) | ((juce::uint64) rdU32le (p + 4) << 32);
+}
+
+//==============================================================================
+// Fallback WAV decoder (Fix Pass 3, item 75). JUCE's WavAudioFormat
+// reader trusts the header completely, and real files in the wild break
+// that trust: unfinalised recorder files and RF64 shells declare their
+// data chunk as 0 or 0xFFFFFFFF bytes, and some writers place data
+// before fmt. For those, the stock reader reports ZERO frames (the pad
+// silently loads nothing at all) or a garbage near-billion frames (the
+// pad loads the 20 second cap of mostly silence). This decoder walks
+// the RIFF itself, measures the audio from the bytes actually present
+// in the file, and converts PCM 8/16/24/32 and float 32/64 data to
+// mono. Anything compressed inside a WAV shell (MP3-in-WAV and kin) is
+// refused here - the caller then shows its "couldn't read" alert.
+bool decodeWavByHand (const juce::File& file, std::vector<float>& monoOut, double& sampleRateOut)
+{
+    juce::FileInputStream in (file);
+    if (! in.openedOk()) return false;
+    const auto total = in.getTotalLength();
+    if (total < 44 || total > (juce::int64) 1024 * 1024 * 1024) return false;
+    std::vector<juce::uint8> bytes ((size_t) total);
+    if (in.read (bytes.data(), (int) total) != (int) total) return false;
+
+    auto tagIs = [&bytes] (size_t off, const char* t)
+    {
+        return off + 4 <= bytes.size() && std::memcmp (bytes.data() + off, t, 4) == 0;
+    };
+    if (! (tagIs (0, "RIFF") || tagIs (0, "RF64")) || ! tagIs (8, "WAVE")) return false;
+
+    size_t fmtOff = 0, dataOff = 0;
+    juce::uint32 fmtSize = 0;
+    juce::uint64 dataBytes = 0, ds64DataBytes = 0;
+    bool haveFmt = false, haveData = false;
+
+    for (size_t pos = 12; pos + 8 <= bytes.size();)
+    {
+        const juce::uint32 sz = rdU32le (bytes.data() + pos + 4);
+        const size_t payload = pos + 8;
+        if (tagIs (pos, "ds64") && sz >= 28)
+            ds64DataBytes = rdU64le (bytes.data() + payload + 8);
+        else if (tagIs (pos, "fmt ") && ! haveFmt)
+        {
+            fmtOff = payload; fmtSize = sz; haveFmt = true;
+        }
+        else if (tagIs (pos, "data") && ! haveData)
+        {
+            dataOff = payload;
+            // A declared size of 0 or -1 means "the writer never
+            // finalised this header": the audio runs to the end of the
+            // file (or to the ds64 byte count when one is present).
+            dataBytes = (sz == 0xFFFFFFFFu)
+                            ? (ds64DataBytes > 0 ? ds64DataBytes : (juce::uint64) (bytes.size() - payload))
+                        : (sz == 0 ? (juce::uint64) (bytes.size() - payload) : sz);
+            haveData = true;
+        }
+        if (sz == 0xFFFFFFFFu) break; // a -1-sized chunk cannot be walked past
+        pos = payload + sz + (sz & 1u);
+    }
+    if (! haveFmt || ! haveData || fmtSize < 14 || dataOff >= bytes.size()) return false;
+
+    const juce::uint8* fmt = bytes.data() + fmtOff;
+    juce::uint16 tag = rdU16le (fmt);
+    const juce::uint16 chans = rdU16le (fmt + 2);
+    const juce::uint32 rate = rdU32le (fmt + 4);
+    const juce::uint16 blockAlign = rdU16le (fmt + 12);
+    juce::uint16 bits = fmtSize >= 16 ? rdU16le (fmt + 14) : (juce::uint16) 0;
+    if (tag == 0xFFFE && fmtSize >= 40)
+        tag = rdU16le (fmt + 24); // the SubFormat GUID opens with the real tag
+    if (bits == 0 && chans > 0 && blockAlign >= chans)
+        bits = (juce::uint16) (blockAlign / chans * 8); // pre-WAVEFORMATEX fmt chunks carry no bits field
+    if (chans < 1 || chans > 64 || rate < 100 || rate > 768000) return false;
+    const int bytesPerSample = (bits + 7) / 8;
+    if (bytesPerSample < 1 || bytesPerSample > 8) return false;
+    const juce::uint64 frameBytes = (juce::uint64) bytesPerSample * chans;
+    if (frameBytes == 0) return false;
+
+    const juce::uint64 avail = (juce::uint64) (bytes.size() - dataOff);
+    const juce::uint64 framesAvail = (dataBytes < avail ? dataBytes : avail) / frameBytes;
+    const juce::uint64 frames = juce::jmin (framesAvail, (juce::uint64) (rate * 20.0)); // same 20 s pad cap
+    if (frames == 0) return false;
+
+    monoOut.assign ((size_t) frames, 0.0f);
+    const juce::uint8* d = bytes.data() + dataOff;
+    for (juce::uint64 i = 0; i < frames; ++i)
+    {
+        double acc = 0.0;
+        for (int c = 0; c < (int) chans; ++c)
+        {
+            const juce::uint8* s = d + i * frameBytes + (juce::uint64) c * (juce::uint64) bytesPerSample;
+            double v = 0.0;
+            if (tag == 3) // IEEE float
+            {
+                if (bits == 32)      { float f;  std::memcpy (&f, s, 4); v = f; }
+                else if (bits == 64) { double x; std::memcpy (&x, s, 8); v = x; }
+                else return false;
+            }
+            else if (tag == 1) // PCM
+            {
+                if (bits == 8)       v = ((int) s[0] - 128) / 128.0;
+                else if (bits == 16) v = (juce::int16) rdU16le (s) / 32768.0;
+                else if (bits == 24)
+                {
+                    juce::int32 x = (juce::int32) (s[0] | (s[1] << 8) | (s[2] << 16));
+                    if (x & 0x800000) x -= 0x1000000;
+                    v = x / 8388608.0;
+                }
+                else if (bits == 32) v = (juce::int32) rdU32le (s) / 2147483648.0;
+                else return false;
+            }
+            else return false; // compressed in a WAV shell: genuinely unsupported
+            acc += v;
+        }
+        monoOut[(size_t) i] = (float) (acc / chans);
+    }
+    sampleRateOut = (double) rate;
+    return true;
+}
+} // namespace
+
 bool MainComponent::decodeSampleFile (const File& file, std::vector<float>& monoOut, double& sampleRateOut)
 {
     std::unique_ptr<AudioFormatReader> reader (formats.createReaderFor (file));
-    if (reader == nullptr) return false;
 
-    const int maxSamples = (int) (reader->sampleRate * 20.0); // keep pads to 20 seconds
-    const int n = (int) jmin ((int64) maxSamples, reader->lengthInSamples);
-    const int channels = (int) jmax (1u, reader->numChannels);
-
-    AudioBuffer<float> buffer (channels, n);
-    reader->read (&buffer, 0, n, 0, true, true);
-
-    std::vector<float> mono ((size_t) n, 0.0f);
-    for (int ch = 0; ch < channels; ++ch)
+    // Item 75: a frame can never occupy less than one byte, so a reader
+    // claiming more frames than the file has bytes is lying (the
+    // 0xFFFFFFFF data-size class), and a reader claiming zero frames
+    // for a file full of audio has given up on a header it cannot
+    // parse. Both fall through to the hand decoder below.
+    if (reader != nullptr && reader->lengthInSamples > 0
+        && reader->lengthInSamples <= file.getSize())
     {
-        const float* src = buffer.getReadPointer (ch);
-        for (int i = 0; i < n; ++i)
-            mono[(size_t) i] += src[i] / (float) channels;
+        const int maxSamples = (int) (reader->sampleRate * 20.0); // keep pads to 20 seconds
+        const int n = (int) jmin ((int64) maxSamples, reader->lengthInSamples);
+        const int channels = (int) jmax (1u, reader->numChannels);
+
+        AudioBuffer<float> buffer (channels, n);
+        reader->read (&buffer, 0, n, 0, true, true);
+
+        std::vector<float> mono ((size_t) n, 0.0f);
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            const float* src = buffer.getReadPointer (ch);
+            for (int i = 0; i < n; ++i)
+                mono[(size_t) i] += src[i] / (float) channels;
+        }
+
+        monoOut = std::move (mono);
+        sampleRateOut = reader->sampleRate;
+        return true;
     }
 
-    monoOut = std::move (mono);
-    sampleRateOut = reader->sampleRate;
-    return true;
+    if (decodeWavByHand (file, monoOut, sampleRateOut))
+        return true;
+
+    monoOut.clear();
+    return false;
 }
 
 // One loader for every row kind (fix pass 2):

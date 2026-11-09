@@ -75,6 +75,30 @@ public:
     bool tabIsPoppedOut (int index) const { return tabPoppedOut[index]; }
     juce::Component* tabContentComponent (int index) { return tabContent (index); }
 
+    // Fix Pass 4 (items 77/78): the window-frame test reads the REAL
+    // windows the app opens - the same objects the buttons and menus
+    // open, reached through the same open paths. No test-only windows.
+    juce::DocumentWindow* popOutWindowComponent (int index) { return productionWindows[index].get(); }
+    juce::DocumentWindow* stationWindowComponent()          { return stationWindow.get(); }
+    juce::DocumentWindow* padWindowComponent();       // defined in MainComponent.cpp - the
+    juce::DocumentWindow* pianoWindowComponent();     // window classes are only forward-
+    juce::DocumentWindow* playlistWindowComponent();  // declared in this header
+    juce::DocumentWindow* audioSettingsWindowComponent()    { return audioWindow.get(); }
+    void driveOpenPadBank()       { openPadBank(); }
+    void driveOpenPianoRoll()     { openPianoRoll(); }
+    void driveOpenPlaylist()      { openPlaylist(); }
+    void driveShowAudioSettings() { showAudioSettings(); }
+
+    // Fix Pass 3 (item 75): the pad-load regression test drives the exact
+    // decode + pad-file load paths the pad bank's Load button uses -
+    // same private functions, no test-only back doors.
+    void driveDeleteSequencerRow (int t) { deleteSequencerRow (t); } // Fix Pass 3 tests: the real menu action
+    bool driveDecodeSampleFile (const juce::File& f, std::vector<float>& mono, double& sr)
+    {
+        return decodeSampleFile (f, mono, sr);
+    }
+    void driveLoadPadFile (int pad, const juce::File& f) { loadPadFile (pad, f); }
+
     // ---- Pass 2: the Station + global undo (items 19/38) ----
     void openStation();
     void selectChannel (int ch);
@@ -114,6 +138,8 @@ private:
     void dockTab (int index);
     void updateTabChrome();
     void showKitMenu (int track);               // item 40
+    void showRowMenu (int track);               // Fix Pass 3 item 69: user-row name menu
+    void deleteSequencerRow (int track);        // Fix Pass 3 item 69: one undoable row deletion
     juce::Component* tabContent (int index);
     // audio device setup (Pass 1 item 8) + autosave / recovery (item 7)
     void showAudioSettings();

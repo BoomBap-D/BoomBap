@@ -8,8 +8,20 @@ public:
     const juce::String getApplicationVersion() override    { return "0.1.0"; }
     bool moreThanOneInstanceAllowed() override             { return true; }
 
-    void initialise (const juce::String&) override         { mainWindow = std::make_unique<MainWindow> (getApplicationName()); }
-    void shutdown() override                               { mainWindow = nullptr; }
+    void initialise (const juce::String&) override
+    {
+        // Fix Pass 4 (item 77): the app's own look and feel is the desktop
+        // default, so the main window's self-drawn title bar is painted in
+        // the BoomBap palette like every other window's.
+        juce::Desktop::getInstance().setDefaultLookAndFeel (&appLookAndFeel);
+        mainWindow = std::make_unique<MainWindow> (getApplicationName());
+    }
+
+    void shutdown() override
+    {
+        mainWindow = nullptr;
+        juce::Desktop::getInstance().setDefaultLookAndFeel (nullptr);
+    }
     void systemRequestedQuit() override
     {
         if (mainWindow != nullptr) mainWindow->closeButtonPressed();
@@ -20,12 +32,13 @@ public:
     {
     public:
         explicit MainWindow (const juce::String& name)
-            : DocumentWindow (name,
-                              juce::Desktop::getInstance().getDefaultLookAndFeel()
-                                  .findColour (juce::ResizableWindow::backgroundColourId),
-                              DocumentWindow::allButtons)
+            : DocumentWindow (name, boombap::ui::bg(), DocumentWindow::allButtons)
         {
-            setUsingNativeTitleBar (true);
+            // Fix Pass 4 (items 77/78): BoomBap draws this window's own
+            // dark title bar instead of borrowing the OS one - and the
+            // main window does NOT float: it is the background every
+            // other window floats above.
+            boombap::ui::applyAppWindowFrame (*this, false);
             auto* content = new MainComponent (engine, true);
             setContentOwned (content, true);
             // Pass 1 item 1: resizable, and never bigger than the display's
@@ -58,6 +71,7 @@ public:
     };
 
 private:
+    BoomBapLookAndFeel appLookAndFeel;
     std::unique_ptr<MainWindow> mainWindow;
 };
 

@@ -137,8 +137,30 @@ public:
                 sb.onChange = [this, t, s] (int v)
                 {
                     if (callbacks.onSelectRow) callbacks.onSelectRow (t);
-                    if (callbacks.onBeforeChange) callbacks.onBeforeChange();
+                    // Fix Pass 3 (item 76): while a swipe is held, the
+                    // gesture the press opened stays open - the press's
+                    // own begin/end step aside until the release.
+                    if (! swipeHeld && callbacks.onBeforeChange) callbacks.onBeforeChange();
                     engine.setStep (t, s, v);
+                    if (! swipeHeld && callbacks.onAfterChange) callbacks.onAfterChange();
+                };
+                // Item 76: left-drag paints steps ON (with the value the
+                // press produced: normal, or accent if the press cycled
+                // to it); right-drag erases. FL grammar, D's hands.
+                sb.onSwipeStart = [this, t, s] (int v)
+                {
+                    swipeHeld = true;
+                    swipeTrack = t;
+                    swipeValue = v;
+                    lastSwipeStep = s;
+                    if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                    if (callbacks.onBeforeChange) callbacks.onBeforeChange();
+                };
+                sb.onSwipeMove = [this] (juce::Point<float> p) { applySwipe (p); };
+                sb.onSwipeEnd = [this]
+                {
+                    if (! swipeHeld) return;
+                    swipeHeld = false;
                     if (callbacks.onAfterChange) callbacks.onAfterChange();
                 };
             }
@@ -217,7 +239,7 @@ public:
         using namespace boombap::ui;
         g.setColour (muted());
         g.setFont (11.0f);
-        g.drawText ("Click a step: normal, accent, off.  Right-click clears.  Steps 1-16 = bar 1, 17-32 = bar 2.",
+        g.drawText ("Click a step: normal, accent, off.  Drag paints steps on - right-drag erases.  Steps 1-16 = bar 1, 17-32 = bar 2.",
                     getWidth() / 3, 6, getWidth() / 3 + 130, 22, juce::Justification::centredRight);
 
         // bar/beat numbers over the step columns, aligned with the grid
@@ -257,7 +279,11 @@ public:
             if (e.eventComponent == &rows[t].name)
             {
                 if (callbacks.onSelectRow) callbacks.onSelectRow (t);
-                if (t <= boombap::BoomBapEngine::Clap && callbacks.onNameMenu)
+                // Item 40's kit menu, and (Fix Pass 3, item 69) the
+                // user-added rows' menu with Delete track.
+                if ((t <= boombap::BoomBapEngine::Clap
+                     || t >= boombap::BoomBapEngine::kFirstOwnRow)
+                    && callbacks.onNameMenu)
                     callbacks.onNameMenu (t);
                 return;
             }
@@ -284,10 +310,40 @@ private:
     // meter at the right edge.
     static float stepX (int s) { return 382.0f + (float) s * 33.0f + (float) (s / 4) * 5.0f; }
 
+    // Fix Pass 3 (item 76): paint the swipe value across every step the
+    // drag crosses, on the row the press started on. Cells are SET,
+    // never toggled - re-entering a cell (above all the starting cell)
+    // cannot flip it back, which is the classic paint-drag bug - and
+    // the walk from the last cell fills gaps on fast drags.
+    void applySwipe (juce::Point<float> p)
+    {
+        if (! swipeHeld || swipeTrack < 0 || lastRowH <= 0) return;
+        const int rowY = swipeTrack * lastRowH;
+        if (p.y < (float) rowY || p.y >= (float) (rowY + lastRowH)) return; // the press's own row only
+        const float vx = p.x / contentScaleX;
+        int s = -1;
+        for (int i = 0; i < kSteps; ++i)
+            if (vx >= stepX (i) && vx < stepX (i) + 32.0f) { s = i; break; }
+        if (s < 0) return;
+        const int from = lastSwipeStep;
+        const int dir = s >= from ? 1 : -1;
+        for (int i = from;; i += dir)
+        {
+            if (engine.getStep (swipeTrack, i) != swipeValue)
+            {
+                engine.setStep (swipeTrack, i, swipeValue);
+                rows[swipeTrack].steps[i].setVelocity (swipeValue);
+            }
+            if (i == s) break;
+        }
+        lastSwipeStep = s;
+    }
+
     void layoutRows()
     {
         const int n = engine.getNumTracks();
         const int rowH = juce::jmax (28, juce::roundToInt (35.0f * scaleY));
+        lastRowH = rowH;
         gridContent.setSize (juce::jmax (200, viewport.getWidth()),
                              juce::jmax (viewport.getHeight(), n * rowH));
         contentScaleX = (float) gridContent.getWidth() / 1528.0f;
@@ -338,6 +394,9 @@ private:
     float scaleY = 1.0f, contentScaleX = 1.0f;
     float meterShown[kTracks] = {};
     int lastPlayStep = -2;
+    // Item 76 swipe state (see applySwipe).
+    bool swipeHeld = false;
+    int swipeTrack = -1, swipeValue = 0, lastSwipeStep = -1, lastRowH = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SequencerPanel)
 };

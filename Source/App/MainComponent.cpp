@@ -21,7 +21,7 @@ public:
         : DocumentWindow (name, boombap::ui::bg(), juce::DocumentWindow::closeButton),
           closeCallback (std::move (onClose))
     {
-        setUsingNativeTitleBar (true);
+        boombap::ui::applyAppWindowFrame (*this, true); // items 77/78: own dark frame, floats over main
         setResizable (true, true);
         setResizeLimits (480, 400, 1200, 900);
     }
@@ -45,7 +45,7 @@ public:
         : DocumentWindow (name, boombap::ui::bg(), juce::DocumentWindow::closeButton),
           closeCallback (std::move (onClose))
     {
-        setUsingNativeTitleBar (true);
+        boombap::ui::applyAppWindowFrame (*this, true); // items 77/78: own dark frame, floats over main
         setResizable (true, true);
         setResizeLimits (560, 320, 4000, 3000);
     }
@@ -189,7 +189,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     // replacing the old corner toggle D could not find. Every tab can
     // pop out into its own window and dock back (his Reaper grammar).
     {
-        const char* names[3] = { "STEP SEQUENCER", "MPC PANEL", "AUDIO MULTITRACK" };
+        const char* names[3] = { "STEP SEQUENCER", "PAD BANK", "AUDIO MULTITRACK" };
         for (int i = 0; i < 3; ++i)
         {
             tabButtons[i].setButtonText (names[i]);
@@ -210,7 +210,13 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         SequencerPanel::Callbacks scb;
         scb.onLoadSample = [this] (int t) { openSampleChooser (t); };
         scb.onRoll = [this] (int t) { openPianoRollFor (t); };
-        scb.onNameMenu = [this] (int t) { showKitMenu (t); };
+        scb.onNameMenu = [this] (int t)
+        {
+            // kit rows get the item 40 menu; user-added rows get the
+            // item 69 menu (Load sample / Delete track)
+            if (t >= boombap::BoomBapEngine::kFirstOwnRow) showRowMenu (t);
+            else showKitMenu (t);
+        };
         scb.onPatternChanged = [this] { if (pianoRoll != nullptr) pianoRoll->refreshFromEngine(); };
         scb.onBeforeChange = [this] { beginUndoGesture(); };
         scb.onAfterChange = [this] { endUndoGesture(); };
@@ -499,12 +505,20 @@ void MainComponent::togglePopOut()
     else popOutTab (activeTab);
 }
 
+// Fix Pass 4 (items 77/78): window accessors for the frame test - the
+// window classes are complete in this TU (the header only forward-
+// declares them), so the DocumentWindow conversions live here.
+juce::DocumentWindow* MainComponent::padWindowComponent()      { return padWindow.get(); }
+juce::DocumentWindow* MainComponent::pianoWindowComponent()    { return pianoWindow.get(); }
+juce::DocumentWindow* MainComponent::playlistWindowComponent() { return playlistWindow.get(); }
+
 void MainComponent::popOutTab (int index)
 {
     auto* content = tabContent (index);
     if (content == nullptr || tabPoppedOut[index]) return;
-    static const char* titles[3] = { "BoomBap - Step Sequencer", "BoomBap - MPC Panel", "BoomBap - Audio Multitrack" };
+    static const char* titles[3] = { "BoomBap - Step Sequencer", "BoomBap - Pad Bank", "BoomBap - Audio Multitrack" };
     auto win = std::make_unique<PopOutWindow> (titles[index], [this, index] { dockTab (index); });
+    win->setLookAndFeel (&lookAndFeel); // like every other window (items 77/78: its title bar is BoomBap-drawn)
     win->setDockGuard (this);
     // Item 66: NON-owned - the panels live in MainComponent's unique_ptrs
     // (sequencerPanel / mpcPanel / multitrack), exactly like the pad bank,
@@ -575,6 +589,43 @@ void MainComponent::showKitMenu (int track)
                 fireMediaChanged();
             });
         }
+    });
+}
+
+// Fix Pass 3 (item 69): a user-added row's name menu - load its sample,
+// or delete the row entirely.
+void MainComponent::showRowMenu (int track)
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, "Load sample for this row...");
+    menu.addItem (2, "Delete track");
+    menu.showMenuAsync (juce::PopupMenu::Options(), [this, track] (int choice)
+    {
+        if (choice == 1) openSampleChooser (track);
+        else if (choice == 2) deleteSequencerRow (track);
+    });
+}
+
+// Fix Pass 3 (item 69): delete a user-added sequencer row whole - its
+// steps in every pattern, its Station channel, its sample - as ONE
+// undoable action. Kit rows (0-4) and pad rows (5-20) are protected in
+// the engine: the kit rows are the starter kit's skeleton, and the pad
+// rows belong to the sixteen physical pads.
+void MainComponent::deleteSequencerRow (int track)
+{
+    const int before = engine.getNumTracks();
+    if (track < boombap::BoomBapEngine::kFirstOwnRow || track >= before) return;
+    runUndoable ([this, track, before]
+    {
+        if (! engine.removeTrack (track)) return;
+        for (int t = track; t < before - 1; ++t)
+            rowFiles[(size_t) t] = rowFiles[(size_t) (t + 1)];
+        rowFiles[(size_t) (before - 1)] = juce::File();
+        // the Station selection follows the rows it points at
+        if (selectedChannel == track) selectChannel (0);
+        else if (selectedChannel > track && selectedChannel < before)
+            selectChannel (selectedChannel - 1);
+        fireMediaChanged();
     });
 }
 

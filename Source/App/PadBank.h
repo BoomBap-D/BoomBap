@@ -15,6 +15,7 @@ class PadWaveView : public juce::Component
 public:
     std::function<void (float, float)> onTrim; // (startFrac, endFrac), on release
     std::function<void()> onAudition;
+    std::function<void()> onLoadRequest; // Fix Pass 3 (item 74): clicking the EMPTY waveform loads
 
     void setData (std::vector<float> mono, float startFrac, float endFrac)
     {
@@ -49,9 +50,12 @@ public:
 
         if (peaks.empty())
         {
-            g.setColour (muted());
-            g.setFont (12.0f);
-            g.drawText ("No sample on the selected pad", getLocalBounds(), juce::Justification::centred);
+            // Fix Pass 3 (item 74): the empty waveform IS the load
+            // surface - it says so, at a size you can read.
+            g.setColour (accent());
+            g.setFont (juce::Font (15.0f, juce::Font::bold));
+            g.drawText ("CLICK TO LOAD A SAMPLE", getLocalBounds().reduced (8, 0),
+                        juce::Justification::centred);
             return;
         }
 
@@ -100,7 +104,12 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
-        if (peaks.empty()) return;
+        if (peaks.empty())
+        {
+            // Fix Pass 3 (item 74): the empty waveform opens the chooser.
+            if (onLoadRequest) onLoadRequest();
+            return;
+        }
         // the pull bars are the grab targets (item 63): a generous pixel
         // zone around each bar, not a fraction of the sample
         const auto b = getLocalBounds().toFloat().reduced (6.0f, 8.0f);
@@ -119,6 +128,7 @@ public:
 
     void mouseUp (const juce::MouseEvent&) override
     {
+        if (peaks.empty()) return; // the click already asked for the chooser
         if (dragEdge != 0)
         {
             dragEdge = 0;
@@ -221,15 +231,12 @@ public:
         g.setColour (selected ? boombap::ui::accent() : boombap::ui::border().withAlpha (0.7f));
         g.drawRoundedRectangle (b, 10.0f, selected ? 1.6f : 1.0f);
 
-        g.setColour (boombap::ui::muted());
-        g.setFont (juce::Font (11.0f, juce::Font::bold));
-        g.drawText (juce::String (padIndex + 1), 9, 6, 30, 14, juce::Justification::left);
-
-        g.setColour (hasSample ? boombap::ui::text().withAlpha (0.85f)
-                               : boombap::ui::muted().withAlpha (0.55f));
-        g.setFont (11.0f);
-        g.drawText (hasSample ? label : juce::String ("empty"),
-                    9, getHeight() - 21, getWidth() - 18, 14, juce::Justification::left);
+        // Fix Pass 3 (item 71): the tiny per-pad captions are GONE - a
+        // pad carries only its number, bigger. The selected pad's name
+        // and state live in the editor's one readable info strip.
+        g.setColour (selected ? boombap::ui::accentHi() : boombap::ui::muted());
+        g.setFont (juce::Font (15.0f, juce::Font::bold));
+        g.drawText (juce::String (padIndex + 1), 10, 7, 34, 18, juce::Justification::left);
     }
 
 private:
@@ -257,13 +264,18 @@ public:
             addAndMakeVisible (pads[i]);
         }
 
-        title.setFont (juce::Font (16.0f, juce::Font::bold));
+        // Fix Pass 3 (items 71/74): the editor header is ONE compact
+        // label now. The old stack (title + file line + LOAD SAMPLE
+        // button) is gone - the waveform below is the load surface, and
+        // the space the stack took goes to the waveform.
+        title.setFont (juce::Font (15.0f, juce::Font::bold));
         addAndMakeVisible (title);
-        fileLabel.setColour (juce::Label::textColourId, boombap::ui::muted());
-        addAndMakeVisible (fileLabel);
 
-        loadButton.onClick = [this] { if (onLoad) onLoad (selected); };
-        addAndMakeVisible (loadButton);
+        // Item 71: the ONE readable info strip for the selected pad,
+        // under the effects/gain controls.
+        infoStrip.setFont (juce::Font (13.5f, juce::Font::bold));
+        infoStrip.setColour (juce::Label::textColourId, boombap::ui::text());
+        addAndMakeVisible (infoStrip);
 
         // item 44: the selected pad's waveform, trimmable in place
         waveView.onTrim = [this] (float s, float e)
@@ -279,6 +291,8 @@ public:
             engine.triggerPad (selected, 1.0f);
             pads[selected].triggerFlash();
         };
+        // Fix Pass 3 (item 74): clicking the empty waveform loads.
+        waveView.onLoadRequest = [this] { if (onLoad) onLoad (selected); };
         addAndMakeVisible (waveView);
 
         setupRow (startRow, "Start %", 0.0, 97.0, 0.5, 0.0);
@@ -389,27 +403,33 @@ public:
         hint.setBounds (16, 16 + 4 * (lay.padH + 8) + 6, juce::jmax (200, lay.gridRight - 16), 44);
 
         const int ex = lay.editorX;
-        title.setBounds (ex, 16, 264, 24);
-        fileLabel.setBounds (ex, 42, juce::jmax (200, getWidth() - ex - 16), 20);
-        loadButton.setBounds (ex, 66, 150, 26);
+        const int colW = juce::jmax (200, getWidth() - ex - 16);
+        title.setBounds (ex, 12, colW, 22);
 
-        // item 44: the waveform strip under Load; the editor rows shift
-        // down for it and compact when the view is short (the tab).
-        const int waveH = juce::jlimit (52, 130, getHeight() / 5);
-        waveView.setBounds (ex, 98, juce::jmax (200, getWidth() - ex - 16), waveH);
-        const int rowsY = 98 + waveH + 8;
-        const int pitch = juce::jlimit (26, 36, (getHeight() - rowsY - 64) / 5);
+        // Fix Pass 3 (items 71/74): the header stack's height and the
+        // five long sliders' height both went to the waveform - the
+        // waveform is the pad workstation now, not a strip under a form.
+        const int waveH = juce::jlimit (64, 380, getHeight() - 252);
+        waveView.setBounds (ex, 40, colW, waveH);
 
+        // Item 72: one row of five rotary knobs under the waveform.
+        const int knobRowY = 40 + waveH + 10;
+        const int cellW = colW / 5;
+        const int knobSize = juce::jlimit (54, 84, cellW - 14);
         Row* rowsArr[] = { &startRow, &endRow, &tuneRow, &gainRow, &velRow };
         for (int i = 0; i < 5; ++i)
         {
-            rowsArr[i]->label.setBounds (ex, rowsY + i * pitch, 64, 24);
-            rowsArr[i]->slider.setBounds (ex + 66, rowsY + i * pitch, juce::jmax (160, getWidth() - ex - 84), 24);
+            const int cellX = ex + i * cellW;
+            rowsArr[i]->label.setBounds (cellX, knobRowY, cellW, 14);
+            rowsArr[i]->slider.setBounds (cellX + (cellW - knobSize) / 2, knobRowY + 16,
+                                          knobSize, knobSize + 16);
         }
-        const int footY = rowsY + 5 * pitch + 6;
+        const int footY = knobRowY + 16 + knobSize + 16 + 10;
         reverseToggle.setBounds (ex, footY, 130, 26);
         muteLabel.setBounds (ex + 142, footY, 84, 24);
         muteGroupBox.setBounds (ex + 230, footY, 110, 24);
+        // Item 71: the one info strip, under the effects/gain area.
+        infoStrip.setBounds (ex, footY + 36, colW, 24);
     }
 
 private:
@@ -428,7 +448,7 @@ private:
     {
         Layout lay;
         const int availW = juce::jmax (320, (getWidth() * 54) / 100 - 24);
-        const int availH = juce::jmax (240, getHeight() - 130);
+        const int availH = juce::jmax (240, getHeight() - 104); // item 71: the pads take the freed room
         const int cellW = (availW - 24) / 4, cellH = (availH - 24) / 4;
         lay.padW = juce::jmin (cellW, (int) (cellH * 1.4f));
         lay.padH = (int) (lay.padW / 1.4f);
@@ -440,9 +460,16 @@ private:
     void setupRow (Row& row, const char* name, double lo, double hi, double step, double def)
     {
         row.label.setText (name, juce::dontSendNotification);
+        row.label.setJustificationType (juce::Justification::centred);
         addAndMakeVisible (row.label);
-        row.slider.setSliderStyle (juce::Slider::LinearHorizontal);
-        row.slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 22);
+        // Fix Pass 3 (item 72): rotary KNOBS, in the Station's exact
+        // grammar (RotaryHorizontalVerticalDrag + the value box below) -
+        // the long horizontal sliders wasted the editor's real estate.
+        // They are still juce::Sliders underneath, so the double-click
+        // reset and the waveform pull-bar sync (items 44/63) keep the
+        // same wiring.
+        row.slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
+        row.slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 54, 14);
         row.slider.setRange (lo, hi, step);
         row.slider.setDoubleClickReturnValue (true, def); // Pass 1: double-click reset
         row.slider.onDragStart = [this] { if (onBeforeChange) onBeforeChange(); };
@@ -467,9 +494,18 @@ private:
         velRow.slider.setValue (pp.velSens, juce::dontSendNotification);
         reverseToggle.setToggleState (pp.reverse, juce::dontSendNotification);
         muteGroupBox.setSelectedId (pp.muteGroup + 1, juce::dontSendNotification);
-        title.setText ("PAD " + juce::String (selected + 1), juce::dontSendNotification);
         const juce::String n = nameFor ? nameFor (selected) : juce::String();
-        fileLabel.setText (n.isEmpty() ? "No sample loaded" : n, juce::dontSendNotification);
+        const juce::String fileName = n.isEmpty() ? juce::String() : juce::File (n).getFileName();
+        // Items 71/74: the compact header label and the ONE info strip
+        // carry the selected pad's identity - the pads themselves don't.
+        title.setText ("PAD " + juce::String (selected + 1)
+                       + (fileName.isEmpty() ? juce::String (" - no sample") : " - " + fileName),
+                       juce::dontSendNotification);
+        infoStrip.setText ("PAD " + juce::String (selected + 1) + " - "
+                           + (fileName.isEmpty()
+                                ? juce::String ("empty - click the waveform above to load a sample")
+                                : fileName + " - loaded, ready to play"),
+                           juce::dontSendNotification);
         // item 44: the waveform follows the selected pad
         waveView.setData (engine.getPadSampleData (selected), pp.startFrac, pp.endFrac);
     }
@@ -501,8 +537,7 @@ private:
     PadButton pads[16];
     int selected = 0;
 
-    juce::Label title, fileLabel, muteLabel, hint;
-    juce::TextButton loadButton { "Load sample..." };
+    juce::Label title, infoStrip, muteLabel, hint;
     PadWaveView waveView;
     Row startRow, endRow, tuneRow, gainRow, velRow;
     juce::ToggleButton reverseToggle { "Reverse" };
@@ -516,7 +551,7 @@ public:
     PadWindow (const juce::String& name, juce::Colour background)
         : juce::DocumentWindow (name, background, juce::DocumentWindow::closeButton)
     {
-        setUsingNativeTitleBar (true);
+        boombap::ui::applyAppWindowFrame (*this, true); // items 77/78: own dark frame, floats over main
         setResizable (true, true);
         setResizeLimits (700, 420, 10000, 10000);
     }

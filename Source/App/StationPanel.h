@@ -1590,7 +1590,7 @@ public:
     StationWindow (const juce::String& name, juce::Colour background)
         : juce::DocumentWindow (name, background, juce::DocumentWindow::closeButton)
     {
-        setUsingNativeTitleBar (true);
+        ui::applyAppWindowFrame (*this, true); // items 77/78: own dark frame, floats over main
         setResizable (true, true);
         setResizeLimits (900, 520, 4000, 3000);
     }

@@ -46,6 +46,63 @@ public:
         setColour (juce::PopupMenu::textColourId, text());
         setColour (juce::PopupMenu::highlightedBackgroundColourId, accent());
         setColour (juce::PopupMenu::highlightedTextColourId, juce::Colour (0xff14100a));
+        setColour (juce::DocumentWindow::textColourId, text());
+    }
+
+    // Fix Pass 4 (item 77): the title bar every BoomBap window draws for
+    // itself - flat panel charcoal from the app palette, a hairline
+    // divider along the bottom, the title in the app's text colour
+    // (muted when the window is inactive). The layout follows the stock
+    // JUCE bar (icon, centred-or-left title, room reserved for the
+    // buttons) so only the colours change hands: the OS theme never
+    // paints any part of this app again.
+    void drawDocumentWindowTitleBar (juce::DocumentWindow& window, juce::Graphics& g,
+                                     int w, int h, int titleSpaceX, int titleSpaceW,
+                                     const juce::Image* icon, bool drawTitleTextOnLeft) override
+    {
+        using namespace boombap::ui;
+        if (w * h == 0)
+            return;
+
+        const bool isActive = window.isActiveWindow();
+
+        g.setColour (panel());
+        g.fillAll();
+        g.setColour (border());
+        g.fillRect (0, h - 1, w, 1);
+
+        juce::Font font ((float) h * 0.62f, juce::Font::bold);
+        g.setFont (font);
+
+        int textW = font.getStringWidth (window.getName());
+        int iconW = 0;
+        int iconH = 0;
+
+        if (icon != nullptr)
+        {
+            iconH = (int) font.getHeight();
+            iconW = icon->getWidth() * iconH / icon->getHeight() + 4;
+        }
+
+        textW = juce::jmin (titleSpaceW, textW + iconW);
+        int textX = drawTitleTextOnLeft ? titleSpaceX
+                                        : juce::jmax (titleSpaceX, (w - textW) / 2);
+
+        if (textX + textW > titleSpaceX + titleSpaceW)
+            textX = titleSpaceX + titleSpaceW - textW;
+
+        if (icon != nullptr)
+        {
+            g.setOpacity (isActive ? 1.0f : 0.6f);
+            g.drawImageWithin (*icon, textX, (h - iconH) / 2, iconW, iconH,
+                               juce::RectanglePlacement::centred, false);
+            textX += iconW;
+            textW -= iconW;
+        }
+
+        g.setColour (isActive ? text() : muted());
+        g.drawText (window.getName(), textX, 0, textW, h,
+                    juce::Justification::centredLeft, true);
     }
 
     juce::Font getLabelFont (juce::Label&) override
@@ -151,3 +208,29 @@ public:
         g.strokePath (p, juce::PathStrokeType (1.6f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     }
 };
+
+namespace boombap::ui
+{
+// Fix Pass 4 - the frame every BoomBap window wears (items 77/78).
+//  - Item 77: the window stops borrowing the OS title bar (on the
+//    owner's Windows 8.1 that bar paints beige, whatever the app looks
+//    like) and draws its own, painted by BoomBapLookAndFeel in the
+//    app's dark palette above. Drag / resize / minimise / maximise /
+//    close all stay JUCE's own machinery, unchanged.
+//  - Item 78: the main window is always the background. Every auxiliary
+//    window floats above it for as long as it is open, so opening one
+//    view can never bury another behind the program. JUCE's public API
+//    offers no Win32 owner-HWND relationship for app windows (a desktop
+//    component has no component parent to own it), so the mechanism is
+//    JUCE always-on-top scoped to the auxiliary windows only: on
+//    Windows that is the HWND_TOPMOST band - above every non-topmost
+//    window, the main window included - and windows inside the band
+//    still order among themselves by last touch, which is exactly the
+//    owner's rule. The main window passes false: it never floats.
+inline void applyAppWindowFrame (juce::DocumentWindow& window, bool floatAboveMainWindow)
+{
+    window.setUsingNativeTitleBar (false);
+    window.setColour (juce::DocumentWindow::textColourId, text());
+    window.setAlwaysOnTop (floatAboveMainWindow);
+}
+} // namespace boombap::ui
