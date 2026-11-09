@@ -301,6 +301,33 @@ if(BOOMBAP_BUILD_TESTS)
     endif()
     add_test(NAME fix_pass3 COMMAND FixPass3Test)
 
+    # round-1 regression test (Breakdown #1 items 86/87/89: a sequencer
+    # name click SELECTS and only selects - the menu lives on
+    # right-click - with the one selection state mirrored into the
+    # multitrack chip and the Station binding; a visible delete X on
+    # user-added sequencer rows running item 69's guarded undoable
+    # delete; the waveform panel auditions on click when loaded and
+    # its button is LOAD, with the amber action trace on the action
+    # buttons. Items 85/102 live in WindowFramesTest.)
+    add_executable(Round1Test
+        Tests/Round1Test.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(Round1Test PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(Round1Test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(Round1Test PRIVATE X11)
+    endif()
+    add_test(NAME round1 COMMAND Round1Test)
+
     # recent-projects list test (storage logic, no UI)
     add_executable(RecentProjectsTest Tests/RecentProjectsTest.cpp)
     target_link_libraries(RecentProjectsTest PRIVATE juce::juce_gui_extra juce::juce_gui_basics)

@@ -149,7 +149,9 @@ public:
 
         g.setColour (boombap::ui::muted().withAlpha (0.65f));
         g.setFont (10.5f);
-        g.drawText ("click to load a different sample", 10, (int) b.getBottom() - 16, 220, 12,
+        // Round 1 (item 89): the wave itself is the audition now - the
+        // caption says so (the LOAD button does the loading).
+        g.drawText ("click to play - LOAD loads another", 10, (int) b.getBottom() - 16, 260, 12,
                     juce::Justification::left);
 
         const float mid = b.getCentreY();

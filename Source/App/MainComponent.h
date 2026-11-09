@@ -89,6 +89,17 @@ public:
     void driveOpenPlaylist()      { openPlaylist(); }
     void driveShowAudioSettings() { showAudioSettings(); }
 
+    // Round 1: the selection / delete / waveform tests reach the real
+    // sequencer panel and the real minimise-coupling step - the same
+    // objects and functions the UI drives, no test-only back doors.
+    SequencerPanel* sequencerPanelComponent() { return sequencerPanel.get(); }
+    void driveMinimiseCoupling (bool minimised) { updateMinimiseCoupling (minimised); }
+    int auxWindowsHiddenByMinimise() const { return (int) hiddenByMinimise.size(); }
+    void driveLoadWaveformSample (int slot, const juce::File& f)
+    {
+        loadSampleFile (boombap::BoomBapEngine::Sample1 + slot, f);
+    }
+
     // Fix Pass 3 (item 75): the pad-load regression test drives the exact
     // decode + pad-file load paths the pad bank's Load button uses -
     // same private functions, no test-only back doors.
@@ -127,6 +138,15 @@ private:
     };
 
     void timerCallback() override;
+    // Round 1 (item 102): minimise coupling - when the main window is
+    // minimised, every open auxiliary window goes down with it, and
+    // restoring the main window brings back exactly the ones the
+    // coupling took down (never ones the owner closed himself).
+    // pollMinimiseCoupling reads the OS state (the peer) each tick;
+    // updateMinimiseCoupling is the step itself, driven directly by
+    // the regression test.
+    void pollMinimiseCoupling();
+    void updateMinimiseCoupling (bool minimised);
     void togglePlay();
     void startTransport();
     void stopTransport();
@@ -260,7 +280,10 @@ private:
     WaveformView waveView;
     juce::TextButton waveSel[3];
     juce::Label waveName;
-    juce::TextButton wavePlayButton { "PLAY" }; // item 46: audition this panel's sample
+    // Item 46's audition button, re-roled by item 89 (Round 1): the
+    // audition itself moved onto the waveform (click the wave = hear
+    // it); this button is the panel's LOAD - it opens the chooser.
+    juce::TextButton wavePlayButton { "LOAD" };
     std::array<std::vector<float>, 3> waveData;
     std::array<double, 3> waveRates {};         // source rate per waveform slot
     int waveTrack = 0;
@@ -308,6 +331,10 @@ private:
     std::unique_ptr<boombap::StationPanel> station;
     std::unique_ptr<boombap::StationWindow> stationWindow;
     int selectedChannel = 0;
+    // Round 1 (item 102): the auxiliary windows the minimise coupling
+    // is currently holding down (SafePointers - a window destroyed
+    // while held simply drops out of the restore).
+    std::vector<juce::Component::SafePointer<juce::DocumentWindow>> hiddenByMinimise;
     boombap::UndoHistory history;
     bool suppressAutoHome = false; // history snapshots carry their clips explicitly (item 61 stays for files/host)
     int gestureIdleTicks = 0;

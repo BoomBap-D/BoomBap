@@ -31,6 +31,24 @@
 // flag is what puts a window in the HWND_TOPMOST band). Whether the
 // frames look right and the stacking feels right on Windows 8.1 is the
 // owner's screen's verdict, not this suite's.
+//
+// Round 1 (items 85/102) extends this suite:
+//  - Item 85: auxiliary title bars paint the LIGHTER frameBar tone with
+//    an amber trace along the top edge (the main window keeps panel()),
+//    and the title-bar buttons' glyphs are the bright amber accentHi -
+//    asserted as painted pixels inside the close/minimise button
+//    bounds, not just as colour constants.
+//  - Item 102: every auxiliary window class drops
+//    ComponentPeer::windowAppearsOnTaskbar from its desktop style
+//    flags (the main window keeps it) - on Windows that flag is
+//    exactly what decides WS_EX_APPWINDOW vs WS_EX_TOOLWINDOW, i.e.
+//    whether the window takes a taskbar slot; and the minimise
+//    coupling state machine is driven through the real MainComponent:
+//    minimise hides every open auxiliary window, restore brings back
+//    exactly those, and a window the owner closed in between is never
+//    resurrected. What remains the owner's-screen-only proof: the
+//    real Windows 8.1 taskbar showing one entry, and a real minimise
+//    gesture - this bench has no Windows peer and no window manager.
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../Source/App/PluginProcessor.h"
 #include "../Source/App/MainComponent.h"
@@ -88,23 +106,76 @@ static void checkFramed (juce::DocumentWindow* w, bool expectFloat, const char* 
     check (dynamic_cast<BoomBapLookAndFeel*> (&w->getLookAndFeel()) != nullptr,
            (prefix + "the bar is painted by BoomBapLookAndFeel").toRawUTF8());
 
-    // The painted bar itself: flat panel() charcoal with a border()
-    // divider along its bottom edge - sampled down a column away from
-    // the centred title (the bar sits inside the window's resize
-    // border, so scan the column rather than assume its exact row).
+    // The painted bar itself: charcoal from the palette with a
+    // border() divider along its bottom edge - sampled down a column
+    // away from the centred title (the bar sits inside the window's
+    // resize border, so scan the column rather than assume its exact
+    // row). Round 1 (item 85): an AUXILIARY window's bar is the
+    // lighter frameBar tone; the main window keeps panel().
     if (w->getWidth() > 40 && w->getTitleBarHeight() > 4)
     {
         auto img = w->createComponentSnapshot (w->getLocalBounds());
         const int barH = w->getTitleBarHeight();
-        check (img.getPixelAt (10, barH / 2) == boombap::ui::panel(),
-               (prefix + "painted title bar is the palette's panel colour").toRawUTF8());
+        const auto expectedBar = expectFloat ? boombap::ui::frameBar() : boombap::ui::panel();
+        check (img.getPixelAt (10, barH / 2) == expectedBar,
+               (prefix + (expectFloat ? "painted title bar is the lighter frameBar tone (item 85)"
+                                      : "painted title bar is the palette's panel colour")).toRawUTF8());
         bool dividerFound = false;
         for (int y = 0; y < barH + 16 && y < img.getHeight(); ++y)
             if (img.getPixelAt (10, y) == boombap::ui::border())
                 dividerFound = true;
         check (dividerFound,
                (prefix + "title bar divider is the palette's border colour").toRawUTF8());
+
+        if (expectFloat)
+        {
+            // Item 85, the amber trace: a bright warm pixel run along
+            // the bar's top edge (accent at 0.55 alpha over frameBar
+            // reads roughly R150 G108 B41).
+            bool traceFound = false;
+            for (int y = 0; y < 10 && y < img.getHeight() && ! traceFound; ++y)
+                for (int x = 4; x < 60 && x < img.getWidth(); ++x)
+                {
+                    const auto p = img.getPixelAt (x, y);
+                    if (p.getRed() > 110 && (int) p.getRed() > (int) p.getBlue() + 40)
+                        traceFound = true;
+                }
+            check (traceFound, (prefix + "amber trace along the bar's top edge (item 85)").toRawUTF8());
+
+            // Item 85, the buttons: the close glyph must be painted in
+            // bright amber INSIDE the close button's own bounds (the
+            // stock V4 glyph was dark red - invisible on this bar).
+            if (auto* close = w->getCloseButton())
+            {
+                const auto cb = close->getBounds().reduced (close->getWidth() / 4, close->getHeight() / 4);
+                int amber = 0;
+                for (int y = cb.getY(); y < cb.getBottom() && y < img.getHeight(); ++y)
+                    for (int x = cb.getX(); x < cb.getRight() && x < img.getWidth(); ++x)
+                    {
+                        const auto p = img.getPixelAt (x, y);
+                        if (p.getRed() > 200 && p.getGreen() > 140 && p.getBlue() < 130)
+                            ++amber;
+                    }
+                check (amber > 0, (prefix + "close glyph is painted bright amber (item 85)").toRawUTF8());
+            }
+        }
     }
+}
+
+// Round 1 (item 102): a window takes a Windows taskbar slot iff its
+// desktop style flags carry windowAppearsOnTaskbar - the peer builds
+// WS_EX_APPWINDOW from it, WS_EX_TOOLWINDOW without it. Assert the
+// flag state per window class; the taskbar itself is Windows-only.
+static void checkTaskbarSlot (juce::DocumentWindow* w, bool expectSlot, const char* what)
+{
+    const juce::String prefix = juce::String (what) + ": ";
+    check (w != nullptr, (prefix + "window exists").toRawUTF8());
+    if (w == nullptr) return;
+    const bool hasSlot = (w->getDesktopWindowStyleFlags()
+                            & juce::ComponentPeer::windowAppearsOnTaskbar) != 0;
+    check (hasSlot == expectSlot,
+           (prefix + (expectSlot ? "keeps its Windows taskbar slot (item 102)"
+                                 : "claims NO Windows taskbar slot (item 102)")).toRawUTF8());
 }
 
 int main()
@@ -137,6 +208,7 @@ int main()
         pad.setVisible (true);
         pump (60);
         checkFramed (&pad, true, "77/78 pad bank window");
+        checkTaskbarSlot (&pad, false, "102 pad bank window");
 
         PianoRollWindow roll ("BoomBap Piano Roll", boombap::ui::bg());
         roll.setLookAndFeel (&testLnf);
@@ -144,6 +216,7 @@ int main()
         roll.setVisible (true);
         pump (60);
         checkFramed (&roll, true, "77/78 piano roll window");
+        checkTaskbarSlot (&roll, false, "102 piano roll window");
 
         PlaylistWindow playlist ("BoomBap Playlist", boombap::ui::bg());
         playlist.setLookAndFeel (&testLnf);
@@ -151,6 +224,7 @@ int main()
         playlist.setVisible (true);
         pump (60);
         checkFramed (&playlist, true, "77/78 playlist window");
+        checkTaskbarSlot (&playlist, false, "102 playlist window");
 
         boombap::StationWindow station ("BoomBap - The Station", boombap::ui::bg());
         station.setLookAndFeel (&testLnf);
@@ -158,6 +232,7 @@ int main()
         station.setVisible (true);
         pump (60);
         checkFramed (&station, true, "77/78 station window");
+        checkTaskbarSlot (&station, false, "102 station window");
     }
     std::printf ("part 1 done: the four editor/station window classes\n");
 
@@ -181,6 +256,7 @@ int main()
         checkFramed (&mainWin, false, "77/78 main window (Main.cpp mirror)");
         check (mainWin.getMinimiseButton() != nullptr, "77: main window minimise button present");
         check (mainWin.getMaximiseButton() != nullptr, "77: main window maximise button present");
+        checkTaskbarSlot (&mainWin, true, "102 main window (Main.cpp mirror)");
     }
     std::printf ("part 2 done: main-window mirror\n");
 
@@ -224,6 +300,63 @@ int main()
                  && main->pianoWindowComponent()->isVisible()
                  && main->playlistWindowComponent()->isVisible(),
                "78: station + pad bank + piano roll + playlist all open at once");
+
+        // Round 1 (item 102): none of the app-path auxiliary windows
+        // claims a taskbar slot either.
+        checkTaskbarSlot (main->stationWindowComponent(), false, "102 station (app path)");
+        checkTaskbarSlot (main->padWindowComponent(), false, "102 pad bank (app path)");
+        checkTaskbarSlot (main->pianoWindowComponent(), false, "102 piano roll (app path)");
+        checkTaskbarSlot (main->playlistWindowComponent(), false, "102 playlist (app path)");
+
+        // Round 1 (item 102): the minimise coupling, driven at the
+        // logic level through the real MainComponent (the OS-level
+        // minimise gesture needs a real Windows main window - see the
+        // header note). A production pop-out joins the four windows.
+        main->driveSelectTab (0);
+        main->drivePopOutTab (0);
+        pump (30);
+        checkTaskbarSlot (main->popOutWindowComponent (0), false, "102 production pop-out (app path)");
+        check (main->popOutWindowComponent (0)->isVisible(), "102: pop-out open for the coupling battery");
+
+        main->driveMinimiseCoupling (true);
+        check (main->auxWindowsHiddenByMinimise() == 5,
+               "102: minimising holds down all five open auxiliary windows");
+        check (! main->stationWindowComponent()->isVisible()
+                 && ! main->padWindowComponent()->isVisible()
+                 && ! main->pianoWindowComponent()->isVisible()
+                 && ! main->playlistWindowComponent()->isVisible()
+                 && ! main->popOutWindowComponent (0)->isVisible(),
+               "102: every auxiliary window is down with the main window");
+        main->driveMinimiseCoupling (true);
+        check (main->auxWindowsHiddenByMinimise() == 5,
+               "102: a second minimise tick changes nothing (idempotent)");
+
+        main->driveMinimiseCoupling (false);
+        check (main->auxWindowsHiddenByMinimise() == 0
+                 && main->stationWindowComponent()->isVisible()
+                 && main->padWindowComponent()->isVisible()
+                 && main->pianoWindowComponent()->isVisible()
+                 && main->playlistWindowComponent()->isVisible()
+                 && main->popOutWindowComponent (0)->isVisible(),
+               "102: restoring the main window brings all five back");
+
+        // The owner closes the pad bank himself, then minimises:
+        // the coupling must not resurrect it on restore.
+        main->padWindowComponent()->setVisible (false);
+        main->driveMinimiseCoupling (true);
+        check (main->auxWindowsHiddenByMinimise() == 4,
+               "102: an owner-closed window is not held by the coupling");
+        main->driveMinimiseCoupling (false);
+        check (! main->padWindowComponent()->isVisible()
+                 && main->stationWindowComponent()->isVisible(),
+               "102: restore does not resurrect the owner-closed window");
+        main->driveOpenPadBank(); // reopen for the rest of the suite
+        pump (30);
+
+        // Dock the pop-out back before the item-66 battery.
+        main->driveDockTab (0);
+        pump (30);
+        check (! main->tabIsPoppedOut (0), "102: pop-out docked back after the coupling battery");
 
         // The item-66 battery under the new frame path: repeated
         // pop-out -> dock-back cycles per view, alternating the two
@@ -312,6 +445,8 @@ int main()
         pump (120);
         checkFramed (standalone.audioSettingsWindowComponent(), true,
                      "77/78 audio device setup (app path)");
+        checkTaskbarSlot (standalone.audioSettingsWindowComponent(), false,
+                          "102 audio device setup (app path)");
         if (auto* w = standalone.audioSettingsWindowComponent())
         {
             w->closeButtonPressed();

@@ -203,5 +203,13 @@ public:
         setResizeLimits (520, 240, 10000, 10000);
     }
 
+    // Round 1 (item 102): no taskbar slot of its own - the main window
+    // is BoomBap's only Windows taskbar entry.
+    int getDesktopWindowStyleFlags() const override
+    {
+        return juce::DocumentWindow::getDesktopWindowStyleFlags()
+                 & ~juce::ComponentPeer::windowAppearsOnTaskbar;
+    }
+
     void closeButtonPressed() override { setVisible (false); }
 };

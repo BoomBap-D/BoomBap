@@ -20,7 +20,8 @@ public:
     {
         std::function<void (int)> onLoadSample; // a row's Load... button
         std::function<void (int)> onRoll;       // a row's ROLL button
-        std::function<void (int)> onNameMenu;   // a kit row's name was clicked (item 40)
+        std::function<void (int)> onNameMenu;   // a row's name was RIGHT-clicked (items 40/69; the menu moved off the left click, item 86)
+        std::function<void (int)> onDeleteRow;  // a user row's visible X (item 87; the action is item 69's)
         std::function<void()> onPatternChanged; // pattern A-H switched (the roll follows)
         std::function<void()> onChange;         // a row was added
         // Pass 2: undo gestures (item 38) + channel selection (the Station follows)
@@ -49,6 +50,7 @@ public:
             };
             addAndMakeVisible (b);
         }
+        boombap::ui::applyActionTrace (addTrackButton); // item 89: ADD TRACK is an action - amber trace
         addTrackButton.onClick = [this]
         {
             if (callbacks.onBeforeChange) callbacks.onBeforeChange();
@@ -112,6 +114,17 @@ public:
                 if (callbacks.onBeforeChange) callbacks.onBeforeChange();
                 engine.setTrackSolo (t, rows[t].solo.getToggleState());
                 if (callbacks.onAfterChange) callbacks.onAfterChange();
+            };
+
+            // Round 1 (item 87): a VISIBLE delete on the row itself -
+            // item 69's action used to live only in the name menu and
+            // the owner could not find it. The button exists on every
+            // row but only SHOWS on user-added rows; item 69's
+            // protections decide that in layoutRows.
+            gridContent.addAndMakeVisible (row.del);
+            row.del.onClick = [this, t]
+            {
+                if (callbacks.onDeleteRow) callbacks.onDeleteRow (t);
             };
 
             gridContent.addAndMakeVisible (row.level);
@@ -214,6 +227,31 @@ public:
             rows[track].load.setButtonText (text);
     }
 
+    // Round 1 (item 86): the selected row's NAME lights - solid accent
+    // fill, dark text (the item 68 SELECTED language) - so the track
+    // you are working on is visible in the grid itself. Selection is
+    // one state owned by MainComponent::selectChannel; this panel is
+    // a mirror, set from there, whichever view made the selection.
+    // A channel with no sequencer row (synth, master...) lights none.
+    void setSelectedRow (int track)
+    {
+        selectedRow = (track >= 0 && track < kTracks) ? track : -1;
+        for (int t = 0; t < kTracks; ++t)
+        {
+            const bool sel = t == selectedRow;
+            rows[t].name.setColour (juce::Label::backgroundColourId,
+                                    sel ? boombap::ui::accent() : juce::Colours::transparentBlack);
+            rows[t].name.setColour (juce::Label::textColourId,
+                                    sel ? juce::Colour (0xff14100a) : juce::Colours::white);
+        }
+    }
+    int getSelectedRow() const { return selectedRow; }
+
+    // Row parts, reachable for the component tests (and any future
+    // view code that needs them).
+    juce::Label& rowNameLabel (int track)       { return rows[track].name; }
+    juce::TextButton& rowDeleteButton (int track) { return rows[track].del; }
+
     // Called by the owner's 30 Hz timer: playhead column + row meters.
     void tick()
     {
@@ -273,16 +311,21 @@ public:
     }
 
     // (Component is a MouseListener; row name clicks arrive here.)
+    // Round 1 (item 86): a LEFT click on a name SELECTS the track -
+    // nothing else. It used to also pop the row's menu, which made
+    // "select this track" and "load a sample" the same gesture in
+    // the owner's hands. The menu (item 40's kit menu, item 69's row
+    // menu) moved to RIGHT-click; the row still selects first, so
+    // the menu opens on the track you are looking at.
     void mouseDown (const juce::MouseEvent& e) override
     {
         for (int t = 0; t < kTracks; ++t)
             if (e.eventComponent == &rows[t].name)
             {
                 if (callbacks.onSelectRow) callbacks.onSelectRow (t);
-                // Item 40's kit menu, and (Fix Pass 3, item 69) the
-                // user-added rows' menu with Delete track.
-                if ((t <= boombap::BoomBapEngine::Clap
-                     || t >= boombap::BoomBapEngine::kFirstOwnRow)
+                if (e.mods.isRightButtonDown()
+                    && (t <= boombap::BoomBapEngine::Clap
+                        || t >= boombap::BoomBapEngine::kFirstOwnRow)
                     && callbacks.onNameMenu)
                     callbacks.onNameMenu (t);
                 return;
@@ -300,6 +343,7 @@ private:
         juce::TextButton roll { "ROLL" };
         juce::TextButton mute { "M" };
         juce::TextButton solo { "S" };
+        juce::TextButton del { "X" }; // item 87: visible on user-added rows only
         juce::Slider level;
         LevelMeter meter;
         StepButton steps[kSteps];
@@ -362,6 +406,10 @@ private:
             row.roll.setVisible (vis);
             row.mute.setVisible (vis);
             row.solo.setVisible (vis);
+            // item 87: the delete X shows ONLY on rows item 69 allows
+            // deleting (user-added rows) - protected rows carry no
+            // affordance at all, rather than a dead button.
+            row.del.setVisible (vis && t >= boombap::BoomBapEngine::kFirstOwnRow);
             row.level.setVisible (vis);
             row.meter.setVisible (vis);
             for (int s = 0; s < kSteps; ++s) row.steps[s].setVisible (vis);
@@ -373,7 +421,8 @@ private:
             row.roll.setBounds (CB (162, y + 2, 44, h));
             row.mute.setBounds (CB (210, y + 2, 36, h));
             row.solo.setBounds (CB (250, y + 2, 36, h));
-            row.level.setBounds (CB (292, y + 2, 84, h));
+            row.level.setBounds (CB (292, y + 2, 56, h));
+            row.del.setBounds (CB (352, y + 2, 24, h));
             for (int s = 0; s < kSteps; ++s)
                 row.steps[s].setBounds (CB (stepX (s), y + 2, 32, h));
             row.meter.setBounds (CB (1476, y + rowH / 2 - 4, 44, 8));
@@ -394,6 +443,7 @@ private:
     float scaleY = 1.0f, contentScaleX = 1.0f;
     float meterShown[kTracks] = {};
     int lastPlayStep = -2;
+    int selectedRow = -1; // item 86: mirrored by the owner (see setSelectedRow)
     // Item 76 swipe state (see applySwipe).
     bool swipeHeld = false;
     int swipeTrack = -1, swipeValue = 0, lastSwipeStep = -1, lastRowH = 0;

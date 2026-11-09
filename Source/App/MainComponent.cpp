@@ -26,6 +26,15 @@ public:
         setResizeLimits (480, 400, 1200, 900);
     }
 
+    // Round 1 (item 102): only the main window appears in the Windows
+    // taskbar. Without windowAppearsOnTaskbar the Windows peer builds
+    // this window with WS_EX_TOOLWINDOW - no taskbar slot of its own.
+    int getDesktopWindowStyleFlags() const override
+    {
+        return juce::DocumentWindow::getDesktopWindowStyleFlags()
+                 & ~juce::ComponentPeer::windowAppearsOnTaskbar;
+    }
+
     void closeButtonPressed() override
     {
         if (closeCallback) closeCallback();
@@ -48,6 +57,14 @@ public:
         boombap::ui::applyAppWindowFrame (*this, true); // items 77/78: own dark frame, floats over main
         setResizable (true, true);
         setResizeLimits (560, 320, 4000, 3000);
+    }
+
+    // Round 1 (item 102): no taskbar slot of its own (see
+    // AudioSettingsWindow's note - the same one-line rule everywhere).
+    int getDesktopWindowStyleFlags() const override
+    {
+        return juce::DocumentWindow::getDesktopWindowStyleFlags()
+                 & ~juce::ComponentPeer::windowAppearsOnTaskbar;
     }
 
     // Item 66: the component whose lifetime the deferred dock depends on
@@ -92,6 +109,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     // ---- project bar ----
     for (auto* b : { &newButton, &openButton, &saveButton, &saveAsButton, &recentButton })
         addAndMakeVisible (b);
+    boombap::ui::applyActionTrace (audioButton); // item 89: window openers are actions - amber trace
     addAndMakeVisible (audioButton);
     audioButton.setVisible (ownAudioDevice); // in a plugin the host owns the device
     audioButton.onClick = [this] { showAudioSettings(); };
@@ -105,6 +123,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     recentButton.onClick = [this] { showRecentMenu(); };
 
     // Pass 2: the Station opens from the project bar (item 19)
+    boombap::ui::applyActionTrace (stationButton);
     addAndMakeVisible (stationButton);
     stationButton.onClick = [this] { openStation(); };
 
@@ -160,27 +179,40 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     waveName.setColour (Label::textColourId, boombap::ui::muted());
     addAndMakeVisible (waveName);
     addAndMakeVisible (waveView);
-    // Fix pass item 33: clicking the waveform panel loads a sample into the
-    // row it is showing.
-    waveView.onClick = [this] { openSampleChooser (boombap::BoomBapEngine::Sample1 + waveTrack); };
+    // Round 1 (item 89): with a sample loaded, clicking the waveform
+    // AUDITIONS it (item 46's behaviour, moved onto the wave itself -
+    // click again to stop, and the global stop silences it like
+    // everything else). An EMPTY panel keeps item 74's click-to-load:
+    // there is nothing to hear, so the click loads.
+    waveView.onClick = [this]
+    {
+        if (waveData[waveTrack].empty())
+        {
+            openSampleChooser (boombap::BoomBapEngine::Sample1 + waveTrack);
+            return;
+        }
+        if (engine.isAuditionPlaying()) { engine.stopAudition(); return; }
+        engine.startAudition (waveData[waveTrack],
+                              waveRates[waveTrack] > 0.0 ? waveRates[waveTrack] : engine.getSampleRate());
+    };
     showWaveform (0);
 
-    // item 46: the waveform panel auditions its own sample, on its own
-    // button - and the global stop silences it like everything else.
+    // Round 1 (item 89): the panel's button is LOAD now - the
+    // dedicated load path (the audition lives on the wave, above).
     addAndMakeVisible (wavePlayButton);
+    boombap::ui::applyActionTrace (wavePlayButton);
     wavePlayButton.onClick = [this]
     {
-        if (engine.isAuditionPlaying()) { engine.stopAudition(); return; }
-        if (! waveData[waveTrack].empty())
-            engine.startAudition (waveData[waveTrack],
-                                  waveRates[waveTrack] > 0.0 ? waveRates[waveTrack] : engine.getSampleRate());
+        openSampleChooser (boombap::BoomBapEngine::Sample1 + waveTrack);
     };
 
     // ---- pad bank (own window, built on first open - a DocumentWindow shows itself when created, so it must not be built at launch) ----
+    boombap::ui::applyActionTrace (padBankButton);
     addAndMakeVisible (padBankButton);
     padBankButton.onClick = [this] { openPadBank(); };
 
     // ---- piano roll (own window, same arrangement) ----
+    boombap::ui::applyActionTrace (pianoButton);
     addAndMakeVisible (pianoButton);
     pianoButton.onClick = [this] { openPianoRoll(); };
 
@@ -198,6 +230,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         }
     }
     popOutButton.onClick = [this] { togglePopOut(); };
+    boombap::ui::applyActionTrace (popOutButton); // item 89: POP OUT named in the item - amber trace
     addAndMakeVisible (popOutButton);
     tabPoppedLabel.setText ("This view is open in its own window - close that window, or press Pop out again, to dock it back here.",
                             dontSendNotification);
@@ -217,6 +250,9 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
             if (t >= boombap::BoomBapEngine::kFirstOwnRow) showRowMenu (t);
             else showKitMenu (t);
         };
+        // item 87: the row's visible X runs the same guarded, undoable
+        // delete as the menu (item 69) - one action, two doors.
+        scb.onDeleteRow = [this] (int t) { deleteSequencerRow (t); };
         scb.onPatternChanged = [this] { if (pianoRoll != nullptr) pianoRoll->refreshFromEngine(); };
         scb.onBeforeChange = [this] { beginUndoGesture(); };
         scb.onAfterChange = [this] { endUndoGesture(); };
@@ -225,6 +261,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     }
     sequencerPanel->setLookAndFeel (&lookAndFeel);
     addAndMakeVisible (sequencerPanel.get());
+    sequencerPanel->setSelectedRow (selectedChannel); // item 86: the initial light (channel 0)
 
     // The MPC PANEL tab: its own pad bank instance (pads + the selected
     // pad's waveform and trim, item 44) - same engine, same samples as
@@ -259,6 +296,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     refreshGrid();
 
     // ---- playlist (own window) ----
+    boombap::ui::applyActionTrace (playlistButton);
     addAndMakeVisible (playlistButton);
     playlistButton.onClick = [this] { openPlaylist(); };
 
@@ -721,6 +759,58 @@ void MainComponent::selectChannel (int ch)
     // channel too - selection is mirrored, never re-derived there.
     if (multitrack != nullptr)
         multitrack->setSelectedChannel (selectedChannel);
+    // Round 1 (item 86): the sequencer's selected-row light is the
+    // third mirror of the one selection state - now a track picked in
+    // ANY view (sequencer name click, multitrack chip, Station board)
+    // lights the same row here.
+    if (sequencerPanel != nullptr)
+        sequencerPanel->setSelectedRow (selectedChannel);
+}
+
+// =====================================================================
+// Round 1 (item 102) - minimise coupling. The main window is the only
+// taskbar window; when it is minimised, every open auxiliary window
+// goes down with it, and restoring the main window brings back
+// exactly the windows the coupling took down. The state lives in
+// hiddenByMinimise so a window the owner closed himself (or one
+// destroyed while held, e.g. a docked production window) is never
+// resurrected.
+// =====================================================================
+void MainComponent::pollMinimiseCoupling()
+{
+    // In the plugin the top-level peer is the HOST's window - its
+    // minimise state is not BoomBap's to follow, and isMinimised()
+    // stays false for the hosted editor, so this is a no-op there.
+    auto* top = getTopLevelComponent();
+    if (top == nullptr) return;
+    auto* peer = top->getPeer();
+    updateMinimiseCoupling (peer != nullptr && peer->isMinimised());
+}
+
+void MainComponent::updateMinimiseCoupling (bool minimised)
+{
+    juce::DocumentWindow* aux[] = { stationWindow.get(),
+                                    productionWindows[0].get(), productionWindows[1].get(),
+                                    productionWindows[2].get(),
+                                    padWindow.get(), pianoWindow.get(), playlistWindow.get(),
+                                    audioWindow.get() };
+    if (minimised)
+    {
+        if (! hiddenByMinimise.empty()) return; // already coupled down
+        for (auto* w : aux)
+            if (w != nullptr && w->isVisible())
+            {
+                hiddenByMinimise.emplace_back (w);
+                w->setVisible (false);
+            }
+    }
+    else
+    {
+        for (auto& held : hiddenByMinimise)
+            if (auto* w = held.getComponent())
+                w->setVisible (true);
+        hiddenByMinimise.clear();
+    }
 }
 
 // The Station transport's REWIND: back to the top - the pattern/song
@@ -831,6 +921,7 @@ bool MainComponent::keyPressed (const KeyPress& key)
 
 void MainComponent::timerCallback()
 {
+    pollMinimiseCoupling(); // item 102: follow the main window's minimise state
     if (sequencerPanel != nullptr) sequencerPanel->tick();
 
     // Pass 2 (item 38): an undo gesture left open by a continuous control
@@ -858,12 +949,10 @@ void MainComponent::timerCallback()
 
     if (++dirtyTick >= 8) { dirtyTick = 0; updateProjectLabel(); }
 
-    // the waveform panel's audition button tells the truth (item 46)
-    {
-        const bool aud = engine.isAuditionPlaying();
-        const juce::String want = aud ? "STOP" : "PLAY";
-        if (wavePlayButton.getButtonText() != want) wavePlayButton.setButtonText (want);
-    }
+    // (Round 1, item 89: the waveform panel's button used to flip
+    // PLAY/STOP with the audition - that state machine is gone; the
+    // button is LOAD permanently now and the audition lives on the
+    // waveform itself.)
 
     // pad activity (Pass 1 item 4b): light + pad-set meter here, flash in the pad bank
     const float padPeak = engine.consumePadActivityPeak();

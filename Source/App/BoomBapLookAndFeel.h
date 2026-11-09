@@ -14,7 +14,90 @@ inline juce::Colour text()     { return juce::Colour (0xffe9ebee); }
 inline juce::Colour muted()    { return juce::Colour (0xff9aa3ad); }
 inline juce::Colour accent()   { return juce::Colour (0xfff5a524); }
 inline juce::Colour accentHi() { return juce::Colour (0xffffc857); }
+// Round 1 (item 85): an auxiliary window's title bar is a step LIGHTER
+// than the main window's bar (plus an amber trace along its top edge),
+// so a popped-out window reads as its own object with a grabbable bar
+// instead of blending into the program behind it.
+inline juce::Colour frameBar() { return panelAlt().brighter (0.05f); }
+
+// Component-property keys the frame/skin code shares (Round 1):
+//  - auxWindowProperty: set on every auxiliary DocumentWindow by
+//    applyAppWindowFrame; the title-bar painter branches on it.
+//  - actionButtonProperty: set on buttons that DO something (open,
+//    load, add) by applyActionTrace; the button painter branches on it.
+inline const char* auxWindowProperty()    { return "boombapAuxWindow"; }
+inline const char* actionButtonProperty() { return "boombapAction"; }
+inline bool isAuxWindow (const juce::Component& c)
+{
+    return c.getProperties().contains (auxWindowProperty());
 }
+
+// Round 1 (item 89): the thin amber trace that marks a button as an
+// ACTION (POP OUT, ADD TRACK, LOAD, the window openers) - actionable
+// controls stand out from passive readouts at a glance. One shared
+// helper so later rounds reuse the same language.
+inline void applyActionTrace (juce::Button& b)
+{
+    b.getProperties().set (actionButtonProperty(), true);
+    b.repaint();
+}
+inline bool hasActionTrace (const juce::Button& b)
+{
+    return b.getProperties().contains (actionButtonProperty());
+}
+}
+
+// Round 1 (item 85): BoomBap's own title-bar button. JUCE V4's stock
+// button paints its glyph in dark red / dark mustard / dark green -
+// on this app's near-black bar the owner could not see the minimise /
+// maximise / close buttons at all ("a little brighter amber so you
+// can see them"). Same shapes and behaviour as the stock button, but
+// the glyphs are the app's bright amber, drawn a touch bolder, over
+// the bar itself (no grey chip); hover fills the chip amber and the
+// glyph goes dark, so the button you are about to press is obvious.
+class BoomBapWindowButton final : public juce::Button
+{
+public:
+    BoomBapWindowButton (const juce::String& name, juce::Colour glyph,
+                         const juce::Path& normal, const juce::Path& toggled)
+        : juce::Button (name), glyphColour (glyph), normalShape (normal), toggledShape (toggled)
+    {
+    }
+
+    void paintButton (juce::Graphics& g, bool shouldDrawButtonAsHighlighted,
+                      bool shouldDrawButtonAsDown) override
+    {
+        const auto bounds = getLocalBounds().toFloat().reduced (2.0f);
+        if (shouldDrawButtonAsDown)
+        {
+            g.setColour (glyphColour.darker (0.35f));
+            g.fillRoundedRectangle (bounds, 5.0f);
+        }
+        else if (shouldDrawButtonAsHighlighted)
+        {
+            g.setColour (glyphColour);
+            g.fillRoundedRectangle (bounds, 5.0f);
+        }
+
+        g.setColour (shouldDrawButtonAsHighlighted && ! shouldDrawButtonAsDown
+                         ? juce::Colour (0xff14100a)
+                         : (isEnabled() ? glyphColour : glyphColour.withAlpha (0.45f)));
+
+        const auto& p = getToggleState() ? toggledShape : normalShape;
+        auto reducedRect = juce::Justification (juce::Justification::centred)
+                               .appliedToRectangle (juce::Rectangle<int> (getHeight(), getHeight()),
+                                                    getLocalBounds())
+                               .toFloat()
+                               .reduced ((float) getHeight() * 0.27f);
+        g.fillPath (p, p.getTransformToScaleToFit (reducedRect, true));
+    }
+
+private:
+    juce::Colour glyphColour;
+    juce::Path normalShape, toggledShape;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (BoomBapWindowButton)
+};
 
 class BoomBapLookAndFeel : public juce::LookAndFeel_V4
 {
@@ -49,6 +132,48 @@ public:
         setColour (juce::DocumentWindow::textColourId, text());
     }
 
+    // Round 1 (item 85): the title-bar buttons, in bright amber (see
+    // BoomBapWindowButton above) instead of V4's dark stock colours.
+    juce::Button* createDocumentWindowButton (int buttonType) override
+    {
+        using namespace boombap::ui;
+        juce::Path shape;
+        const auto thickness = 0.24f; // bolder than stock: findable at a glance
+
+        if (buttonType == juce::DocumentWindow::closeButton)
+        {
+            shape.addLineSegment ({ 0.0f, 0.0f, 1.0f, 1.0f }, thickness);
+            shape.addLineSegment ({ 1.0f, 0.0f, 0.0f, 1.0f }, thickness);
+            return new BoomBapWindowButton ("close", accentHi(), shape, shape);
+        }
+
+        if (buttonType == juce::DocumentWindow::minimiseButton)
+        {
+            shape.addLineSegment ({ 0.0f, 0.5f, 1.0f, 0.5f }, thickness);
+            return new BoomBapWindowButton ("minimise", accentHi(), shape, shape);
+        }
+
+        if (buttonType == juce::DocumentWindow::maximiseButton)
+        {
+            shape.addLineSegment ({ 0.5f, 0.0f, 0.5f, 1.0f }, thickness);
+            shape.addLineSegment ({ 0.0f, 0.5f, 1.0f, 0.5f }, thickness);
+
+            juce::Path fullscreenShape;
+            fullscreenShape.startNewSubPath (45.0f, 100.0f);
+            fullscreenShape.lineTo (0.0f, 100.0f);
+            fullscreenShape.lineTo (0.0f, 0.0f);
+            fullscreenShape.lineTo (100.0f, 0.0f);
+            fullscreenShape.lineTo (100.0f, 45.0f);
+            fullscreenShape.addRectangle (45.0f, 45.0f, 100.0f, 100.0f);
+            juce::PathStrokeType (30.0f).createStrokedPath (fullscreenShape, fullscreenShape);
+
+            return new BoomBapWindowButton ("maximise", accentHi(), shape, fullscreenShape);
+        }
+
+        jassertfalse;
+        return nullptr;
+    }
+
     // Fix Pass 4 (item 77): the title bar every BoomBap window draws for
     // itself - flat panel charcoal from the app palette, a hairline
     // divider along the bottom, the title in the app's text colour
@@ -56,6 +181,11 @@ public:
     // JUCE bar (icon, centred-or-left title, room reserved for the
     // buttons) so only the colours change hands: the OS theme never
     // paints any part of this app again.
+    // Round 1 (item 85): an AUXILIARY window's bar is a step lighter
+    // (frameBar) with a thin amber trace along its top edge - a popped
+    // window separates from the main window behind it and its bar
+    // reads as a handle. The main window keeps the dark panel() bar:
+    // separation, not a redesign.
     void drawDocumentWindowTitleBar (juce::DocumentWindow& window, juce::Graphics& g,
                                      int w, int h, int titleSpaceX, int titleSpaceW,
                                      const juce::Image* icon, bool drawTitleTextOnLeft) override
@@ -65,9 +195,15 @@ public:
             return;
 
         const bool isActive = window.isActiveWindow();
+        const bool aux = isAuxWindow (window);
 
-        g.setColour (panel());
+        g.setColour (aux ? frameBar() : panel());
         g.fillAll();
+        if (aux)
+        {
+            g.setColour (accent().withAlpha (0.55f));
+            g.fillRect (0, 0, w, 2);
+        }
         g.setColour (border());
         g.fillRect (0, h - 1, w, 1);
 
@@ -134,8 +270,18 @@ public:
         else if (drawAsHighlighted) c = c.brighter (0.12f);
         g.setColour (c);
         g.fillRoundedRectangle (b, 8.0f);
-        g.setColour (boombap::ui::border().withAlpha (0.6f));
-        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        // Round 1 (item 89): action buttons carry a thin amber outline
+        // instead of the passive grey one (see applyActionTrace).
+        if (boombap::ui::hasActionTrace (button))
+        {
+            g.setColour (boombap::ui::accent().withAlpha (0.9f));
+            g.drawRoundedRectangle (b, 8.0f, 1.4f);
+        }
+        else
+        {
+            g.setColour (boombap::ui::border().withAlpha (0.6f));
+            g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        }
     }
 
     void drawToggleButton (juce::Graphics& g, juce::ToggleButton& button,
@@ -232,5 +378,9 @@ inline void applyAppWindowFrame (juce::DocumentWindow& window, bool floatAboveMa
     window.setUsingNativeTitleBar (false);
     window.setColour (juce::DocumentWindow::textColourId, text());
     window.setAlwaysOnTop (floatAboveMainWindow);
+    // Round 1 (item 85): mark the auxiliary windows so the title-bar
+    // painter gives them the lighter, amber-traced bar.
+    if (floatAboveMainWindow)
+        window.getProperties().set (auxWindowProperty(), true);
 }
 } // namespace boombap::ui
