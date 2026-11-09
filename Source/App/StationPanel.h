@@ -63,6 +63,10 @@ public:
     }
     const StripSettings& getStrip() const { return strip; }
     int getSelectedBand() const { return selectedBand; }
+    // Round 2: a band node's centre in local coordinates - the same
+    // numbers paint() and the mouse handlers use (the knob-sync test
+    // aims its fabricated drags here).
+    juce::Point<float> bandNodePosition (int i) const { return nodeCentre (i); }
     void selectBand (int b)
     {
         selectedBand = juce::jlimit (0, StripSettings::kEqBands - 1, b);
@@ -454,6 +458,90 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+// Round 2 (item 96c): the master's VU meter - a needle with VU
+// ballistics (fast rise, ~300 ms fall) over the classic -20..+3 VU
+// scale, sitting above the master fader in the rail, IN ADDITION to
+// the long L/R meters. BoomBap dress: near-black face, amber needle,
+// red zone past 0 VU.
+// ----------------------------------------------------------------------------
+class VuNeedle : public juce::Component
+{
+public:
+    VuNeedle() {}
+    void setLevel (float linear)
+    {
+        const float db = linear > 0.0004f ? 20.0f * std::log10 (linear) : -60.0f;
+        if (db > shownDb) shownDb = db;                          // rise at once
+        else shownDb = std::max (db, shownDb - 1.1f);            // per 30 Hz tick ≈ VU fall
+        repaint();
+    }
+    float shownLevelDb() const { return shownDb; }
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace boombap::ui;
+        auto b = getLocalBounds().toFloat();
+        g.setColour (juce::Colour (0xff101216));
+        g.fillRoundedRectangle (b, 6.0f);
+        g.setColour (border().withAlpha (0.6f));
+        g.drawRoundedRectangle (b, 6.0f, 1.0f);
+
+        const juce::Point<float> pivot (b.getCentreX(), b.getBottom() - 10.0f);
+        const float len = b.getHeight() * 0.82f;
+        auto angleFor = [] (float vu)
+        {
+            const float t = (juce::jlimit (-20.0f, 3.5f, vu) + 20.0f) / 23.5f;
+            return (-38.0f + t * 76.0f) * 0.01745329f; // radians from vertical
+        };
+        auto tip = [&] (float vu, float scale)
+        {
+            const float a = angleFor (vu);
+            return juce::Point<float> (pivot.x + std::sin (a) * len * scale,
+                                       pivot.y - std::cos (a) * len * scale);
+        };
+        // red zone arc (0..+3 VU)
+        {
+            juce::Path p;
+            for (int i = 0; i <= 10; ++i)
+            {
+                const auto pt = tip ((float) i / 10.0f * 3.0f, 0.97f);
+                if (i == 0) p.startNewSubPath (pt); else p.lineTo (pt);
+            }
+            g.setColour (juce::Colour (0xffe5484d).withAlpha (0.85f));
+            g.strokePath (p, juce::PathStrokeType (2.0f));
+        }
+        g.setFont (7.5f);
+        for (float vu : { -20.0f, -10.0f, -7.0f, -5.0f, -3.0f, -1.0f, 0.0f, 3.0f })
+        {
+            const auto p1 = tip (vu, 0.88f), p2 = tip (vu, 0.97f);
+            g.setColour (vu >= 0.0f ? juce::Colour (0xffe5484d) : muted());
+            g.drawLine (p1.x, p1.y, p2.x, p2.y, vu == 0.0f ? 1.6f : 1.0f);
+            if (vu == -20.0f || vu == -10.0f || vu == -5.0f || vu == 0.0f || vu == 3.0f)
+            {
+                const auto tp = tip (vu, 0.72f);
+                g.drawText (vu == 3.0f ? "+3" : juce::String ((int) vu),
+                            (int) tp.x - 10, (int) tp.y - 5, 20, 9, juce::Justification::centred);
+            }
+        }
+        // the needle
+        const auto n = tip (shownDb, 1.0f);
+        g.setColour (accentHi());
+        g.drawLine (pivot.x, pivot.y, n.x, n.y, 2.2f);
+        g.setColour (border());
+        g.fillEllipse (pivot.x - 3.5f, pivot.y - 3.5f, 7.0f, 7.0f);
+        g.setColour (muted());
+        g.setFont (juce::Font (10.0f, juce::Font::bold));
+        g.drawText ("VU", (int) b.getX(), (int) b.getBottom() - 13, (int) b.getWidth(), 10,
+                    juce::Justification::centred);
+    }
+
+private:
+    float shownDb = -60.0f;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VuNeedle)
+};
+
+// ----------------------------------------------------------------------------
 // The FULL MIXING BOARD (scope item 5): every channel as a compact strip -
 // name, fader, pan knob, MUTE, SOLO, meter - in track order (item 35),
 // scrollable. Clicking a strip selects its channel; the Station binds to
@@ -515,6 +603,35 @@ public:
         for (auto& s : strips) s->setSelected (s->channelId() == ch);
     }
 
+    // Round 2: the board's pieces, reachable for the regression tests -
+    // the same objects the mouse drives, no test-only back doors.
+    int stripCount() const { return (int) strips.size(); }
+    juce::Component* stripComponent (int ch)
+    {
+        for (auto& s : strips) if (s->channelId() == ch) return s.get();
+        return nullptr;
+    }
+    juce::TextButton* stripMuteButton (int ch)
+    {
+        for (auto& s : strips) if (s->channelId() == ch) return &s->muteButton();
+        return nullptr;
+    }
+    juce::TextButton* stripSoloButton (int ch)
+    {
+        for (auto& s : strips) if (s->channelId() == ch) return &s->soloButton();
+        return nullptr;
+    }
+    ConsoleFader* stripFader (int ch)
+    {
+        for (auto& s : strips) if (s->channelId() == ch) return &s->faderControl();
+        return nullptr;
+    }
+    bool stripSelected (int ch)
+    {
+        for (auto& s : strips) if (s->channelId() == ch) return s->isSelected();
+        return false;
+    }
+
     void resized() override
     {
         viewport.setBounds (getLocalBounds());
@@ -535,25 +652,31 @@ private:
     public:
         Strip (MixingBoard& board, int ch) : owner (board), engine (board.engine), channel (ch)
         {
-            name.setText (juce::String (BoomBapEngine::channelName (ch, engine.getNumTracks(),
-                                                                   engine.getNumAudioTracks())),
+            name.setText (juce::String (engine.channelDisplayName (ch)),
                           juce::dontSendNotification);
             name.setColour (juce::Label::textColourId, boombap::ui::text());
             name.setFont (juce::Font (11.5f, juce::Font::bold));
             name.setJustificationType (juce::Justification::centred);
+            // Round 2 (item 95): the name does not swallow clicks - a
+            // click on the NAME selects the channel like a click
+            // anywhere else on the strip (it lands on the Strip's own
+            // mouseDown below).
+            name.setInterceptsMouseClicks (false, false);
             addAndMakeVisible (name);
 
-            fader.setSliderStyle (juce::Slider::LinearVertical);
-            fader.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-            fader.setRange (0.0, 1.2, 0.01);
-            fader.setDoubleClickReturnValue (true, defaultGain());
+            // Round 2 (item 95): the approved console long fader (item
+            // 79's pick) replaces the side slider whose thumb vanished
+            // on grab - the ConsoleFader paints its own cap from its
+            // own value, and the audio side ramps the gain (no zipper).
+            fader.setRange (0.0, 1.2, defaultGain());
+            fader.setMeterColumns (1);
             fader.onDragStart = [this]
             {
                 select();
                 if (owner.callbacks.onBeforeChange) owner.callbacks.onBeforeChange();
             };
             fader.onDragEnd = [this] { if (owner.callbacks.onAfterChange) owner.callbacks.onAfterChange(); };
-            fader.onValueChange = [this] { engine.setChannelGain (channel, (float) fader.getValue()); };
+            fader.onValueChange = [this] (double v) { engine.setChannelGain (channel, (float) v); };
             addAndMakeVisible (fader);
 
             pan.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
@@ -575,10 +698,16 @@ private:
             mute.setColour (juce::TextButton::buttonOnColourId, juce::Colours::indianred);
             mute.onClick = [this]
             {
-                select();
+                // Round 2 (item 95 root cause): the engine write comes
+                // FIRST and the select LAST. The old order selected
+                // first; the rebind's refresh then read the engine's
+                // PRE-click state back over the button, and the click
+                // wrote that stale state to the engine - the board's
+                // MUTE/SOLO quite literally cancelled themselves out.
                 if (owner.callbacks.onBeforeChange) owner.callbacks.onBeforeChange();
                 engine.setChannelMute (channel, mute.getToggleState());
                 if (owner.callbacks.onAfterChange) owner.callbacks.onAfterChange();
+                select();
             };
             addAndMakeVisible (mute);
             mute.setVisible (channel != BoomBapEngine::kMasterChannel);
@@ -588,10 +717,10 @@ private:
             solo.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffa8871a));
             solo.onClick = [this]
             {
-                select();
                 if (owner.callbacks.onBeforeChange) owner.callbacks.onBeforeChange();
                 engine.setChannelSolo (channel, solo.getToggleState());
                 if (owner.callbacks.onAfterChange) owner.callbacks.onAfterChange();
+                select();
             };
             addAndMakeVisible (solo);
             solo.setVisible (channel != BoomBapEngine::kMasterChannel
@@ -618,20 +747,36 @@ private:
 
         void pullFromEngine()
         {
-            fader.setValue (engine.getChannelGain (channel), juce::dontSendNotification);
+            // Round 3 (item 88): the strip's name follows the track's
+            // content name, like everywhere else (set only on change -
+            // this runs on every board refresh).
+            const juce::String n (engine.channelDisplayName (channel));
+            if (name.getText() != n) name.setText (n, juce::dontSendNotification);
+            fader.setValue (engine.getChannelGain (channel), false);
+            fader.setDefaultValue (defaultGain());
             pan.setValue (channel == BoomBapEngine::kMasterChannel ? 0.0 : engine.getChannelPan (channel),
                           juce::dontSendNotification);
             mute.setToggleState (engine.getChannelMute (channel), juce::dontSendNotification);
             solo.setToggleState (engine.getChannelSolo (channel), juce::dontSendNotification);
         }
 
-        void setMeter (float l, float r)
+        // the fader's own LED ladder is the strip meter now (item 95)
+        void setMeter (float l, float r) { fader.setMeterLevels (l, r); }
+        void setSelected (bool s)
         {
-            meterL = std::max (l, meterL * 0.85f);
-            meterR = std::max (r, meterR * 0.85f);
+            if (selectedFlag == s) return;
+            selectedFlag = s;
+            // Round 2 (item 95): the selected channel's NAME lights in
+            // its box - dark text on the amber fill, the item 68
+            // SELECTED language, on top of the whole-strip trace.
+            name.setColour (juce::Label::textColourId,
+                            s ? juce::Colour (0xff14100a) : boombap::ui::text());
             repaint();
         }
-        void setSelected (bool s) { if (selectedFlag != s) { selectedFlag = s; repaint(); } }
+        bool isSelected() const { return selectedFlag; }
+        juce::TextButton& muteButton() { return mute; }
+        juce::TextButton& soloButton() { return solo; }
+        ConsoleFader& faderControl() { return fader; }
 
         void mouseDown (const juce::MouseEvent&) override { select(); }
 
@@ -643,33 +788,23 @@ private:
             g.fillRoundedRectangle (b, 8.0f);
             g.setColour (selectedFlag ? accent() : border().withAlpha (0.5f));
             g.drawRoundedRectangle (b, 8.0f, selectedFlag ? 1.8f : 1.0f);
-            // the meter: one slim stereo pair down the strip's right edge
-            const float mx = b.getRight() - 13.0f, mw = 4.0f;
-            const float top = 34.0f, h = b.getHeight() - 150.0f;
-            auto bar = [&] (float x, float level)
-            {
-                g.setColour (panelAlt().darker (0.4f));
-                g.fillRect (x, top, mw, h);
-                const float frac = std::sqrt (juce::jlimit (0.0f, 1.0f, level));
-                if (frac > 0.01f)
-                {
-                    g.setColour (level > 0.95f ? juce::Colour (0xffe5484d) : accent());
-                    g.fillRect (x, top + h * (1.0f - frac), mw, h * frac);
-                }
-            };
-            bar (mx, meterL);
-            bar (mx + 6.0f, meterR);
+            // the name box on top of the strip trace (item 95): a lit
+            // box when this channel is the selected one
+            auto nameBox = juce::Rectangle<float> (4.0f, 4.0f, b.getWidth() - 8.0f, 24.0f);
+            g.setColour (selectedFlag ? accent() : panelAlt().darker (0.25f));
+            g.fillRoundedRectangle (nameBox, 5.0f);
+            g.setColour (selectedFlag ? accentHi() : border().withAlpha (0.6f));
+            g.drawRoundedRectangle (nameBox, 5.0f, selectedFlag ? 1.6f : 1.0f);
         }
 
         void resized() override
         {
             auto b = getLocalBounds();
-            name.setBounds (2, 4, b.getWidth() - 4, 26);
-            fader.setBounds (8, 34, 44, juce::jmax (60, b.getHeight() - 150));
-            pan.setBounds (b.getWidth() / 2 - 17, b.getHeight() - 108, 34, 34);
-            mute.setBounds (8, b.getHeight() - 66, 34, 26);
-            solo.setBounds (50, b.getHeight() - 66, 34, 26);
-            juce::ignoreUnused (b);
+            name.setBounds (4, 4, b.getWidth() - 8, 24);
+            fader.setBounds (12, 34, b.getWidth() - 20, juce::jmax (70, b.getHeight() - 34 - 92));
+            pan.setBounds (b.getWidth() / 2 - 17, b.getHeight() - 88, 34, 34);
+            mute.setBounds (8, b.getHeight() - 44, 34, 26);
+            solo.setBounds (50, b.getHeight() - 44, 34, 26);
         }
 
     private:
@@ -682,9 +817,9 @@ private:
         BoomBapEngine& engine;
         int channel;
         juce::Label name;
-        juce::Slider fader, pan;
+        ConsoleFader fader;
+        juce::Slider pan;
         juce::TextButton mute, solo;
-        float meterL = 0.0f, meterR = 0.0f;
         bool selectedFlag = false;
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Strip)
@@ -726,6 +861,17 @@ public:
     {
         std::function<void (int)> onSelectChannel;
         std::function<void()> onPlay, onStopAll, onRewind, onFastForward;
+        // Round 2 (item 93): the full transport - TO START / TO END
+        // flank the step skips; the clock format lives with the owner
+        // so the Station clock and the main window's readout agree.
+        std::function<void()> onToStart, onToEnd;
+        std::function<int()> getClockFormat;
+        std::function<void (int)> setClockFormat;
+        // Round 2 (item 96d): the EDIT SAMPLE doorway beside the
+        // channel drop-down - the owner opens the channel's editor
+        // (pad bank / piano roll); channels without one disable it.
+        std::function<void (int)> onEditChannel;
+        std::function<bool (int)> channelHasEditor;
         std::function<void()> onUndo, onRedo;
         std::function<bool()> canUndo, canRedo;
         std::function<void()> onBeforeChange, onAfterChange;
@@ -742,9 +888,27 @@ public:
         titleLabel.setColour (juce::Label::textColourId, boombap::ui::muted());
         titleLabel.setFont (juce::Font (11.0f, juce::Font::bold));
         addAndMakeVisible (titleLabel);
-        channelLabel.setColour (juce::Label::textColourId, boombap::ui::text());
-        channelLabel.setFont (juce::Font (24.0f, juce::Font::bold));
-        addAndMakeVisible (channelLabel);
+        // Round 2 (item 93): the channel name IS a drop-down of every
+        // active track/channel - picking one binds the strip to it
+        // without leaving the Station.
+        boombap::ui::markSelectorBox (channelBox);
+        channelBox.setTextWhenNothingSelected ("—");
+        channelBox.onChange = [this]
+        {
+            if (refreshing) return;
+            const int id = channelBox.getSelectedId();
+            if (id > 0 && callbacks.onSelectChannel) callbacks.onSelectChannel (id - 1);
+        };
+        addAndMakeVisible (channelBox);
+        // Round 2 (item 96d): EDIT SAMPLE - the doorway to the
+        // channel's own editor (the pad/sample editor for sample
+        // lanes, the piano roll for instruments). Disabled where the
+        // channel has no editor (pure audio lanes, buses, master).
+        editButton.setButtonText ("EDIT SAMPLE");
+        boombap::ui::applyActionTrace (editButton);
+        editButton.onClick = [this] { if (callbacks.onEditChannel) callbacks.onEditChannel (channel); };
+        addAndMakeVisible (editButton);
+        refreshChannelBox();
 
         abButton.setButtonText ("A/B");
         abButton.onClick = [this] { toggleAB(); };
@@ -759,8 +923,13 @@ public:
         boardButton.onClick = [this] { setBoardMode (! boardMode); };
         addAndMakeVisible (boardButton);
 
-        // the transport, inside the Station (item 19)
-        rewButton.setButtonText ("|<< REW");
+        // the transport, inside the Station (item 19; item 93's full
+        // spec in Round 2): TO START, REW (step; double-press = bar),
+        // PLAY, STOP, FF (step; double-press = bar), TO END - the
+        // double-press reading lives in the owner's TransportNav.
+        toStartButton.setButtonText ("|<< START");
+        toStartButton.onClick = [this] { if (callbacks.onToStart) callbacks.onToStart(); };
+        rewButton.setButtonText ("REW");
         rewButton.onClick = [this] { if (callbacks.onRewind) callbacks.onRewind(); };
         playButton.setButtonText ("PLAY");
         playButton.setColour (juce::TextButton::buttonColourId, boombap::ui::accent());
@@ -768,9 +937,23 @@ public:
         playButton.onClick = [this] { if (callbacks.onPlay) callbacks.onPlay(); };
         stopButton.setButtonText ("STOP");
         stopButton.onClick = [this] { if (callbacks.onStopAll) callbacks.onStopAll(); };
-        ffButton.setButtonText ("FF >>");
+        ffButton.setButtonText ("FF");
         ffButton.onClick = [this] { if (callbacks.onFastForward) callbacks.onFastForward(); };
-        for (auto* b : { &rewButton, &playButton, &stopButton, &ffButton }) addAndMakeVisible (b);
+        toEndButton.setButtonText ("END >>|");
+        toEndButton.onClick = [this] { if (callbacks.onToEnd) callbacks.onToEnd(); };
+        for (auto* b : { &toStartButton, &rewButton, &playButton, &stopButton, &ffButton, &toEndButton })
+            addAndMakeVisible (b);
+
+        // Round 2 (item 93): the BIG time clock - click cycles
+        // time / samples / bars.beats.ticks; the choice is the owner's
+        // (persisted), so this clock and the main window's agree.
+        timeClock.onCycleFormat = [this]
+        {
+            const int next = (currentClockFormat() + 1) % 3;
+            if (callbacks.setClockFormat) callbacks.setClockFormat (next);
+            else localClockFormat = next;
+        };
+        addAndMakeVisible (timeClock);
 
         undoButton.setButtonText ("UNDO");
         undoButton.onClick = [this] { if (callbacks.onUndo) callbacks.onUndo(); };
@@ -907,19 +1090,62 @@ public:
         };
         addAndMakeVisible (bandDelButton);
 
+        // Round 2 (item 94): the EQ's master name-toggle + the
+        // selected band's CORRESPONDING KNOBS. Pressing GRAPHIC EQ
+        // bypasses the whole EQ honestly: the bands' on-states are
+        // stored and every band goes off in the strip the DSP reads
+        // (flat = bypassed); pressing again restores them. The knobs
+        // (Gain / Freq / Q, the approved knob family) are colour-matched
+        // to the selected band's node and stay two-way synced with the
+        // nodes: drag a node and updateBandBar() re-reads the knobs;
+        // turn a knob and it writes the same strip the nodes draw.
+        setupStageToggle (eqToggle, "GRAPHIC EQ", [this] (bool on) { setEqBypassed (! on); });
+        setupKnob (eqGainKnob, "Gain", -18.0, 18.0, 0.1, 0.0, " dB",
+                   [this] (double v)
+                   {
+                       const int sel = eqDisplay.getSelectedBand();
+                       if (sel < 0 || sel >= cur.eqNumBands) return;
+                       cur.eq[(size_t) sel].gainDb = (float) v;
+                       pushStrip();
+                       updateBandBar();
+                   });
+        setupKnob (eqFreqKnob, "Freq", 20.0, 20000.0, 1.0, 1000.0, "",
+                   [this] (double v)
+                   {
+                       const int sel = eqDisplay.getSelectedBand();
+                       if (sel < 0 || sel >= cur.eqNumBands) return;
+                       cur.eq[(size_t) sel].freqHz = (float) v;
+                       pushStrip();
+                       updateBandBar();
+                   });
+        eqFreqKnob.slider.setSkewFactorFromMidPoint (1000.0);
+        eqFreqKnob.slider.textFromValueFunction = [] (double v) { return stationui::freqText ((float) v); };
+        setupKnob (eqQKnob, "Q", 0.1, 18.0, 0.01, 1.0, "",
+                   [this] (double v)
+                   {
+                       const int sel = eqDisplay.getSelectedBand();
+                       if (sel < 0 || sel >= cur.eqNumBands) return;
+                       cur.eq[(size_t) sel].q = (float) v;
+                       pushStrip();
+                       updateBandBar();
+                   });
+
         // the rail: meters, fader, pan, mute/solo
         addAndMakeVisible (vuMeter);
-        fader.setSliderStyle (juce::Slider::LinearVertical);
-        fader.setTextBoxStyle (juce::Slider::NoTextBox, false, 0, 0);
-        fader.setRange (0.0, 1.2, 0.01);
-        fader.onDragStart = [this] { gestureBegin(); };
-        fader.onDragEnd = [this] { gestureEnd(); };
-        fader.onValueChange = [this]
+        addAndMakeVisible (vuNeedle); // item 96c: the master's VU (visibility follows the channel)
+        // Round 2 (items 95/96): the rail fader is the same approved
+        // console long fader as the board's - dB scale left, segmented
+        // LED ladder right, cap that cannot vanish.
+        railFader.setRange (0.0, 1.2, 1.0);
+        railFader.setMeterColumns (2);
+        railFader.onDragStart = [this] { gestureBegin(); };
+        railFader.onDragEnd = [this] { gestureEnd(); };
+        railFader.onValueChange = [this] (double v)
         {
-            if (! refreshing) engine.setChannelGain (channel, (float) fader.getValue());
+            if (! refreshing) engine.setChannelGain (channel, (float) v);
             updateFaderLabel();
         };
-        addAndMakeVisible (fader);
+        addAndMakeVisible (railFader);
         faderLabel.setColour (juce::Label::textColourId, boombap::ui::muted());
         faderLabel.setFont (juce::Font (11.0f));
         faderLabel.setJustificationType (juce::Justification::centred);
@@ -966,6 +1192,7 @@ public:
         addChildComponent (board); // item 59 discipline: visibility is set explicitly below
         board.setVisible (false);
 
+        ensureFactoryPresets(); // item 96a: VOCAL / DRUM / SNARE ship with the app
         bindToChannel (0);
         startTimerHz (30);
     }
@@ -980,11 +1207,10 @@ public:
         updateABButton();
         engine.setAnalysedChannel (channel);
         board.setSelectedChannel (channel);
-        const bool master = channel == BoomBapEngine::kMasterChannel;
-        channelLabel.setText (master ? "MASTER BUS"
-                                     : juce::String (BoomBapEngine::channelName (channel, engine.getNumTracks(),
-                                                                                 engine.getNumAudioTracks())).toUpperCase(),
-                              juce::dontSendNotification);
+        // Round 2 (item 93): the drop-down IS the channel name now -
+        // the binding moves the selector, never the other way round.
+        channelBox.setSelectedId (channel + 1, juce::dontSendNotification);
+        updateEditButton();
         updateVisibility();
         refreshFromEngine();
         resized();
@@ -993,6 +1219,48 @@ public:
 
     int boundChannel() const { return channel; }
     bool isBoardMode() const { return boardMode; }
+
+    // Round 3 (item 88): after a load renames a track, the drop-down's
+    // items and the board strips' names re-read the engine's content
+    // names. (The timer only rebuilds the box when track COUNTS move;
+    // a rename changes no count.)
+    void refreshChannelNames()
+    {
+        refreshChannelBox();
+        board.refreshValues();
+        repaint();
+    }
+
+    // Round 2: public doors for the regression tests - the same
+    // objects and paths the mouse drives, no test-only back doors.
+    void loadPresetFile (const juce::File& f) { applyPresetFile (f); }
+    MixingBoard& boardComponent() { return board; }
+    EqDisplay& eqDisplayComponent() { return eqDisplay; }
+    TimeClock& clockComponent() { return timeClock; }
+    juce::ComboBox& channelDropdown() { return channelBox; }
+    ConsoleFader& railFaderComponent() { return railFader; }
+    int dropdownChannel() const { return channelBox.getSelectedId() - 1; }
+    bool editButtonEnabled() const { return editButton.isEnabled(); }
+    bool preampStageVisible() const { return preampToggle.isVisible(); }
+    bool limiterStageVisible() const { return limiterToggle.isVisible(); }
+    bool railMuteState() const { return muteButton.getToggleState(); }
+    bool railSoloState() const { return soloButton.getToggleState(); }
+    int currentClockFormat() const
+    {
+        return callbacks.getClockFormat ? callbacks.getClockFormat() : localClockFormat;
+    }
+    double eqBandKnobValue (int which) const
+    {
+        if (which == 0) return eqGainKnob.slider.getValue();
+        if (which == 1) return eqFreqKnob.slider.getValue();
+        return eqQKnob.slider.getValue();
+    }
+    juce::Slider& eqBandKnob (int which)
+    {
+        if (which == 0) return eqGainKnob.slider;
+        if (which == 1) return eqFreqKnob.slider;
+        return eqQKnob.slider;
+    }
 
     void setBoardMode (bool b)
     {
@@ -1010,6 +1278,8 @@ public:
         if (channel != BoomBapEngine::kMasterChannel)
         {
             cur = engine.getStripSettings (channel);
+            eqBypassed = false;   // a freshly read strip starts un-bypassed;
+            eqStoredValid = false; // the stored band states belong to the old strip
             eqDisplay.setStrip (cur);
             preampToggle.setToggleState (cur.preampOn, juce::dontSendNotification);
             preampKnob.slider.setValue (cur.preampDb, juce::dontSendNotification);
@@ -1035,8 +1305,8 @@ public:
             masterLimToggle.setToggleState (s.masterLimiterOn, juce::dontSendNotification);
             masterLimKnob.slider.setValue (s.masterLimiterCeilingDb, juce::dontSendNotification);
         }
-        fader.setValue (engine.getChannelGain (channel), juce::dontSendNotification);
-        fader.setDoubleClickReturnValue (true, defaultGainFor (channel));
+        railFader.setValue (engine.getChannelGain (channel), false);
+        railFader.setDefaultValue (defaultGainFor (channel));
         panKnob.slider.setValue (channel == BoomBapEngine::kMasterChannel ? 0.0 : engine.getChannelPan (channel),
                                  juce::dontSendNotification);
         muteButton.setToggleState (engine.getChannelMute (channel), juce::dontSendNotification);
@@ -1131,17 +1401,75 @@ private:
 
     void updateFaderLabel()
     {
-        const float g = engine.getChannelGain (channel);
+        const float g = (float) railFader.getValue();
         faderLabel.setText (g <= 0.001f ? "-inf dB" : stationui::gainDbText (20.0f * std::log10 (g)),
                             juce::dontSendNotification);
+    }
+
+    // Round 2 (item 93): the drop-down lists every active channel in
+    // board order; rebuilt when the track counts move.
+    void refreshChannelBox()
+    {
+        channelBox.clear (juce::dontSendNotification);
+        auto addCh = [this] (int ch)
+        {
+            channelBox.addItem (juce::String (engine.channelDisplayName (ch)).toUpperCase(),
+                                ch + 1);
+        };
+        for (int t = 0; t < engine.getNumTracks(); ++t) addCh (t);
+        addCh (BoomBapEngine::kSynthChannel);
+        addCh (BoomBapEngine::kPianoChannel);
+        addCh (BoomBapEngine::kPadBusChannel);
+        for (int i = 0; i < engine.getNumAudioTracks(); ++i)
+            addCh (BoomBapEngine::kAudioChannelBase + i);
+        addCh (BoomBapEngine::kVocalChannel);
+        channelBox.addItem ("MASTER BUS", BoomBapEngine::kMasterChannel + 1);
+        channelBox.setSelectedId (channel + 1, juce::dontSendNotification);
+        lastBoxTracks = engine.getNumTracks();
+        lastBoxAudio = engine.getNumAudioTracks();
+    }
+
+    void updateEditButton()
+    {
+        editButton.setEnabled (callbacks.channelHasEditor && callbacks.channelHasEditor (channel));
+    }
+
+    // Round 2 (item 94): the GRAPHIC EQ name-toggle's bypass - real,
+    // not cosmetic: bypassing stores the bands' on-states and turns
+    // every band off in the strip the engine reads (a flat EQ IS a
+    // bypassed EQ in the DSP); restoring brings the states back.
+    void setEqBypassed (bool bypassed)
+    {
+        if (bypassed)
+        {
+            for (int i = 0; i < StripSettings::kEqBands; ++i)
+                eqStoredOn[(size_t) i] = cur.eq[i].on;
+            eqStoredValid = true;
+            for (int i = 0; i < StripSettings::kEqBands; ++i)
+                cur.eq[i].on = false;
+            eqBypassed = true;
+        }
+        else
+        {
+            if (eqStoredValid)
+                for (int i = 0; i < StripSettings::kEqBands; ++i)
+                    cur.eq[i].on = eqStoredOn[(size_t) i];
+            eqBypassed = false;
+        }
+        pushStrip();
+        updateBandBar();
     }
 
     void updateVisibility()
     {
         const bool master = channel == BoomBapEngine::kMasterChannel;
         const bool chan = ! master && ! boardMode;
-        const bool preamp = chan && BoomBapEngine::channelHasPreamp (channel);
-        const bool lim = chan && BoomBapEngine::channelHasLimiter (channel);
+        // Round 2 (item 94): the FULL tool set on EVERY channel - the
+        // preamp and limiter used to appear only on audio/vocal
+        // channels (the DSP processed them everywhere all along; only
+        // the face hid them). No per-channel subsets any more.
+        const bool preamp = chan;
+        const bool lim = chan;
 
         board.setVisible (boardMode);
         eqDisplay.setVisible (chan);
@@ -1150,6 +1478,12 @@ private:
         bandOnToggle.setVisible (chan);
         bandAddButton.setVisible (chan);
         bandDelButton.setVisible (chan);
+        eqToggle.setVisible (chan);
+        for (auto* k : { &eqGainKnob, &eqFreqKnob, &eqQKnob })
+        { k->slider.setVisible (chan); k->label.setVisible (chan); }
+        // Round 2 (item 96b): the top GR readout belongs to the Station
+        // strip view only - the board does not carry it.
+        grLabel.setVisible (! boardMode);
 
         preampToggle.setVisible (preamp);
         preampKnob.slider.setVisible (preamp); preampKnob.label.setVisible (preamp);
@@ -1177,7 +1511,8 @@ private:
 
         const bool rail = ! boardMode;
         vuMeter.setVisible (rail);
-        fader.setVisible (rail);
+        vuNeedle.setVisible (rail && master); // item 96c: the VU is the master's
+        railFader.setVisible (rail);
         faderLabel.setVisible (rail);
         const bool hasPan = rail && ! master;
         panKnob.slider.setVisible (hasPan); panKnob.label.setVisible (hasPan);
@@ -1191,6 +1526,15 @@ private:
     void updateBandBar()
     {
         if (channel == BoomBapEngine::kMasterChannel) return;
+        // Round 2 (item 94): the EQ master toggle + display dim follow
+        // the bypass state; a band switched on by hand un-bypasses.
+        {
+            bool anyOn = false;
+            for (int i = 0; i < cur.eqNumBands; ++i) anyOn = anyOn || cur.eq[(size_t) i].on;
+            if (anyOn && eqBypassed) { eqBypassed = false; eqStoredValid = false; }
+            eqToggle.setToggleState (! eqBypassed, juce::dontSendNotification);
+            eqDisplay.setAlpha (eqBypassed ? 0.45f : 1.0f);
+        }
         const int sel = eqDisplay.getSelectedBand();
         if (sel < 0 || sel >= cur.eqNumBands)
         {
@@ -1199,6 +1543,24 @@ private:
             return;
         }
         const auto& b = cur.eq[(size_t) sel];
+        // Round 2 (item 94): the band knobs mirror the selected band -
+        // values, enabled state (a filter band has no gain to turn) and
+        // the colour of its node on the display.
+        {
+            juce::Colour col = (b.type == GraphicEq::HighPass || b.type == GraphicEq::LowPass)
+                                   ? juce::Colour (0xff7fb2d9)
+                                   : (b.type == GraphicEq::Peak ? boombap::ui::accent()
+                                                                 : boombap::ui::accentHi());
+            if (! b.on) col = col.withAlpha (0.45f);
+            for (auto* k : { &eqGainKnob, &eqFreqKnob, &eqQKnob })
+                boombap::ui::setKnobColour (k->slider, col);
+            eqGainKnob.slider.setValue (b.gainDb, juce::dontSendNotification);
+            eqFreqKnob.slider.setValue (b.freqHz, juce::dontSendNotification);
+            eqQKnob.slider.setValue (b.q, juce::dontSendNotification);
+            const bool isFilter = b.type == GraphicEq::HighPass || b.type == GraphicEq::LowPass;
+            eqGainKnob.slider.setEnabled (! isFilter);
+            eqGainKnob.label.setEnabled (! isFilter);
+        }
         static const char* typeNames[5] = { "Peak", "Low shelf", "High shelf", "High-pass", "Low-pass" };
         juce::String text = "Band " + juce::String (sel + 1) + " - " + typeNames[juce::jlimit (0, 4, b.type)]
                             + " - " + stationui::freqText (b.freqHz);
@@ -1256,8 +1618,7 @@ private:
         auto w = std::make_shared<juce::AlertWindow> ("Save strip preset",
                                                       "Name this strip setting - it lands in Documents\\BoomBap\\Presets.",
                                                       juce::AlertWindow::NoIcon);
-        w->addTextEditor ("name", juce::String (BoomBapEngine::channelName (channel, engine.getNumTracks(),
-                                                                            engine.getNumAudioTracks())) + " strip");
+        w->addTextEditor ("name", juce::String (engine.channelDisplayName (channel)) + " strip");
         w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
         w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
         w->enterModalState (true, juce::ModalCallbackFunction::create (
@@ -1270,38 +1631,104 @@ private:
             }), true);
     }
 
-    void writePresetFile (const juce::String& name)
+    juce::String presetJsonString (const juce::String& name, const StripSettings& s, float pan)
     {
         juce::Array<juce::var> eqArr;
-        for (int i = 0; i < cur.eqNumBands; ++i)
+        for (int i = 0; i < s.eqNumBands; ++i)
         {
             juce::Array<juce::var> band;
-            band.add (cur.eq[i].on ? 1 : 0);
-            band.add (cur.eq[i].type);
-            band.add ((double) cur.eq[i].freqHz);
-            band.add ((double) cur.eq[i].gainDb);
-            band.add ((double) cur.eq[i].q);
+            band.add (s.eq[i].on ? 1 : 0);
+            band.add (s.eq[i].type);
+            band.add ((double) s.eq[i].freqHz);
+            band.add ((double) s.eq[i].gainDb);
+            band.add ((double) s.eq[i].q);
             eqArr.add (juce::var (band));
         }
         auto* o = new juce::DynamicObject();
         o->setProperty ("format", "boombap-strip-preset");
         o->setProperty ("name", name);
-        o->setProperty ("pan", (double) engine.getChannelPan (channel));
-        o->setProperty ("preampOn", cur.preampOn); o->setProperty ("preampDb", (double) cur.preampDb);
-        o->setProperty ("hpfOn", cur.hpfOn);       o->setProperty ("hpfHz", (double) cur.hpfHz);
-        o->setProperty ("deessOn", cur.deessOn);   o->setProperty ("deessAmount", (double) cur.deessAmount);
-        o->setProperty ("compOn", cur.compOn);
-        o->setProperty ("compThresholdDb", (double) cur.compThresholdDb);
-        o->setProperty ("compRatio", (double) cur.compRatio);
-        o->setProperty ("compAttackMs", (double) cur.compAttackMs);
-        o->setProperty ("compReleaseMs", (double) cur.compReleaseMs);
-        o->setProperty ("satOn", cur.satOn);       o->setProperty ("satDrive", (double) cur.satDrive);
-        o->setProperty ("limiterOn", cur.limiterOn);
-        o->setProperty ("limiterCeilingDb", (double) cur.limiterCeilingDb);
+        o->setProperty ("pan", (double) pan);
+        o->setProperty ("preampOn", s.preampOn); o->setProperty ("preampDb", (double) s.preampDb);
+        o->setProperty ("hpfOn", s.hpfOn);       o->setProperty ("hpfHz", (double) s.hpfHz);
+        o->setProperty ("deessOn", s.deessOn);   o->setProperty ("deessAmount", (double) s.deessAmount);
+        o->setProperty ("compOn", s.compOn);
+        o->setProperty ("compThresholdDb", (double) s.compThresholdDb);
+        o->setProperty ("compRatio", (double) s.compRatio);
+        o->setProperty ("compAttackMs", (double) s.compAttackMs);
+        o->setProperty ("compReleaseMs", (double) s.compReleaseMs);
+        o->setProperty ("satOn", s.satOn);       o->setProperty ("satDrive", (double) s.satDrive);
+        o->setProperty ("limiterOn", s.limiterOn);
+        o->setProperty ("limiterCeilingDb", (double) s.limiterCeilingDb);
         o->setProperty ("eq", juce::var (eqArr));
+        return juce::JSON::toString (juce::var (o), false, 2);
+    }
+
+    void writePresetFile (const juce::String& name)
+    {
         ensureDataHome();
         const auto file = presetsDir().getChildFile (juce::File::createLegalFileName (name) + ".json");
-        file.replaceWithText (juce::JSON::toString (juce::var (o), false, 2));
+        file.replaceWithText (presetJsonString (name, cur, engine.getChannelPan (channel)));
+    }
+
+    // Round 2 (item 96a): the factory starter set, written into the
+    // same Presets home the owner's own presets use (only when absent -
+    // an owner's edited copy is never overwritten). Starting points in
+    // the classic shapes: a vocal chain, a drum-bus chain, a snare
+    // chain - EQ included.
+    void ensureFactoryPresets()
+    {
+        ensureDataHome();
+        auto ship = [this] (const char* name, const StripSettings& s)
+        {
+            const auto f = presetsDir().getChildFile (juce::File::createLegalFileName (name) + ".json");
+            if (! f.existsAsFile())
+                f.replaceWithText (presetJsonString (name, s, 0.0f));
+        };
+        {
+            StripSettings s;
+            s.preampOn = true;  s.preampDb = 4.0f;
+            s.hpfOn = true;     s.hpfHz = 80.0f;
+            s.deessOn = true;   s.deessAmount = 0.45f;
+            s.compOn = true;    s.compThresholdDb = -18.0f; s.compRatio = 3.0f;
+            s.compAttackMs = 10.0f; s.compReleaseMs = 120.0f;
+            s.satOn = true;     s.satDrive = 0.25f;
+            s.limiterOn = true; s.limiterCeilingDb = -1.0f;
+            s.eqNumBands = 3;
+            s.eq[0] = { true, GraphicEq::Peak,      300.0f,   2.0f, 1.0f };
+            s.eq[1] = { true, GraphicEq::Peak,      3000.0f,  1.5f, 1.2f };
+            s.eq[2] = { true, GraphicEq::HighShelf, 10000.0f, 2.0f, 0.7f };
+            ship ("Factory Vocal", s);
+        }
+        {
+            StripSettings s;
+            s.preampOn = true;  s.preampDb = 3.0f;
+            s.hpfOn = true;     s.hpfHz = 35.0f;
+            s.deessOn = false;  s.deessAmount = 0.3f;
+            s.compOn = true;    s.compThresholdDb = -14.0f; s.compRatio = 4.0f;
+            s.compAttackMs = 3.0f;  s.compReleaseMs = 90.0f;
+            s.satOn = true;     s.satDrive = 0.4f;
+            s.limiterOn = true; s.limiterCeilingDb = -0.5f;
+            s.eqNumBands = 3;
+            s.eq[0] = { true, GraphicEq::Peak, 60.0f,   3.0f,  1.0f };
+            s.eq[1] = { true, GraphicEq::Peak, 400.0f, -2.0f,  1.2f };
+            s.eq[2] = { true, GraphicEq::Peak, 5000.0f, 2.0f,  1.4f };
+            ship ("Factory Drum", s);
+        }
+        {
+            StripSettings s;
+            s.preampOn = true;  s.preampDb = 2.0f;
+            s.hpfOn = true;     s.hpfHz = 100.0f;
+            s.deessOn = false;  s.deessAmount = 0.3f;
+            s.compOn = true;    s.compThresholdDb = -16.0f; s.compRatio = 4.0f;
+            s.compAttackMs = 1.0f;  s.compReleaseMs = 80.0f;
+            s.satOn = true;     s.satDrive = 0.3f;
+            s.limiterOn = true; s.limiterCeilingDb = -1.0f;
+            s.eqNumBands = 3;
+            s.eq[0] = { true, GraphicEq::Peak,      200.0f,   3.0f, 1.0f };
+            s.eq[1] = { true, GraphicEq::Peak,      5000.0f,  3.0f, 1.2f };
+            s.eq[2] = { true, GraphicEq::HighShelf, 12000.0f, 1.5f, 0.7f };
+            ship ("Factory Snare", s);
+        }
     }
 
     void loadPresetMenu()
@@ -1377,9 +1804,9 @@ private:
     {
         using namespace boombap::ui;
         g.fillAll (bg());
-        auto panelRect = [&] (juce::Rectangle<int> r)
+        auto panelRect = [&] (juce::Rectangle<int> r, juce::Colour fill)
         {
-            g.setColour (panel());
+            g.setColour (fill);
             g.fillRoundedRectangle (r.toFloat(), 10.0f);
             g.setColour (border().withAlpha (0.5f));
             g.drawRoundedRectangle (r.toFloat(), 10.0f, 1.0f);
@@ -1387,13 +1814,29 @@ private:
         if (! boardMode)
         {
             if (channel != BoomBapEngine::kMasterChannel)
-                for (auto& r : stageRects) if (! r.isEmpty()) panelRect (r);
+            {
+                // Round 2 (item 97): each tool sits in its own thin
+                // outline with a subtle tint of its own (all inside
+                // the grey/black family) - the chain reads as separate
+                // machines in a rack, not one solid form.
+                static const juce::Colour stageTints[6] = {
+                    juce::Colour (0xff1a1d24), // preamp
+                    juce::Colour (0xff181c22), // high-pass
+                    juce::Colour (0xff1c1a21), // de-esser
+                    juce::Colour (0xff1a2027), // compressor
+                    juce::Colour (0xff201c17), // saturation (a warm hint)
+                    juce::Colour (0xff18201c), // limiter (a green hint)
+                };
+                for (int i = 0; i < 6; ++i)
+                    if (! stageRects[(size_t) i].isEmpty())
+                        panelRect (stageRects[(size_t) i], stageTints[i]);
+            }
             else
             {
-                panelRect (glueRect);
-                panelRect (masterLimRect);
+                panelRect (glueRect, juce::Colour (0xff1a2027));
+                panelRect (masterLimRect, juce::Colour (0xff18201c));
             }
-            panelRect (railRect);
+            panelRect (railRect, panel());
         }
     }
 
@@ -1401,19 +1844,23 @@ private:
     {
         auto b = getLocalBounds();
         titleLabel.setBounds (14, 8, 220, 16);
-        channelLabel.setBounds (14, 22, 420, 32);
+        channelBox.setBounds (14, 24, 300, 32);
+        editButton.setBounds (322, 24, 118, 32);
         boardButton.setBounds (b.getWidth() - 128, 12, 116, 30);
         presetLoadButton.setBounds (b.getWidth() - 248, 12, 110, 30);
         presetSaveButton.setBounds (b.getWidth() - 368, 12, 110, 30);
         abButton.setBounds (b.getWidth() - 440, 12, 62, 30);
 
-        rewButton.setBounds (14, 56, 74, 30);
-        playButton.setBounds (94, 56, 84, 30);
-        stopButton.setBounds (184, 56, 84, 30);
-        ffButton.setBounds (274, 56, 74, 30);
-        undoButton.setBounds (366, 56, 70, 30);
-        redoButton.setBounds (442, 56, 70, 30);
-        grLabel.setBounds (530, 56, b.getWidth() - 544, 30);
+        toStartButton.setBounds (14, 56, 82, 30);
+        rewButton.setBounds (102, 56, 64, 30);
+        playButton.setBounds (172, 56, 84, 30);
+        stopButton.setBounds (262, 56, 84, 30);
+        ffButton.setBounds (352, 56, 64, 30);
+        toEndButton.setBounds (422, 56, 82, 30);
+        undoButton.setBounds (516, 56, 64, 30);
+        redoButton.setBounds (586, 56, 64, 30);
+        timeClock.setBounds (662, 54, 160, 34);
+        grLabel.setBounds (830, 56, juce::jmax (40, b.getWidth() - 840), 30);
 
         const int contentY = 96;
         const int contentH = b.getHeight() - contentY - 10;
@@ -1426,30 +1873,36 @@ private:
         railRect = { b.getWidth() - 186, contentY, 176, contentH };
         const int mainW = railRect.getX() - 20;
         const int chainH = 178;
-        const int bandH = 38;
-        const int eqH = juce::jmax (150, contentH - chainH - bandH - 18);
+        const int bandH = 118; // two rows: band controls, then the band knobs (item 94)
+        const int eqH = juce::jmax (140, contentH - chainH - bandH - 18);
         const bool master = channel == BoomBapEngine::kMasterChannel;
         if (! master)
         {
             eqDisplay.setBounds (10, contentY, mainW, eqH);
             const int bandY = contentY + eqH + 6;
-            bandLabel.setBounds (14, bandY, 430, 30);
-            int bx = 452;
+            eqToggle.setBounds (14, bandY + 2, 104, 26);
+            bandLabel.setBounds (126, bandY, 320, 30);
+            int bx = 454;
             for (auto& btn : bandTypeButtons) { btn.setBounds (bx, bandY + 2, 40, 26); bx += 44; }
             bandOnToggle.setBounds (bx + 4, bandY + 2, 52, 26);
             bandAddButton.setBounds (bx + 62, bandY + 2, 74, 26);
             bandDelButton.setBounds (bx + 142, bandY + 2, 74, 26);
+            // the band knobs row: name above, knob + value below
+            const int knobY = bandY + 38;
+            int kx = 14;
+            for (auto* k : { &eqGainKnob, &eqFreqKnob, &eqQKnob })
+            {
+                k->label.setBounds (kx, knobY, 72, 12);
+                k->slider.setBounds (kx, knobY + 13, 72, 66);
+                kx += 84;
+            }
 
             const int chainY = bandY + bandH + 6;
-            const bool preamp = BoomBapEngine::channelHasPreamp (channel);
-            const bool lim = BoomBapEngine::channelHasLimiter (channel);
-            int fixed = 0;
-            fixed += preamp ? 108 : 0;
-            fixed += 108 + 108;             // HPF + DE-ESS
-            fixed += 108;                   // SAT
-            fixed += lim ? 118 : 0;
-            const int gaps = (3 + (preamp ? 1 : 0) + (lim ? 1 : 0)) * 8;
-            const int compW = juce::jmax (220, mainW - fixed - gaps);
+            // Round 2 (item 94): all six stages, always - the widths
+            // simply share the row (the compressor keeps the remainder).
+            const int stageW = mainW >= 800 ? 108 : 92;
+            const int limW = mainW >= 800 ? 118 : 102;
+            const int compW = juce::jmax (170, mainW - stageW * 4 - limW - 40);
             int x = 10, idx = 0;
             auto placeStage = [&] (bool show, int w, juce::TextButton& toggle,
                                    std::initializer_list<Knob*> knobs, juce::Component* extra)
@@ -1460,24 +1913,25 @@ private:
                 {
                     toggle.setBounds (x + 8, chainY + 8, w - 16, 24);
                     const int kw = (w - 16) / juce::jmax (1, (int) knobs.size());
+                    const int knobW = juce::jlimit (34, 78, kw - 2);
                     int kx = x + 8;
                     for (auto* k : knobs)
                     {
-                        k->slider.setBounds (kx + kw / 2 - 30, chainY + 42, 60, 60);
-                        k->label.setBounds (kx, chainY + 116, kw, 14);
+                        k->slider.setBounds (kx + (kw - knobW) / 2, chainY + 40, knobW, knobW);
+                        k->label.setBounds (kx, chainY + 44 + knobW, kw, 14);
                         kx += kw;
                     }
-                    if (extra != nullptr) extra->setBounds (x + 10, chainY + 140, w - 20, 14);
+                    if (extra != nullptr) extra->setBounds (x + 10, chainY + 150, w - 20, 14);
                     x += w + 8;
                 }
                 ++idx;
             };
-            placeStage (preamp, 108, preampToggle, { &preampKnob }, nullptr);
-            placeStage (true, 108, hpfToggle, { &hpfKnob }, nullptr);
-            placeStage (true, 108, deessToggle, { &deessKnob }, nullptr);
+            placeStage (true, stageW, preampToggle, { &preampKnob }, nullptr);
+            placeStage (true, stageW, hpfToggle, { &hpfKnob }, nullptr);
+            placeStage (true, stageW, deessToggle, { &deessKnob }, nullptr);
             placeStage (true, compW, compToggle, { &compThrKnob, &compRatioKnob, &compAtkKnob, &compRelKnob }, &compGr);
-            placeStage (true, 108, satToggle, { &satKnob }, nullptr);
-            placeStage (lim, 118, limiterToggle, { &limiterKnob }, &limiterGrLabel);
+            placeStage (true, stageW, satToggle, { &satKnob }, nullptr);
+            placeStage (true, limW, limiterToggle, { &limiterKnob }, &limiterGrLabel);
         }
         else
         {
@@ -1494,24 +1948,40 @@ private:
             masterNote.setBounds (620, rowY + 16, juce::jmax (120, mainW - 630), 120);
         }
 
-        // rail (laid out to fit: meter, fader + value, pan knob + label,
-        // then the MUTE/SOLO row pinned to the bottom - no overlaps)
+        // rail (laid out to fit: meters, fader + value, pan knob + label,
+        // then the MUTE/SOLO row pinned to the bottom - no overlaps).
+        // Round 2 (item 96c): on the master, the VU needle sits above
+        // the fader and the long meters give up its height.
         const int rx = railRect.getX();
         const int meterH = juce::jmax (110, contentH - 380);
-        vuMeter.setBounds (rx + 14, contentY + 10, railRect.getWidth() - 28, meterH);
+        const bool masterRail = channel == BoomBapEngine::kMasterChannel;
+        vuMeter.setBounds (rx + 14, contentY + 10, railRect.getWidth() - 28,
+                           masterRail ? juce::jmax (60, meterH - 88) : meterH);
+        vuNeedle.setBounds (rx + 14, contentY + 10 + meterH - 80, railRect.getWidth() - 28, 72);
         const int faderY = contentY + meterH + 18;
-        fader.setBounds (rx + railRect.getWidth() / 2 - 22, faderY, 44, 140);
-        faderLabel.setBounds (rx + 8, faderY + 142, railRect.getWidth() - 16, 16);
-        panKnob.slider.setBounds (rx + railRect.getWidth() / 2 - 28, faderY + 164, 56, 56);
-        panKnob.label.setBounds (rx + 8, faderY + 238, railRect.getWidth() - 16, 14);
+        railFader.setBounds (rx + 30, faderY, 116, 146);
+        faderLabel.setBounds (rx + 8, faderY + 148, railRect.getWidth() - 16, 16);
+        panKnob.slider.setBounds (rx + railRect.getWidth() / 2 - 28, faderY + 170, 56, 56);
+        panKnob.label.setBounds (rx + 8, faderY + 240, railRect.getWidth() - 16, 14);
         muteButton.setBounds (rx + 12, contentY + contentH - 40, 72, 28);
         soloButton.setBounds (rx + 92, contentY + contentH - 40, 72, 28);
     }
 
     void timerCallback() override
     {
+        // Round 2 (item 93): the clock + the drop-down's freshness
+        timeClock.setPosition (engine.transportPosition(), engine.getSampleRate(),
+                               (double) engine.getBpm(), currentClockFormat());
+        if (engine.getNumTracks() != lastBoxTracks || engine.getNumAudioTracks() != lastBoxAudio)
+            refreshChannelBox();
+
         vuMeter.setLevels (engine.peekChannelPeak (channel, false),
                            engine.peekChannelPeak (channel, true));
+        railFader.setMeterLevels (engine.peekChannelPeak (channel, false),
+                                  engine.peekChannelPeak (channel, true));
+        if (channel == BoomBapEngine::kMasterChannel)
+            vuNeedle.setLevel (std::max (engine.peekChannelPeak (channel, false),
+                                         engine.peekChannelPeak (channel, true)));
         if (channel != BoomBapEngine::kMasterChannel)
         {
             compGr.setReduction (-engine.getChannelCompGrDb (channel));
@@ -1551,9 +2021,15 @@ private:
     int gestureDepth = 0;
     int lastRevision = -1;
 
-    juce::Label titleLabel, channelLabel, grLabel, bandLabel, faderLabel, limiterGrLabel, masterNote;
+    juce::Label titleLabel, grLabel, bandLabel, faderLabel, limiterGrLabel, masterNote;
+    juce::ComboBox channelBox;
+    juce::TextButton editButton;
     juce::TextButton abButton, presetSaveButton, presetLoadButton, boardButton;
-    juce::TextButton rewButton, playButton, stopButton, ffButton, undoButton, redoButton;
+    juce::TextButton toStartButton, rewButton, playButton, stopButton, ffButton, toEndButton;
+    juce::TextButton undoButton, redoButton;
+    TimeClock timeClock;
+    int localClockFormat = 0;
+    int lastBoxTracks = -1, lastBoxAudio = -1;
 
     juce::TextButton preampToggle, hpfToggle, deessToggle, compToggle, satToggle, limiterToggle;
     Knob preampKnob, hpfKnob, deessKnob, compThrKnob, compRatioKnob, compAtkKnob, compRelKnob,
@@ -1565,9 +2041,14 @@ private:
 
     EqDisplay eqDisplay;
     juce::TextButton bandTypeButtons[5], bandOnToggle, bandAddButton, bandDelButton;
+    juce::TextButton eqToggle;
+    Knob eqGainKnob, eqFreqKnob, eqQKnob;
+    bool eqBypassed = false, eqStoredValid = false;
+    bool eqStoredOn[StripSettings::kEqBands] = {};
 
     VuMeter vuMeter;
-    juce::Slider fader;
+    VuNeedle vuNeedle;
+    ConsoleFader railFader;
     Knob panKnob;
     juce::TextButton muteButton, soloButton;
 

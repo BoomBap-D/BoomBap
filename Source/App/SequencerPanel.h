@@ -73,7 +73,7 @@ public:
         {
             Row& row = rows[t];
             gridContent.addAndMakeVisible (row.name);
-            row.name.setText (boombap::BoomBapEngine::trackName (t), juce::dontSendNotification);
+            row.name.setText (juce::String (engine.displayTrackName (t)), juce::dontSendNotification);
             row.name.setColour (juce::Label::textColourId, juce::Colours::white);
             row.name.setFont (juce::Font (13.0f, juce::Font::bold));
             // Pass 2: any row interaction selects the row's channel (the
@@ -219,12 +219,25 @@ public:
         layoutRows();
         refreshPatternUi();
         refreshGrid();
+        refreshAllRowNames(); // item 88: a project apply renames rows too
     }
 
-    void setRowLoadText (int track, const juce::String& text)
+    // Round 3 (item 88): the row's FIRST COLUMN carries the track's
+    // name - its content's name when it has content, TRACK n until
+    // then. The LOAD button is not a name tag: it says "Load..." on
+    // the day the row is created and "Load..." forever after (Round 1
+    // made the same rule law for the waveform panel). Names re-read
+    // from the engine, the one place they live.
+    void refreshRowName (int track)
     {
         if (track >= 0 && track < kTracks)
-            rows[track].load.setButtonText (text);
+            rows[track].name.setText (juce::String (engine.displayTrackName (track)),
+                                      juce::dontSendNotification);
+    }
+
+    void refreshAllRowNames()
+    {
+        for (int t = 0; t < kTracks; ++t) refreshRowName (t);
     }
 
     // Round 1 (item 86): the selected row's NAME lights - solid accent
@@ -251,6 +264,7 @@ public:
     // view code that needs them).
     juce::Label& rowNameLabel (int track)       { return rows[track].name; }
     juce::TextButton& rowDeleteButton (int track) { return rows[track].del; }
+    juce::TextButton& rowLoadButton (int track)   { return rows[track].load; }
 
     // Called by the owner's 30 Hz timer: playhead column + row meters.
     void tick()

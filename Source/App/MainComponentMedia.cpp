@@ -209,7 +209,6 @@ void MainComponent::loadSampleFile (int track, const File& file)
     }
 
     beginUndoGesture(); // Pass 2 item 38: a sample load is one undoable action (a no-op while a project loads)
-    const String shortName = file.getFileNameWithoutExtension().substring (0, 8);
     if (track <= boombap::BoomBapEngine::Clap)
     {
         engine.setKitSample (track, mono, fileSr);
@@ -238,7 +237,10 @@ void MainComponent::loadSampleFile (int track, const File& file)
         engine.loadSample (track, std::move (mono), fileSr);
         rowFiles[(size_t) track] = file;
     }
-    if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, shortName);
+    // Item 88: the sample's name goes in the row's FIRST COLUMN - the
+    // LOAD button never wears it (it used to be renamed to the file's
+    // short name right here; that is exactly what the item forbids).
+    syncTrackName (track);
     fireMediaChanged();
     endUndoGesture();
 }
@@ -271,9 +273,7 @@ void MainComponent::loadPadFile (int pad, const File& file)
     padFiles[(size_t) pad] = file;
     if (padBank != nullptr) padBank->refreshPad (pad);
     if (mpcPanel != nullptr) mpcPanel->refreshPad (pad);
-    if (sequencerPanel != nullptr && pad >= 3)
-        sequencerPanel->setRowLoadText (boombap::BoomBapEngine::Sample1 + pad,
-                                        file.getFileNameWithoutExtension().substring (0, 8));
+    syncTrackName (boombap::BoomBapEngine::Sample1 + pad); // item 88: name in column one
     fireMediaChanged();
     endUndoGesture();
 }
@@ -296,6 +296,105 @@ String MainComponent::padDisplayName (int pad) const
     return f == File() ? String() : f.getFileName();
 }
 
+//==============================================================================
+// Round 3 (item 88): a track's name is its CONTENT's name. The app's
+// file arrays are the source of truth; the engine holds the derived
+// name; every surface (sequencer column, multitrack chip, Station
+// drop-down and board, piano roll) reads the engine, so the track is
+// called the same thing everywhere. An unbound row derives "" and
+// falls back to its plain TRACK n (or kit) name in the engine.
+void MainComponent::syncTrackName (int track)
+{
+    using E = boombap::BoomBapEngine;
+    if (track < 0 || track >= kTracks) return;
+    File f;
+    if (track <= E::Clap) f = rowFiles[(size_t) track];
+    else if (track < E::kFirstOwnRow)
+    {
+        const int pad = track - E::Sample1;
+        f = pad < 3 ? samplePaths[(size_t) pad] : padFiles[(size_t) pad];
+    }
+    else f = rowFiles[(size_t) track];
+    engine.setTrackContentName (track, f == File() ? std::string()
+                                                  : f.getFileNameWithoutExtension().toStdString());
+    if (sequencerPanel != nullptr) sequencerPanel->refreshRowName (track);
+}
+
+void MainComponent::syncAllTrackNames()
+{
+    for (int t = 0; t < kTracks; ++t) syncTrackName (t);
+    if (station != nullptr) station->refreshChannelNames();
+}
+
+// Round 3 (item 100): a pad -> pad drag lands here (and the waveform
+// panel's drag lands in loadPadFile, its sibling). The target pad
+// receives the source's sample AND a snapshot of its settings - trim,
+// tune, envelope, all of it - taken before the load. From that moment
+// the two pads are fully independent: each holds its own params, so
+// the same sample on two pads can be manipulated differently, which
+// is the entire point of the gesture. One undoable action.
+void MainComponent::copyPadToPad (int fromPad, int toPad)
+{
+    using E = boombap::BoomBapEngine;
+    if (fromPad == toPad || fromPad < 0 || fromPad >= 16 || toPad < 0 || toPad >= 16) return;
+    const File file = fromPad < 3 ? samplePaths[(size_t) fromPad] : padFiles[(size_t) fromPad];
+    if (file == File() || ! file.existsAsFile()) return;
+    if (! engine.padHasSample (fromPad)) return;
+
+    const auto snapshot = engine.getPadParams (fromPad); // the copy's settings, frozen first
+
+    std::vector<float> mono;
+    double fileSr = 44100.0;
+    if (! decodeSampleFile (file, mono, fileSr)) return;
+
+    beginUndoGesture();
+    if (toPad < 3)
+    {
+        waveData[(size_t) toPad] = mono;
+        waveRates[(size_t) toPad] = fileSr;
+        samplePaths[(size_t) toPad] = file;
+        engine.loadSample (E::Sample1 + toPad, std::move (mono), fileSr);
+        if (toPad == waveTrack) showWaveform (toPad);
+    }
+    else
+    {
+        engine.loadPadSample (toPad, std::move (mono), fileSr);
+        padFiles[(size_t) toPad] = file;
+    }
+    engine.setPadParams (toPad, snapshot);
+    syncTrackName (E::Sample1 + toPad);
+    if (padBank != nullptr) padBank->refreshPad (toPad);
+    if (mpcPanel != nullptr) mpcPanel->refreshPad (toPad);
+    fireMediaChanged();
+    endUndoGesture();
+}
+
+// Round 3 (item 100): which pad, if any, sits under this screen point -
+// asked of both pad banks (the standalone window and the tab, docked
+// or popped). As a side effect the bank under the point lights the pad
+// the drop would land on; the other bank's light goes out.
+int MainComponent::waveDragPadAt (juce::Point<int> screenPos)
+{
+    PadBankComponent* banks[] = { padBank.get(), mpcPanel.get() };
+    int found = -1;
+    for (auto* b : banks)
+    {
+        if (b == nullptr) continue;
+        int p = -1;
+        if (found < 0 && b->isShowing()) p = b->padAtScreenPosition (screenPos);
+        if (p >= 0) found = p;
+        b->setDragHighlightPad (p);
+    }
+    return found;
+}
+
+void MainComponent::moveWaveDrag (juce::Point<int> screenPos)
+{
+    if (! waveDragGhost.isGhostShowing()) return;
+    waveDragGhost.moveTo (screenPos);
+    waveDragPadAt (screenPos);
+}
+
 void MainComponent::openPadBank()
 {
     if (padWindow == nullptr)
@@ -309,6 +408,7 @@ void MainComponent::openPadBank()
         padBank->onBeforeChange = [this] { beginUndoGesture(); };
         padBank->onAfterChange = [this] { endUndoGesture(); };
         padBank->onSelectPad = [this] (int ch) { selectChannel (ch); };
+        padBank->onPadCopyRequest = [this] (int from, int to) { copyPadToPad (from, to); };
         padWindow = std::make_unique<PadWindow> ("BoomBap Pad Bank", boombap::ui::bg());
         padWindow->setLookAndFeel (&lookAndFeel);
         padWindow->setContentNonOwned (padBank.get(), false); // the unique_ptr owns it - the window must not delete it too

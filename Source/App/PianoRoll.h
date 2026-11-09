@@ -86,7 +86,7 @@ public:
     {
         if (bound == kBindSynth) return "Piano Roll - Synth";
         if (bound == kBindPiano) return "Piano Roll - Piano";
-        return "Piano Roll - " + juce::String (boombap::BoomBapEngine::trackName (bound));
+        return "Piano Roll - " + juce::String (engine.displayTrackName (bound));
     }
 
     // Summons the roll for one track. Sample rows choose their own pad as
@@ -126,12 +126,12 @@ public:
         if (bound < 0)
             src = bound == kBindSynth ? "Source: the synth's own lane" : "Source: the piano's own lane";
         else if (stepsMode)
-            src = "Source: TRACK steps - " + juce::String (boombap::BoomBapEngine::trackName (bound));
+            src = "Source: TRACK steps - " + juce::String (engine.displayTrackName (bound));
         else if (bound == boombap::BoomBapEngine::Kick)
             src = "Source: PAD melody - the kick's pitched 808 lane";
         else
             src = "Source: PAD melody - pad " + juce::String (bound - boombap::BoomBapEngine::Sample1 + 1)
-                + " (row " + juce::String (boombap::BoomBapEngine::trackName (bound)) + ")";
+                + " (row " + juce::String (engine.displayTrackName (bound)) + ")";
         sourceLabel.setText (src, juce::dontSendNotification);
         hint.setText (stepsMode
             ? "The row's own pattern on one pitch. Click a step to cycle its velocity: off, on, accent. Right-click clears."
@@ -396,11 +396,11 @@ private:
         else if (bound == boombap::BoomBapEngine::Kick) lane = "Kick melody - pitched 808";
         else if (bound >= boombap::BoomBapEngine::Sample1
                  && bound < boombap::BoomBapEngine::kFirstOwnRow)
-            lane = juce::String (boombap::BoomBapEngine::trackName (bound)) + " melody - pitched pad";
+            lane = juce::String (engine.displayTrackName (bound)) + " melody - pitched pad";
         else if (bound >= boombap::BoomBapEngine::kFirstOwnRow)
-            lane = juce::String (boombap::BoomBapEngine::trackName (bound)) + " steps - this row's own sample";
+            lane = juce::String (engine.displayTrackName (bound)) + " steps - this row's own sample";
         else
-            lane = juce::String (boombap::BoomBapEngine::trackName (bound)) + " steps";
+            lane = juce::String (engine.displayTrackName (bound)) + " steps";
         const juce::String pat = juce::String::charToString (
             (juce::juce_wchar) ('A' + engine.getEditPattern()));
         titleLabel.setText (lane + "  -  Pattern " + pat, juce::dontSendNotification);

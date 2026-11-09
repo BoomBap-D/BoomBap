@@ -91,6 +91,19 @@ String projectToJson (const ProjectData& d, const File& projectFile)
         o->setProperty ("velSens", (double) s.padVelSens[i]);
         o->setProperty ("reverse", s.padReverse[i]);
         o->setProperty ("muteGroup", s.padMuteGroup[i]);
+        // Round 3 (item 101): the envelope as one flat array of
+        // [time, level] pairs - written only when the pad HAS one, so
+        // an untouched pad's file entry stays exactly as it was.
+        if (s.padEnvCount[i] >= 2)
+        {
+            Array<var> env;
+            for (int k = 0; k < s.padEnvCount[i]; ++k)
+            {
+                env.add ((double) s.padEnvTime[i][k]);
+                env.add ((double) s.padEnvLevel[i][k]);
+            }
+            o->setProperty ("env", var (env));
+        }
         if (i >= 3 && d.padPaths[(size_t) i].isNotEmpty())
         {
             const File f (d.padPaths[(size_t) i]);
@@ -362,6 +375,18 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
             s.padVelSens[idx] = getF (item, "velSens", s.padVelSens[idx]);
             s.padReverse[idx] = getB (item, "reverse", s.padReverse[idx]);
             s.padMuteGroup[idx] = getI (item, "muteGroup", s.padMuteGroup[idx]);
+            // item 101: the envelope (older files simply have no "env"
+            // key - the pad then keeps the default: no envelope)
+            if (auto* env = item.getProperty ("env", var()).getArray())
+            {
+                const int pairs = std::min (ProjectSettings::kPadEnvMax, (int) env->size() / 2);
+                s.padEnvCount[idx] = pairs;
+                for (int k = 0; k < pairs; ++k)
+                {
+                    s.padEnvTime[idx][k]  = (float) (double) (*env)[2 * k];
+                    s.padEnvLevel[idx][k] = (float) (double) (*env)[2 * k + 1];
+                }
+            }
         }
     }
 

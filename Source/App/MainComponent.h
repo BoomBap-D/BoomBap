@@ -100,6 +100,10 @@ public:
         loadSampleFile (boombap::BoomBapEngine::Sample1 + slot, f);
     }
 
+    // Round 3 (item 100): the pad -> pad copy, driven through the same
+    // function a drag landing calls.
+    void driveCopyPadToPad (int fromPad, int toPad) { copyPadToPad (fromPad, toPad); }
+
     // Fix Pass 3 (item 75): the pad-load regression test drives the exact
     // decode + pad-file load paths the pad bank's Load button uses -
     // same private functions, no test-only back doors.
@@ -127,6 +131,19 @@ public:
     void fastForwardTransport();
     boombap::StationPanel* stationPanel() { return station.get(); }
 
+    // Round 2 (item 93): the full transport navigation + the shared
+    // clock format (the Station clock and the project-bar readout are
+    // two faces of this one choice, persisted in the app settings).
+    void navToStart();
+    void navToEnd();
+    void navRewind();
+    void navForward();
+    int clockFormatValue() const { return clockFormat; }
+    void setClockFormat (int fmt);
+    // Round 2 (item 96d): the Station's EDIT SAMPLE doorway.
+    void editChannel (int ch);
+    bool channelHasEditor (int ch) const;
+
 private:
     static constexpr int kTracks = boombap::BoomBapEngine::kTracks;
     static constexpr int kSteps  = boombap::BoomBapEngine::kSteps;
@@ -150,6 +167,7 @@ private:
     void togglePlay();
     void startTransport();
     void stopTransport();
+    void seekBySteps (int steps); // Round 2 (item 93): REW/FF land here
     void startAudioOnlyPlayback();              // item 47: the audio view's own PLAY
     // Production Area tab bar (items 37/42): 0 steps, 1 MPC, 2 audio
     void selectTab (int index);
@@ -174,6 +192,16 @@ private:
     void showWaveform (int index);
     void openPadChooser (int pad);
     void loadPadFile (int pad, const juce::File& file);
+    // Round 3 (item 88): track names derive from the file bound to the
+    // row - these keep the engine's content names (and the sequencer's
+    // first column) in step with the file arrays.
+    void syncTrackName (int track);
+    void syncAllTrackNames();
+    // Round 3 (item 100): the pad -> pad copy (sample + settings snapshot).
+    void copyPadToPad (int fromPad, int toPad);
+    // Round 3 (item 100): the waveform panel's drag onto a pad.
+    void moveWaveDrag (juce::Point<int> screenPos);
+    int waveDragPadAt (juce::Point<int> screenPos);
     bool decodeSampleFile (const juce::File& file, std::vector<float>& monoOut, double& sampleRateOut);
     void openPadBank();
     juce::String padDisplayName (int pad) const;
@@ -232,9 +260,17 @@ private:
     int dirtyTick = 0;
 
     // transport and master
-    juce::TextButton playButton { "PLAY" },
+    // Round 2 (item 93): TO START / REW / PLAY / STOP / FF / TO END -
+    // one TransportNav reads the double-presses for both this row and
+    // the Station's transport.
+    juce::TextButton toStartButton { "|<< START" }, rewButton { "REW" },
+                     playButton { "PLAY" },
                      stopButton { "STOP" },
+                     ffButton { "FF" }, toEndButton { "END >>|" },
                      clearButton { "Clear" }, resetButton { "Reset" };
+    boombap::TransportNav transportNav;
+    TimeClock mainClock;
+    int clockFormat = 0;
     juce::TextButton audioButton { "Audio..." };
     juce::TextButton metroButton { "METRO" };
     LabeledSlider metroVol;
@@ -278,6 +314,7 @@ private:
     juce::Label exportStatus;
 
     WaveformView waveView;
+    SampleDragGhost waveDragGhost; // item 100: follows a waveform -> pad drag
     juce::TextButton waveSel[3];
     juce::Label waveName;
     // Item 46's audition button, re-roled by item 89 (Round 1): the

@@ -20,8 +20,9 @@
 // erases; a plain click still cycles 0 -> 90 -> 127 -> 0.
 //
 // Items 71/72/74 (pad bank): the empty waveform click asks for the file
-// chooser (74); the editor's five value controls are rotary knobs (72);
-// the info strip names the selected pad (71).
+// chooser (74); the editor's value controls are knobs (72 - amended by
+// item 80 in Round 3: Start/End are sliders again, Tune/Gain/Vel Sens
+// keep the knobs); the info strip names the selected pad (71).
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../Source/App/PluginProcessor.h"
 #include "../Source/App/MainComponent.h"
@@ -333,10 +334,17 @@ int main()
 
         std::vector<juce::Slider*> sliders;
         collectChildren (bank, sliders);
-        int rotary = 0;
+        int rotary = 0, linear = 0;
         for (auto* s : sliders)
+        {
             if (s->getSliderStyle() == juce::Slider::RotaryHorizontalVerticalDrag) ++rotary;
-        check (rotary == 5, "72: the pad editor's five value controls are rotary knobs");
+            if (s->getSliderStyle() == juce::Slider::LinearHorizontal) ++linear;
+        }
+        // Item 80 (Round 3) reversed the Start/End half of item 72 on
+        // the owner's word: Start/End are horizontal sliders again;
+        // Tune/Gain/Vel Sens keep the knob form item 72 gave them.
+        check (rotary == 3 && linear >= 2,
+               "72/80: Tune/Gain/Vel Sens stay knobs; Start/End are sliders again (item 80)");
 
         bank.selectPad (3, false);
         std::vector<juce::Label*> labels;

@@ -25,7 +25,35 @@ public:
         float velSens       = 1.0f; // 0 = fixed level, 1 = fully velocity-scaled
         bool  reverse       = false;
         int   muteGroup     = 0;    // 0 = none; pads in the same group choke each other
+        // Round 3 (item 101): the multi-point amplitude envelope, drawn
+        // in the pad editor over the TRIMMED region. Points are
+        // (timeFrac 0..1 across the window, level 0..1), sorted by
+        // time. EMPTY means no envelope - the pad plays flat, exactly
+        // as it always has; the editor shows the default four flat
+        // points over an empty list and they only become real points
+        // here when the owner first shapes them.
+        std::vector<std::pair<float, float>> envPoints;
     };
+
+    // The envelope's level at a fraction of the trimmed window.
+    // Fewer than two points is not an envelope: unity throughout.
+    static float envLevelAt (const std::vector<std::pair<float, float>>& pts, float frac)
+    {
+        if (pts.size() < 2) return 1.0f;
+        if (frac <= pts.front().first) return pts.front().second;
+        if (frac >= pts.back().first)  return pts.back().second;
+        for (size_t i = 1; i < pts.size(); ++i)
+        {
+            if (frac <= pts[i].first)
+            {
+                const float t0 = pts[i - 1].first, t1 = pts[i].first;
+                const float l0 = pts[i - 1].second, l1 = pts[i].second;
+                const float u = t1 > t0 ? (frac - t0) / (t1 - t0) : 0.0f;
+                return l0 + (l1 - l0) * u;
+            }
+        }
+        return pts.back().second;
+    }
 
     void prepare (double sampleRate) { sr = sampleRate; }
 
@@ -83,6 +111,13 @@ public:
         v.endIdx   = std::clamp ((int) (pp.endFrac   * (float) size), v.startIdx + 2, size);
         v.reverse  = pp.reverse;
         v.pos      = pp.reverse ? (double) (v.endIdx - 1) : (double) v.startIdx;
+        // Item 101: the voice carries its own snapshot of the envelope
+        // (a mid-play edit never bends a sounding voice) and remembers
+        // where it started, so the envelope tracks the fraction of the
+        // window TRAVERSED - a reversed pad hears the shape from its
+        // own beginning, like FL's envelope read in playback direction.
+        v.startPos = v.pos;
+        v.envPoints = pp.envPoints;
         v.rate     = (srcSr[pad] / sr) * std::pow (2.0, (pp.tuneSemitones + extraSemitones) / 12.0);
         const float vel = std::clamp (velocity, 0.0f, 1.0f);
         v.gain     = pp.gain * ((1.0f - pp.velSens) + pp.velSens * vel);
@@ -130,11 +165,12 @@ public:
 private:
     struct Voice
     {
-        double pos = 0.0, rate = 1.0;
+        double pos = 0.0, rate = 1.0, startPos = 0.0;
         int startIdx = 0, endIdx = 0;
         int age = 0;
         float gain = 1.0f, chokeGain = 1.0f;
         bool reverse = false, active = false, choking = false;
+        std::vector<std::pair<float, float>> envPoints; // item 101 snapshot
     };
 
     static bool valid (int pad) { return pad >= 0 && pad < kNumPads; }
@@ -160,7 +196,18 @@ private:
             if (v.chokeGain <= 0.0f) { v.active = false; return 0.0f; }
         }
 
-        const float out = s * v.gain * fadeIn * fadeOut * v.chokeGain;
+        // Item 101: the multi-point envelope shapes the voice across
+        // the trimmed window, underneath the click fades.
+        float envGain = 1.0f;
+        if (v.envPoints.size() >= 2)
+        {
+            const double span = std::max (1.0, (double) v.endIdx - (double) v.startIdx);
+            const double traversed = v.reverse ? (v.startPos - v.pos) : (v.pos - v.startPos);
+            envGain = envLevelAt (v.envPoints,
+                                  (float) std::clamp (traversed / span, 0.0, 1.0));
+        }
+
+        const float out = s * v.gain * envGain * fadeIn * fadeOut * v.chokeGain;
         v.pos += v.reverse ? -v.rate : v.rate;
         ++v.age;
         return out;

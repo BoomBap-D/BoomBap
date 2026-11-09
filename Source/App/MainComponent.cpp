@@ -127,15 +127,33 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     addAndMakeVisible (stationButton);
     stationButton.onClick = [this] { openStation(); };
 
-    // ---- transport (Pass 1 item 2: big labelled MPC-style buttons) ----
+    // ---- transport (Pass 1 item 2: big labelled MPC-style buttons;
+    // Round 2 item 93 completes the row: TO START / REW / PLAY / STOP /
+    // FF / TO END, with REW/FF stepping one step, or one bar on a
+    // double press) ----
+    {
+        auto props = boombap::appPropertiesFile();
+        clockFormat = juce::jlimit (0, 2, props->getIntValue ("clockFormat", 0));
+    }
+    addAndMakeVisible (toStartButton);
+    addAndMakeVisible (rewButton);
     addAndMakeVisible (playButton);
     addAndMakeVisible (stopButton);
+    addAndMakeVisible (ffButton);
+    addAndMakeVisible (toEndButton);
     addAndMakeVisible (clearButton);
     addAndMakeVisible (resetButton);
     playButton.setColour (TextButton::buttonColourId, boombap::ui::accent());
     playButton.setColour (TextButton::textColourOffId, Colour (0xff14100a));
-    playButton.onClick  = [this] { startTransport(); };
-    stopButton.onClick  = [this] { stopTransport(); };
+    toStartButton.onClick = [this] { navToStart(); };
+    rewButton.onClick     = [this] { navRewind(); };
+    playButton.onClick    = [this] { startTransport(); };
+    stopButton.onClick    = [this] { stopTransport(); };
+    ffButton.onClick      = [this] { navForward(); };
+    toEndButton.onClick   = [this] { navToEnd(); };
+    // the project bar's compact clock - the Station's big clock's twin
+    mainClock.onCycleFormat = [this] { setClockFormat ((clockFormat + 1) % 3); };
+    addAndMakeVisible (mainClock);
     clearButton.onClick = [this] { runUndoable ([this] { engine.clearPattern(); refreshGrid(); }); };
     resetButton.onClick = [this] { runUndoable ([this] { engine.loadDefaultPattern(); refreshGrid(); }); };
 
@@ -194,6 +212,28 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         if (engine.isAuditionPlaying()) { engine.stopAudition(); return; }
         engine.startAudition (waveData[waveTrack],
                               waveRates[waveTrack] > 0.0 ? waveRates[waveTrack] : engine.getSampleRate());
+    };
+    // Round 3 (item 100): drag the shown sample onto a pad - the pad
+    // loads it through the ordinary pad-load path (same decode, same
+    // undo gesture as picking it from the chooser). The ghost names
+    // the sample while it travels; the pad under the pointer lights.
+    waveView.onDragStart = [this] (juce::Point<int> pos)
+    {
+        const File f = samplePaths[(size_t) waveTrack];
+        if (f == File()) return;
+        waveDragGhost.setText (f.getFileNameWithoutExtension());
+        waveDragGhost.showAt (pos);
+        moveWaveDrag (pos);
+    };
+    waveView.onDragMove = [this] (juce::Point<int> pos) { moveWaveDrag (pos); };
+    waveView.onDragEnd = [this] (juce::Point<int> pos)
+    {
+        const int pad = waveDragPadAt (pos);
+        waveDragGhost.hideGhost();
+        if (padBank != nullptr) padBank->setDragHighlightPad (-1);
+        if (mpcPanel != nullptr) mpcPanel->setDragHighlightPad (-1);
+        const File f = samplePaths[(size_t) waveTrack];
+        if (pad >= 0 && f != File()) loadPadFile (pad, f);
     };
     showWaveform (0);
 
@@ -273,6 +313,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     mpcPanel->onBeforeChange = [this] { beginUndoGesture(); };
     mpcPanel->onAfterChange = [this] { endUndoGesture(); };
     mpcPanel->onSelectPad = [this] (int ch) { selectChannel (ch); };
+    mpcPanel->onPadCopyRequest = [this] (int from, int to) { copyPadToPad (from, to); };
     // Item 59: hidden tabs are added as CHILD components, never via
     // addAndMakeVisible (which un-hides them) - updateTabChrome below is
     // the single authority on which production view is visible, so the
@@ -623,7 +664,7 @@ void MainComponent::showKitMenu (int track)
             {
                 engine.clearKitSample (track);
                 rowFiles[track] = juce::File();
-                if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, "Load...");
+                syncTrackName (track); // item 88: unbound, the row is its kit name again
                 fireMediaChanged();
             });
         }
@@ -659,6 +700,7 @@ void MainComponent::deleteSequencerRow (int track)
         for (int t = track; t < before - 1; ++t)
             rowFiles[(size_t) t] = rowFiles[(size_t) (t + 1)];
         rowFiles[(size_t) (before - 1)] = juce::File();
+        syncAllTrackNames(); // item 88: names follow their rows down
         // the Station selection follows the rows it points at
         if (selectedChannel == track) selectChannel (0);
         else if (selectedChannel > track && selectedChannel < before)
@@ -682,10 +724,49 @@ void MainComponent::togglePlay()
 
 void MainComponent::startTransport()
 {
-    // MPC-style: pressing Play while already playing restarts from the top.
+    // MPC-style: pressing Play while already playing restarts from the
+    // top (Pass 1 item 2) - now a live seek to zero, which lands
+    // exactly instead of racing the playing flag. From a stop, PLAY
+    // starts where the transport is PARKED (Round 2 item 93: REW/FF
+    // move the park; STOP returns it to zero).
     if (engine.isPlaying())
-        engine.setPlaying (false);
-    engine.setPlaying (true);
+        engine.seekTransport (0);
+    else
+        engine.setPlaying (true);
+}
+
+void MainComponent::setClockFormat (int fmt)
+{
+    clockFormat = juce::jlimit (0, 2, fmt);
+    auto props = boombap::appPropertiesFile();
+    props->setValue ("clockFormat", clockFormat);
+    props->saveIfNeeded();
+}
+
+// Round 2 (item 96d): the Station's EDIT SAMPLE doorway - a sample
+// lane opens the pad bank on that pad (the pad/sample editor), an
+// instrument lane opens its piano roll. Pure audio lanes, the buses
+// and the master have no sample editor; their button stays disabled
+// (channelHasEditor is the predicate the Station asks).
+bool MainComponent::channelHasEditor (int ch) const
+{
+    using E = boombap::BoomBapEngine;
+    if (ch == E::kSynthChannel || ch == E::kPianoChannel) return true;
+    return ch >= E::Sample1 && ch < E::Sample1 + E::kPads && ch < engine.getNumTracks();
+}
+
+void MainComponent::editChannel (int ch)
+{
+    using E = boombap::BoomBapEngine;
+    if (ch == E::kSynthChannel) { openPianoRollFor (PianoRollComponent::kBindSynth); return; }
+    if (ch == E::kPianoChannel) { openPianoRollFor (PianoRollComponent::kBindPiano); return; }
+    if (ch >= E::Sample1 && ch < E::Sample1 + E::kPads && ch < engine.getNumTracks())
+    {
+        openPadBank();
+        const int pad = ch - E::Sample1;
+        if (padBank != nullptr) padBank->selectPad (pad, false);
+        if (mpcPanel != nullptr) mpcPanel->selectPad (pad, false);
+    }
 }
 
 // Item 45: STOP MEANS ALL SOUND OFF. One press ends a take in progress
@@ -726,6 +807,12 @@ void MainComponent::openStation()
         cb.onStopAll = [this] { stopTransport(); }; // item 45's stop, same button by another face
         cb.onRewind = [this] { rewindTransport(); };
         cb.onFastForward = [this] { fastForwardTransport(); };
+        cb.onToStart = [this] { navToStart(); };
+        cb.onToEnd = [this] { navToEnd(); };
+        cb.getClockFormat = [this] { return clockFormat; };
+        cb.setClockFormat = [this] (int fmt) { setClockFormat (fmt); };
+        cb.onEditChannel = [this] (int ch) { editChannel (ch); };
+        cb.channelHasEditor = [this] (int ch) { return channelHasEditor (ch); };
         cb.onUndo = [this] { undoProject(); };
         cb.onRedo = [this] { redoProject(); };
         cb.canUndo = [this] { return canUndoProject(); };
@@ -813,22 +900,31 @@ void MainComponent::updateMinimiseCoupling (bool minimised)
     }
 }
 
-// The Station transport's REWIND: back to the top - the pattern/song
-// position restarts and the audio playhead returns to zero.
-void MainComponent::rewindTransport()
+// Round 2 (item 93): the transport navigation. REW / FF move one
+// step; a second press inside the double-press window moves one bar
+// (the shared TransportNav reads the presses for both the main row
+// and the Station's). While playing, the seek lands live; while
+// stopped it PARKS the start position - PLAY then starts from the
+// park. TO START / TO END go to the ends of the pattern / song chain.
+// (The old REWIND restarted from the top and the old FF stepped the
+// audio playhead a bar; both are superseded by this one navigation,
+// and the engine moves the audio playhead with the park.)
+void MainComponent::seekBySteps (int steps)
 {
-    engine.setAudioPlayhead (0);
-    if (engine.isPlaying()) { engine.setPlaying (false); engine.setPlaying (true); }
-    if (engine.isAudioPlaying()) { engine.setAudioPlaying (false); engine.setAudioPlaying (true); }
+    const long long current = engine.isPlaying() ? engine.transportPosition()
+                                                 : engine.transportStartPosition();
+    engine.seekTransport (boombap::BoomBapEngine::skipTarget (
+        current, steps, engine.stepSamples(), engine.transportLengthSamples()));
 }
 
-// FAST FORWARD: the audio playhead steps one bar on.
-void MainComponent::fastForwardTransport()
-{
-    const long long bar = (long long) std::llround (engine.barSamples());
-    if (bar > 0)
-        engine.setAudioPlayhead (engine.audioPosition() + bar);
-}
+void MainComponent::navRewind()  { seekBySteps (transportNav.pressRewind()); }
+void MainComponent::navForward() { seekBySteps (transportNav.pressForward()); }
+void MainComponent::navToStart() { engine.seekTransport (0); }
+void MainComponent::navToEnd()   { engine.seekTransport (engine.transportLengthSamples()); }
+
+// The Station's REW / FF buttons run the same navigation.
+void MainComponent::rewindTransport()    { navRewind(); }
+void MainComponent::fastForwardTransport() { navForward(); }
 
 void MainComponent::beginUndoGesture()
 {
@@ -883,7 +979,11 @@ void MainComponent::refreshViewsAfterEdit()
     const auto s = engine.getSettings();
     if (sequencerPanel != nullptr) sequencerPanel->refreshMixerFromSettings (s);
     if (multitrack != nullptr) multitrack->refreshFromEngine();
-    if (station != nullptr) station->refreshFromEngine();
+    if (station != nullptr)
+    {
+        station->refreshFromEngine();
+        station->refreshChannelNames(); // item 88: renames ride every edit refresh
+    }
     refreshGrid();
 }
 
@@ -922,6 +1022,8 @@ bool MainComponent::keyPressed (const KeyPress& key)
 void MainComponent::timerCallback()
 {
     pollMinimiseCoupling(); // item 102: follow the main window's minimise state
+    mainClock.setPosition (engine.transportPosition(), engine.getSampleRate(),
+                           (double) engine.getBpm(), clockFormat); // item 93
     if (sequencerPanel != nullptr) sequencerPanel->tick();
 
     // Pass 2 (item 38): an undo gesture left open by a continuous control
@@ -1224,21 +1326,27 @@ void MainComponent::resized()
     saveAsButton.setBounds (RB (230, 6, 90, 28));
     recentButton.setBounds (RB (326, 6, 76, 28));
     audioButton.setBounds (RB (408, 6, 80, 28));
-    projectName.setBounds (RB (500, 6, 430, 28));
+    projectName.setBounds (RB (500, 6, 428, 28));
+    mainClock.setBounds (RB (936, 7, 108, 26)); // item 93: the compact clock
     stationButton.setBounds (RB (1058, 6, 86, 28));
     pianoButton.setBounds (RB (1150, 6, 96, 28));
     playlistButton.setBounds (RB (1254, 6, 88, 28));
     padBankButton.setBounds (RB (1350, 6, 100, 28));
 
-    // transport row A: big play/stop, pattern edit helpers, tempo, swing, master, pad activity
-    playButton.setBounds (RB (20, 54, 150, 50));
-    stopButton.setBounds (RB (178, 54, 150, 50));
-    clearButton.setBounds (RB (336, 54, 84, 50));
-    resetButton.setBounds (RB (428, 54, 84, 50));
-    bpm.slider.setBounds (RB (578, 54, 230, 50));
-    swing.slider.setBounds (RB (888, 54, 190, 50));
-    master.slider.setBounds (RB (1152, 54, 200, 50));
-    padLight.setBounds (RB (1372, 61, 36, 36));
+    // transport row A (item 93): the full navigation, big play/stop,
+    // pattern edit helpers, tempo, swing, master, pad activity
+    toStartButton.setBounds (RB (20, 54, 64, 50));
+    rewButton.setBounds (RB (88, 54, 56, 50));
+    playButton.setBounds (RB (148, 54, 130, 50));
+    stopButton.setBounds (RB (282, 54, 130, 50));
+    ffButton.setBounds (RB (416, 54, 56, 50));
+    toEndButton.setBounds (RB (476, 54, 64, 50));
+    clearButton.setBounds (RB (544, 54, 64, 50));
+    resetButton.setBounds (RB (612, 54, 64, 50));
+    bpm.slider.setBounds (RB (742, 54, 180, 50));
+    swing.slider.setBounds (RB (988, 54, 160, 50));
+    master.slider.setBounds (RB (1214, 54, 150, 50));
+    padLight.setBounds (RB (1376, 61, 32, 32));
     padMeter.setBounds (RB (1416, 65, 124, 28));
 
     // transport row B: metronome, dust, glue

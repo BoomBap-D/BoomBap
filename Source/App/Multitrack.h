@@ -315,7 +315,7 @@ public:
             g.setFont (juce::Font (juce::jmin (12.5f, chipW * 0.16f),
                                    (isAudio || chipSelected || chipPlaying) ? juce::Font::bold : juce::Font::plain));
             g.drawText (isAudio ? juce::String ("AUDIO ") + juce::String (audioIdx + 1)
-                                : juce::String (boombap::BoomBapEngine::trackName (i)).toUpperCase(),
+                                : juce::String (engine.displayTrackName (i)).toUpperCase(),
                         chip, juce::Justification::centred);
         }
 

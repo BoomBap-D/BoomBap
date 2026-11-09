@@ -97,8 +97,6 @@ void MainComponent::newProject()
         samplePaths[(size_t) i] = File();
         waveData[(size_t) i].clear();
         waveRates[(size_t) i] = 0.0;
-        if (sequencerPanel != nullptr)
-            sequencerPanel->setRowLoadText (boombap::BoomBapEngine::Sample1 + i, "Load...");
     }
     for (int i = 3; i < 16; ++i)
     {
@@ -110,14 +108,13 @@ void MainComponent::newProject()
     {
         engine.clearKitSample (t);
         rowFiles[(size_t) t] = File();
-        if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (t, "Load...");
     }
     for (int t = boombap::BoomBapEngine::kFirstOwnRow; t < kTracks; ++t)
     {
         engine.clearSample (t);
         rowFiles[(size_t) t] = File();
-        if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (t, "Load...");
     }
+    syncAllTrackNames(); // item 88: a fresh project is all TRACK n again
     if (padBank != nullptr) padBank->refreshAll();
     if (mpcPanel != nullptr) mpcPanel->refreshAll();
     engine.clearVocalTake();
@@ -211,7 +208,6 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         const String path = d.samplePaths[(size_t) i];
         engine.clearSample (track);
         samplePaths[(size_t) i] = File();
-        if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, "Load...");
 
         if (path.isEmpty())
             continue;
@@ -224,7 +220,6 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         else
         {
             samplePaths[(size_t) i] = f;                // keep the reference so a save doesn't lose it
-            if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, "Missing");
             missing.add (f.getFileName());
         }
     }
@@ -257,7 +252,6 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         if (t <= boombap::BoomBapEngine::Clap) engine.clearKitSample (t);
         else engine.clearSample (t);
         rowFiles[(size_t) t] = File();
-        if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (t, "Load...");
         const String path = d.rowSamplePaths[(size_t) t];
         if (path.isEmpty())
             continue;
@@ -267,10 +261,15 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         else
         {
             rowFiles[(size_t) t] = f; // keep the reference, like the sample rows
-            if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (t, "Missing");
             missing.add (f.getFileName());
         }
     }
+
+    // Item 88: whatever the loads above bound (or kept as a missing
+    // reference), the rows are named after it - including rows whose
+    // file is missing: the track is still THAT sample's track, and the
+    // name says so while the alert below says the file is gone.
+    syncAllTrackNames();
 
     if (preserveEngineTake && d.vocalTakePath.isEmpty())
     {

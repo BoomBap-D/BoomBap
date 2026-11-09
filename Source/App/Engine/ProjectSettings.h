@@ -144,6 +144,14 @@ struct ProjectSettings
     float padStart[kPads], padEnd[kPads], padTune[kPads], padGain[kPads], padVelSens[kPads];
     bool  padReverse[kPads];
     int   padMuteGroup[kPads];
+    // Round 3 (item 101): the pad editor's multi-point envelope, as
+    // fixed arrays so the settings stay plain data. padEnvCount[p] is
+    // how many points are real (0 = no envelope, the pad plays flat);
+    // times are fractions of the trimmed window, levels 0..1.
+    static constexpr int kPadEnvMax = 16;
+    int   padEnvCount[kPads];
+    float padEnvTime[kPads][kPadEnvMax];
+    float padEnvLevel[kPads][kPadEnvMax];
 
     // Piano roll: one monophonic melody lane per pattern.
     // patMelody[p][s] is 0 = off, else a semitone offset stored as value + 25
@@ -210,6 +218,8 @@ struct ProjectSettings
             padStart[p] = 0.0f; padEnd[p] = 1.0f; padTune[p] = 0.0f;
             padGain[p] = 1.0f;  padVelSens[p] = 1.0f;
             padReverse[p] = false; padMuteGroup[p] = 0;
+            padEnvCount[p] = 0; // item 101: no envelope until the owner shapes one
+            for (int k = 0; k < kPadEnvMax; ++k) { padEnvTime[p][k] = 0.0f; padEnvLevel[p][k] = 1.0f; }
         }
         for (int i = 0; i < kSongSlots; ++i) songChain[i] = 0;
         // The starter pattern lives in pattern A; B-H start empty.
@@ -321,6 +331,17 @@ struct ProjectSettings
             padGain[p] = std::clamp (padGain[p], 0.0f, 2.0f);
             padVelSens[p] = std::clamp (padVelSens[p], 0.0f, 1.0f);
             padMuteGroup[p] = std::clamp (padMuteGroup[p], 0, 16);
+            // item 101: the envelope - a count of 1 is not an envelope
+            // (it takes two points to shape anything), so it folds to 0
+            padEnvCount[p] = std::clamp (padEnvCount[p], 0, kPadEnvMax);
+            if (padEnvCount[p] == 1) padEnvCount[p] = 0;
+            float prevT = 0.0f;
+            for (int k = 0; k < padEnvCount[p]; ++k)
+            {
+                padEnvTime[p][k] = std::clamp (padEnvTime[p][k], prevT, 1.0f); // times never run backwards
+                prevT = padEnvTime[p][k];
+                padEnvLevel[p][k] = std::clamp (padEnvLevel[p][k], 0.0f, 1.0f);
+            }
         }
     }
 };

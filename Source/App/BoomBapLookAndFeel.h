@@ -27,6 +27,29 @@ inline juce::Colour frameBar() { return panelAlt().brighter (0.05f); }
 //    load, add) by applyActionTrace; the button painter branches on it.
 inline const char* auxWindowProperty()    { return "boombapAuxWindow"; }
 inline const char* actionButtonProperty() { return "boombapAction"; }
+// Round 2 (item 94): a rotary slider may carry its own knob colour -
+// the EQ band knobs are colour-matched to the band node they drive.
+// Stored as an ARGB int in the slider's properties.
+inline const char* knobColourProperty()   { return "boombapKnobColour"; }
+inline void setKnobColour (juce::Slider& s, juce::Colour c)
+{
+    s.getProperties().set (knobColourProperty(), (int) c.getARGB());
+    s.repaint();
+}
+inline juce::Colour knobColour (const juce::Slider& s, juce::Colour fallback)
+{
+    if (s.getProperties().contains (knobColourProperty()))
+        return juce::Colour ((juce::uint32) (int) s.getProperties()[knobColourProperty()]);
+    return fallback;
+}
+// Round 2 (item 93): the Station's channel DROP-DOWN is a big selector,
+// not a settings combo - it carries this property and the font branch
+// in BoomBapLookAndFeel::getComboBoxFont blows it up to headline size.
+inline const char* selectorBoxProperty()  { return "boombapSelector"; }
+inline void markSelectorBox (juce::ComboBox& box)
+{
+    box.getProperties().set (selectorBoxProperty(), true);
+}
 inline bool isAuxWindow (const juce::Component& c)
 {
     return c.getProperties().contains (auxWindowProperty());
@@ -255,9 +278,106 @@ public:
         return juce::Font (13.5f);
     }
 
-    juce::Font getComboBoxFont (juce::ComboBox&) override
+    juce::Font getComboBoxFont (juce::ComboBox& box) override
     {
+        // Round 2 (item 93): the Station's channel selector reads at
+        // headline size - it IS the channel name, as a drop-down.
+        if (box.getProperties().contains (boombap::ui::selectorBoxProperty()))
+            return juce::Font (19.0f, juce::Font::bold);
         return juce::Font (13.5f);
+    }
+
+    // Round 2 (item 79 pick): the knob is "British Class A x Modern
+    // Arc" - a drawn hardware knob: charcoal body, knurled edge, an
+    // amber VALUE ARC sweeping behind it (dark-grey track arc, amber
+    // fill), amber pointer; at full size a skirt ring of printed
+    // numerals 0-10, dropped at small sizes where the arc + pointer
+    // carry the read. This replaces the stock JUCE rotary look (the
+    // arc-dot knob the owner rejected) for EVERY rotary slider.
+    // A slider may override the arc/pointer colour through the
+    // boombapKnobColour property (the EQ band knobs, item 94).
+    void drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
+                           float sliderPosProportional, float rotaryStartAngle,
+                           float rotaryEndAngle, juce::Slider& slider) override
+    {
+        using namespace boombap::ui;
+        const float alpha = slider.isEnabled() ? 1.0f : 0.45f;
+        const juce::Colour hot = knobColour (slider, accent()).withAlpha (alpha);
+        const juce::Colour hotHi = knobColour (slider, accentHi()).withAlpha (alpha);
+        const float cx = (float) x + (float) width * 0.5f;
+        const float cy = (float) y + (float) height * 0.5f;
+        const float d = (float) juce::jmin (width, height);
+        if (d < 12.0f) return;
+        const bool fullSize = d >= 64.0f;
+        const float outerR = d * 0.5f;
+        const float arcR = fullSize ? outerR - 12.0f : outerR - 3.0f;
+        const float bodyR = arcR - 5.0f;
+        const float angle = rotaryStartAngle + sliderPosProportional * (rotaryEndAngle - rotaryStartAngle);
+
+        auto pointAt = [&] (float a, float r)
+        {
+            return juce::Point<float> (cx + r * std::sin (a), cy - r * std::cos (a));
+        };
+        auto arcPath = [&] (float from, float to)
+        {
+            juce::Path p;
+            const int steps = juce::jmax (2, (int) (std::abs (to - from) / 0.08f));
+            for (int i = 0; i <= steps; ++i)
+            {
+                const auto pt = pointAt (from + (to - from) * (float) i / (float) steps, arcR);
+                if (i == 0) p.startNewSubPath (pt); else p.lineTo (pt);
+            }
+            return p;
+        };
+
+        // skirt numerals 0-10 (full size only)
+        if (fullSize)
+        {
+            g.setColour (muted().withAlpha (0.9f * alpha));
+            g.setFont (8.0f);
+            for (int i = 0; i <= 10; ++i)
+            {
+                const float a = rotaryStartAngle + (rotaryEndAngle - rotaryStartAngle) * (float) i / 10.0f;
+                const auto p = pointAt (a, outerR - 4.5f);
+                g.drawText (juce::String (i), (int) (p.x - 8.0f), (int) (p.y - 5.0f), 16, 10,
+                            juce::Justification::centred);
+            }
+        }
+
+        // the value arc behind the knob: dark track, amber fill
+        g.setColour (juce::Colour (0xff2e333c).withAlpha (alpha));
+        g.strokePath (arcPath (rotaryStartAngle, rotaryEndAngle),
+                      juce::PathStrokeType (3.0f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+        if (sliderPosProportional > 0.001f)
+        {
+            g.setColour (hot);
+            g.strokePath (arcPath (rotaryStartAngle, angle),
+                          juce::PathStrokeType (3.4f, juce::PathStrokeType::mitered, juce::PathStrokeType::rounded));
+        }
+
+        // the knob body: charcoal, knurled edge
+        juce::ColourGradient grad (juce::Colour (0xff2b3038).withAlpha (alpha), cx, cy - bodyR,
+                                   juce::Colour (0xff13161b).withAlpha (alpha), cx, cy + bodyR, false);
+        g.setGradientFill (grad);
+        g.fillEllipse (cx - bodyR, cy - bodyR, bodyR * 2.0f, bodyR * 2.0f);
+        g.setColour (juce::Colour (0xffffff).withAlpha (0.05f * alpha));
+        for (int i = 0; i < 28; ++i)
+        {
+            const float a = (float) i / 28.0f * 6.2831853f;
+            const auto p1 = pointAt (a, bodyR - 3.0f);
+            const auto p2 = pointAt (a, bodyR - 0.5f);
+            g.drawLine (p1.x, p1.y, p2.x, p2.y, 1.1f);
+        }
+        g.setColour (border().withAlpha (alpha));
+        g.drawEllipse (cx - bodyR, cy - bodyR, bodyR * 2.0f, bodyR * 2.0f, 1.0f);
+
+        // the pointer
+        const auto pIn = pointAt (angle, bodyR * 0.42f);
+        const auto pOut = pointAt (angle, bodyR - 2.5f);
+        g.setColour (hotHi);
+        g.drawLine (pIn.x, pIn.y, pOut.x, pOut.y, 2.6f);
+        g.setColour (juce::Colour (0xff0c0e11).withAlpha (alpha));
+        g.fillEllipse (cx - 2.5f, cy - 2.5f, 5.0f, 5.0f);
     }
 
     void drawButtonBackground (juce::Graphics& g, juce::Button& button,
@@ -312,9 +432,38 @@ public:
 
     void drawLinearSlider (juce::Graphics& g, int x, int y, int width, int height,
                            float sliderPos, float, float,
-                           juce::Slider::SliderStyle, juce::Slider& slider) override
+                           juce::Slider::SliderStyle style, juce::Slider& slider) override
     {
         using namespace boombap::ui;
+        // Round 2 (item 95 root cause): this painter used to assume
+        // HORIZONTAL geometry for every linear slider - for a vertical
+        // slider JUCE hands over the thumb's Y as sliderPos, and the
+        // old code drew the thumb at that value as an X coordinate,
+        // outside the component: the board fader's thumb vanished on
+        // grab, exactly as the owner reported. (The board and Station
+        // faders are ConsoleFaders now; this branch keeps any other
+        // vertical slider honest.)
+        if (style == juce::Slider::LinearVertical || style == juce::Slider::LinearBarVertical)
+        {
+            const float cx = (float) x + (float) width * 0.5f;
+            const float trackW = 4.0f;
+            juce::Rectangle<float> track (cx - trackW * 0.5f, (float) y, trackW, (float) height);
+            g.setColour (border());
+            g.fillRoundedRectangle (track, trackW * 0.5f);
+            auto filled = track.withTop (sliderPos).withBottom ((float) (y + height));
+            g.setColour (slider.findColour (juce::Slider::trackColourId));
+            g.fillRoundedRectangle (filled, trackW * 0.5f);
+
+            const float r = 7.0f;
+            juce::Rectangle<float> thumb (cx - r, sliderPos - r, r * 2.0f, r * 2.0f);
+            g.setColour (panelAlt());
+            g.fillEllipse (thumb);
+            g.setColour (slider.isMouseOverOrDragging() ? accent() : text().withAlpha (0.85f));
+            g.drawEllipse (thumb, 1.5f);
+            g.setColour (accent());
+            g.fillEllipse (cx - 2.0f, sliderPos - 2.0f, 4.0f, 4.0f);
+            return;
+        }
         const float cy = (float) y + (float) height * 0.5f;
         const float trackH = 4.0f;
         juce::Rectangle<float> track ((float) x, cy - trackH * 0.5f, (float) width, trackH);

@@ -49,11 +49,50 @@ public:
 
     static std::string trackName (int t)
     {
-        static const char* names[8] = { "Kick", "Snare", "Closed Hat", "Open Hat", "Clap",
-                                        "Sample 1", "Sample 2", "Sample 3" };
-        if (t >= 0 && t < 8) return names[t];
-        if (t >= Sample1 && t < kTracks) return "Sample " + std::to_string (t - Sample1 + 1);
+        static const char* names[5] = { "Kick", "Snare", "Closed Hat", "Open Hat", "Clap" };
+        if (t >= 0 && t < 5) return names[t];
+        // Round 3 (item 88): rows are TRACKS until content names them -
+        // "Sample N" is gone, because a track's content is not always a
+        // sample (a VST instrument will live here too, item 104). The
+        // kit rows keep their names: the built-in kit IS their content.
+        if (t >= 0 && t < kTracks) return "TRACK " + std::to_string (t + 1);
         return "Track " + std::to_string (t + 1);
+    }
+
+    // Round 3 (item 88): a row's CONTENT name - the file name of the
+    // sample bound to it (later, an instrument's name). The app sets it
+    // wherever a file binds or unbinds; the name lives in the row's
+    // FIRST COLUMN and nowhere else (LOAD always says LOAD). Message
+    // thread only - the audio thread never reads names. Empty = the
+    // row still goes by its plain TRACK n name.
+    void setTrackContentName (int t, const std::string& name)
+    {
+        if (t >= 0 && t < kTracks) trackContent[(size_t) t] = name;
+    }
+    std::string trackContentName (int t) const
+    {
+        return (t >= 0 && t < kTracks) ? trackContent[(size_t) t] : std::string();
+    }
+    std::string displayTrackName (int t) const
+    {
+        const std::string c = trackContentName (t);
+        return c.empty() ? trackName (t) : c;
+    }
+    // channelName with the content names folded in - the one name every
+    // surface (sequencer column, multitrack chip, Station drop-down and
+    // board) reads, so a track is called the same thing everywhere.
+    std::string channelDisplayName (int ch) const
+    {
+        switch (channelKind (ch))
+        {
+            case KindRow:    return displayTrackName (ch);
+            case KindSynth:  return "Synth";
+            case KindPiano:  return "Piano";
+            case KindPadBus: return "Pad Bus";
+            case KindAudio:  return "Audio " + std::to_string (ch - kAudioChannelBase + 1);
+            case KindVocal:  return "Vocal";
+            default:         return "Master";
+        }
     }
 
     // ---- Pass 2: the Station's channels (items 7/19/20) ----
@@ -140,6 +179,7 @@ public:
         masterLimiter.prepare (sr);
         stationDirty.store (true);
         applyParams();
+        gainSmInit = false; // item 95: smoothing states re-seat on the targets
         tick = 0; samplesToNextTick = 0.0; wasPlaying = false;
         audioPos = 0; wasAudioPlaying = false;
         panicActive = false; panicVoicesPending = false;
@@ -276,6 +316,14 @@ public:
                 p.padTune[i] = pp.tuneSemitones; p.padGain[i] = pp.gain;
                 p.padVelSens[i] = pp.velSens;    p.padReverse[i] = pp.reverse;
                 p.padMuteGroup[i] = pp.muteGroup;
+                // item 101: the envelope points ride the same snapshot
+                const int ec = std::min ((int) pp.envPoints.size(), ProjectSettings::kPadEnvMax);
+                p.padEnvCount[i] = pp.envPoints.size() >= 2 ? ec : 0;
+                for (int k = 0; k < ec; ++k)
+                {
+                    p.padEnvTime[i][k]  = pp.envPoints[(size_t) k].first;
+                    p.padEnvLevel[i][k] = pp.envPoints[(size_t) k].second;
+                }
             }
         }
         p.numAudioTracks = numAudioTracksA.load();
@@ -360,6 +408,11 @@ public:
                 pp.tuneSemitones = p.padTune[i]; pp.gain = p.padGain[i];
                 pp.velSens = p.padVelSens[i];    pp.reverse = p.padReverse[i];
                 pp.muteGroup = p.padMuteGroup[i];
+                // item 101: rebuild the point list from the flat arrays
+                pp.envPoints.clear();
+                for (int k = 0; k < p.padEnvCount[i]; ++k)
+                    pp.envPoints.push_back ({ p.padEnvTime[i][k], p.padEnvLevel[i][k] });
+                if (pp.envPoints.size() < 2) pp.envPoints.clear(); // 0/1 points = no envelope
                 pads.setPadParams (i, pp);
             }
         }
@@ -530,6 +583,11 @@ public:
         playing.store (false);
         audioPlaying.store (false);
         stopAllRequested.store (true);
+        // Round 2 (item 93): STOP also returns the transport park to
+        // zero - stop, then play, is from the top (the MPC grammar the
+        // app already had), and the clock reads 0:00 again.
+        transportStartPosA.store (0);
+        transportSeekA.store (0);
     }
 
     // ---- the audio multitrack's own transport (items 47/48/50) ----
@@ -1081,6 +1139,12 @@ public:
             trackMute[(size_t) t].store (trackMute[(size_t) (t + 1)].load());
             trackSolo[(size_t) t].store (trackSolo[(size_t) (t + 1)].load());
         }
+        // item 88: a row's content name belongs to the row - it shifts
+        // with everything else the row owns, and the vacated last row
+        // goes back to its plain TRACK n name.
+        for (int t = track; t < n - 1; ++t)
+            trackContent[(size_t) t] = trackContent[(size_t) (t + 1)];
+        trackContent[(size_t) (n - 1)].clear();
         trackGain[(size_t) (n - 1)].store (0.8f);
         trackMute[(size_t) (n - 1)].store (false);
         trackSolo[(size_t) (n - 1)].store (false);
@@ -1180,6 +1244,105 @@ public:
     double barSamples() const          { return sr * 240.0 / (double) bpm.load(); }
     int    songBars() const            { return songLength.load(); }  // 0 = pattern mode
 
+    // ---- Round 2 (item 93): the transport can be PARKED and SEEKED. ----
+    // REW / FF move a start position (one step, or one bar on a double
+    // press - the press logic lives in the UI's TransportNav); PLAY
+    // starts where the transport is parked; while playing, a seek lands
+    // live. STOP returns the park to zero (stopAllSound, below). A seek
+    // never lands while a take is recording - moving the timeline under
+    // a take would misalign it, so the request is dropped, not queued.
+    double stepSamples() const
+    {
+        const double rate = sr > 0.0 ? sr : 44100.0;
+        return rate * 60.0 / ((double) bpm.load() * kPPQN) * kTicksPer16th;
+    }
+    long long transportLengthSamples() const
+    {
+        const long long pattern = (long long) std::llround (stepSamples() * (double) kSteps);
+        if (songMode.load() && songLength.load() > 0)
+            return pattern * (long long) songLength.load();
+        return pattern;
+    }
+    // The skip arithmetic, pure so the tests can pin it: move `steps`
+    // steps (negative = back) from `current`, clamped to the timeline.
+    static long long skipTarget (long long current, int steps, double samplesPerStep,
+                                 long long lengthSamples)
+    {
+        const long long target = current + (long long) std::llround ((double) steps * samplesPerStep);
+        return std::clamp (target, 0LL, std::max (0LL, lengthSamples));
+    }
+    long long transportStartPosition() const { return transportStartPosA.load(); }
+    void seekTransport (long long pos)
+    {
+        if (recording.load()) return; // a take in progress owns the timeline
+        const long long len = transportLengthSamples();
+        const long long target = len > 0 ? std::clamp (pos, 0LL, len) : std::max (0LL, pos);
+        setAudioPlayhead (target); // the audio timeline follows the park
+        if (playing.load())
+            transportSeekA.store (target); // the audio thread lands it next block
+        else
+        {
+            transportStartPosA.store (target);
+            transportPosAtomic.store (target);
+        }
+    }
+
+    // Round 2 (item 93): place the whole transport grid at an absolute
+    // sample position - the tick phase, the song-chain position and the
+    // play step all derive from it, so a parked start and a live seek
+    // land exactly on the step grid. Audio thread only.
+    void placeTransportAt (long long pos, double samplesPerTick)
+    {
+        transportSamples = pos;
+        audioPos = pos; // the audio clock shadows the transport while it plays
+        const long long ticksPerPattern = (long long) kSteps * kTicksPer16th;
+        const double posInTicks = samplesPerTick > 0.0 ? (double) pos / samplesPerTick : 0.0;
+        long long wholeTicks = (long long) posInTicks;
+        double fracTick = posInTicks - (double) wholeTicks;
+        if (fracTick > 0.9999) { ++wholeTicks; fracTick = 0.0; } // float dust at a boundary
+        // The tick CONTAINING the position fires at the next sample (the
+        // loop fires whenever the countdown reaches zero), so the
+        // countdown starts at minus the fraction already inside the
+        // tick - at an exact boundary that is 0, which is precisely the
+        // old play-from-the-top behaviour (tick 0 sounds at sample 0),
+        // and the phase against the sample-counted audio clips is exact.
+        if (songMode.load() && songLength.load() > 0)
+        {
+            long long patterns = wholeTicks / ticksPerPattern;
+            if (patterns >= (long long) songLength.load())
+            {
+                // parked at the very end of the chain: sit on its final
+                // tick, which fires at once and wraps the chain
+                patterns = (long long) songLength.load() - 1;
+                tick = (int) (ticksPerPattern - 1);
+                samplesToNextTick = 0.0;
+            }
+            else
+            {
+                tick = (int) (wholeTicks % ticksPerPattern);
+                samplesToNextTick = -fracTick * samplesPerTick;
+            }
+            songPos = (int) patterns;
+            barsDone = (int) patterns;
+            activePattern = chainAt (songPos);
+            playSongPos.store (songPos);
+        }
+        else
+        {
+            tick = (int) (wholeTicks % ticksPerPattern);
+            samplesToNextTick = -fracTick * samplesPerTick;
+            barsDone = (int) (wholeTicks / ticksPerPattern);
+            songPos = 0;
+            activePattern = editPattern.load();
+            playSongPos.store (-1);
+        }
+        playPattern.store (activePattern);
+        // While stopped the play step stays -1 (no playhead); the grid
+        // placement still counts for the moment PLAY is pressed.
+        if (playing.load())
+            playStep.store (tick / kTicksPer16th);
+    }
+
     // ---------------- audio thread ----------------
     // vocalIn may be nullptr (no input). outL/outR are overwritten.
     void process (const float* vocalIn, float* outL, float* outR, int numSamples)
@@ -1212,20 +1375,24 @@ public:
                 }
             }
 
+        const double samplesPerTick = sr * 60.0 / ((double) bpm.load() * kPPQN);
         const bool isPlayingNow = playing.load();
         if (isPlayingNow && ! wasPlaying)
         {
-            tick = 0; samplesToNextTick = 0.0; transportSamples = 0;
-            songPos = 0; barsDone = 0;
-            audioPos = 0; // the audio clock shadows the transport while it plays
+            // Round 2 (item 93): PLAY starts where the transport is
+            // PARKED (REW / FF move the park; STOP returns it to zero).
+            placeTransportAt (transportStartPosA.load(), samplesPerTick);
             panicActive = false; panicVoicesPending = false; // a fresh start is never faded
-            const bool useSong = songMode.load() && songLength.load() > 0;
-            activePattern = useSong ? chainAt (0) : editPattern.load();
-            playPattern.store (activePattern);
-            playSongPos.store (useSong ? 0 : -1);
         }
         if (! isPlayingNow && wasPlaying) playStep.store (-1);
         wasPlaying = isPlayingNow;
+
+        // Round 2 (item 93): a seek lands here - live while playing,
+        // and while stopped it is how STOP's return-to-zero reaches
+        // the grid. The take-recording path never seeks (seekTransport
+        // drops requests while recording).
+        if (const long long seek = transportSeekA.exchange (-1); seek >= 0)
+            placeTransportAt (seek, samplesPerTick);
 
         // the audio view's own transport (item 47): starting it away from
         // the main transport begins at the audio playhead (item 50's seek)
@@ -1264,7 +1431,6 @@ public:
 
         const int activeTracks = numTracksA.load();
 
-        const double samplesPerTick = sr * 60.0 / ((double) bpm.load() * kPPQN);
         const float swingNow = swing.load();
         const bool useDust = dustOn.load(), useGlue = glueOn.load(), useVocal = vocalOn.load() && vocalIn != nullptr;
         const bool wantVocal = vocalIn != nullptr && (useVocal || recording.load() || recPending.load());
@@ -1279,20 +1445,33 @@ public:
         bool anyAudioSoloNow = false;
         for (int t = 0; t < kAudioTracks; ++t) anyAudioSoloNow = anyAudioSoloNow || audioSoloA[(size_t) t].load();
         const bool soloActive = anySoloActive() || anyAudioSoloNow || synthSoloRt || pianoSoloRt || vocalSoloRt;
-        float gains[kTracks];
+        // Round 2 (item 95): the GATE (mute/solo) and the LEVEL (fader)
+        // are separate factors. The gate lands instantly, as it always
+        // has - a mute is a deliberate cut, and Fix Pass 2's item-60
+        // measurement pins that. The LEVEL is what smooths (below):
+        // fader drags used to land as block-rate steps, the "jittery"
+        // sound the owner reported, and a drag is a stream of level
+        // changes - never a gate flip.
+        float gains[kTracks];  // the gate: 0 or 1
+        float levels[kTracks]; // the fader level (the smoothing target)
         for (int t = 0; t < kTracks; ++t)
-            gains[t] = (trackMute[t].load() || (soloActive && ! trackSolo[t].load())) ? 0.0f
-                                                                                      : trackGain[t].load();
+        {
+            gains[t] = (trackMute[t].load() || (soloActive && ! trackSolo[t].load())) ? 0.0f : 1.0f;
+            levels[t] = trackGain[t].load();
+        }
         const float clickLvl = metronomeLevel.load();
         if (! isPlayingNow) clickSamplesLeft = 0;
 
         // Audio tracks (Fix pass item 35; item 60 made them many). Clips
         // live on the audio timeline, which is not fenced by the pattern.
-        float aGain[kAudioTracks];
+        float aGain[kAudioTracks];  // the gate
+        float aLevel[kAudioTracks]; // the level
         for (int t = 0; t < kAudioTracks; ++t)
+        {
             aGain[t] = (audioMuteA[(size_t) t].load()
-                        || (soloActive && ! audioSoloA[(size_t) t].load()))
-                           ? 0.0f : audioGainA[(size_t) t].load();
+                        || (soloActive && ! audioSoloA[(size_t) t].load())) ? 0.0f : 1.0f;
+            aLevel[t] = audioGainA[(size_t) t].load();
+        }
         // The group + instrument channel gates for this block. The synth
         // and piano levels live inside their voices (their channel faders
         // ARE those levels), so here they only get the mute/solo gate.
@@ -1300,8 +1479,8 @@ public:
         for (int t = Sample1; t < Sample1 + kPads; ++t) anyPadRowSolo = anyPadRowSolo || trackSolo[t].load();
         const float synthGate = (! synthMuteRt && (! soloActive || synthSoloRt)) ? 1.0f : 0.0f;
         const float pianoGate = (! pianoMuteRt && (! soloActive || pianoSoloRt)) ? 1.0f : 0.0f;
-        const float vocalGainBlock = vocalGainRt * ((! vocalMuteRt && (! soloActive || vocalSoloRt)) ? 1.0f : 0.0f);
-        const float padBusGainBlock = padBusGainRt * ((! padBusMuteRt && (! soloActive || anyPadRowSolo)) ? 1.0f : 0.0f);
+        const float vocalGate = (! vocalMuteRt && (! soloActive || vocalSoloRt)) ? 1.0f : 0.0f;
+        const float padBusGate = (! padBusMuteRt && (! soloActive || anyPadRowSolo)) ? 1.0f : 0.0f;
         const int analysedCh = analysedChannel.load();
         int anaW = analyserWrite.load();
         float chanPkL[kNumChannels] = {}, chanPkR[kNumChannels] = {};
@@ -1312,11 +1491,38 @@ public:
         // The mic emulation is a playback treatment (see takeVocal below).
         const float inGainLin = std::pow (10.0f, vocalInputDb.load() / 20.0f);
 
+        // Round 2 (item 95): channel LEVELS are SMOOTHED on the audio
+        // thread (a ~15 ms one-pole) - a fader drag used to land as
+        // block-rate steps, the "jittery" sound the owner reported on
+        // the board. The states initialise to the targets on the first
+        // block after prepare(), so steady renders (the plugin
+        // measurement path included) stay bit-identical; only a level
+        // in motion ramps. The mute/solo GATE (gains[]/aGain[] above)
+        // is not smoothed - it cuts instantly, as it always has.
+        if (! gainSmInit)
+        {
+            for (int t = 0; t < kTracks; ++t) rowGainSm[(size_t) t] = levels[t];
+            for (int t = 0; t < kAudioTracks; ++t) audioGainSm[(size_t) t] = aLevel[t];
+            vocalGainSm = vocalGainRt;
+            padBusGainSm = padBusGainRt;
+            masterGainSm = master;
+            gainSmInit = true;
+        }
+        const float gainSmCoef = 1.0f - std::exp (-1.0f / (0.015f * (float) (sr > 0.0 ? sr : 44100.0)));
+
         float pk[kTracks] = {};
         float padPk = 0.0f;
         int padPkIdx = -1;
         for (int i = 0; i < numSamples; ++i)
         {
+            for (int t = 0; t < kTracks; ++t)
+                rowGainSm[(size_t) t] += (levels[t] - rowGainSm[(size_t) t]) * gainSmCoef;
+            for (int t = 0; t < kAudioTracks; ++t)
+                audioGainSm[(size_t) t] += (aLevel[t] - audioGainSm[(size_t) t]) * gainSmCoef;
+            vocalGainSm += (vocalGainRt - vocalGainSm) * gainSmCoef;
+            padBusGainSm += (padBusGainRt - padBusGainSm) * gainSmCoef;
+            masterGainSm += (master - masterGainSm) * gainSmCoef;
+
             if (isPlayingNow)
             {
                 if (samplesToNextTick <= 0.0)
@@ -1410,7 +1616,7 @@ public:
             {
                 float s = rowSig[t];
                 if (stripActiveRt[(size_t) t]) s = stripDsp[(size_t) t].process (s);
-                s *= gains[t];
+                s *= rowGainSm[(size_t) t] * gains[t]; // item 95: level smoothed, gate instant
                 pk[t] = std::max (pk[t], std::abs (s));
                 float gl, gr; panLaw (chanPanRt[(size_t) t], gl, gr);
                 chanPkL[t] = std::max (chanPkL[t], std::abs (s * gl));
@@ -1429,7 +1635,7 @@ public:
                 // its fader, its pan) - one fader for the whole pad set
                 float s = padBusMono;
                 if (stripActiveRt[kPadBusChannel]) s = stripDsp[kPadBusChannel].process (s);
-                s *= padBusGainBlock;
+                s *= padBusGainSm * padBusGate; // item 95: level smoothed, gate instant
                 float gl, gr; panLaw (chanPanRt[kPadBusChannel], gl, gr);
                 beatL += s * gl; beatR += s * gr;
                 chanPkL[kPadBusChannel] = std::max (chanPkL[kPadBusChannel], std::abs (s * gl));
@@ -1488,7 +1694,7 @@ public:
                     if (rel >= 0) s += takeVocal.process (takeData[(size_t) (rel % takeLenAtomic.load())]);
                 }
                 if (stripActiveRt[kVocalChannel]) s = stripDsp[kVocalChannel].process (s);
-                s *= vocalGainBlock;
+                s *= vocalGainSm * vocalGate; // item 95: level smoothed, gate instant
                 float gl, gr; panLaw (chanPanRt[kVocalChannel], gl, gr);
                 masterL += s * gl; masterR += s * gr;
                 chanPkL[kVocalChannel] = std::max (chanPkL[kVocalChannel], std::abs (s * gl));
@@ -1509,7 +1715,7 @@ public:
                     const auto& c = clipsA[(size_t) ci];
                     if (! c.active.load()) continue;
                     const int tr = std::clamp (c.track.load(), 0, kAudioTracks - 1);
-                    if (aGain[(size_t) tr] <= 0.0f) continue;
+                    if (aGain[(size_t) tr] <= 0.0f) continue; // the gate: a muted track's clips do not render
                     const long long pos = audioPos - c.start.load();
                     if (pos < 0 || pos >= c.length.load()) continue;
                     const auto& data = clipData[(size_t) ci];
@@ -1527,7 +1733,7 @@ public:
                     const int ch = kAudioChannelBase + t;
                     float s = clipChains[(size_t) t].process (clipSig[t]);
                     if (stripActiveRt[(size_t) ch]) s = stripDsp[(size_t) ch].process (s);
-                    s *= aGain[(size_t) t];
+                    s *= audioGainSm[(size_t) t] * aGain[(size_t) t]; // item 95: level smoothed, gate instant
                     float gl, gr; panLaw (chanPanRt[(size_t) ch], gl, gr);
                     masterL += s * gl; masterR += s * gr;
                     chanPkL[ch] = std::max (chanPkL[ch], std::abs (s * gl));
@@ -1574,8 +1780,8 @@ public:
                 else if (panicVoicesPending) outGain = 0.0f;
                 else panicActive = false;
             }
-            outL[i] = std::tanh (l * master) * outGain;
-            outR[i] = std::tanh (r * master) * outGain;
+            outL[i] = std::tanh (l * masterGainSm) * outGain; // item 95: smoothed
+            outR[i] = std::tanh (r * masterGainSm) * outGain;
         }
         for (int t = 0; t < kTracks; ++t)
             if (pk[t] > trackPeak[t].load()) trackPeak[t].store (pk[t]);
@@ -2045,6 +2251,10 @@ private:
     {
         return std::clamp (songChainA[(size_t) std::clamp (i, 0, kSongSlots - 1)].load(), 0, kPatterns - 1);
     }
+    // Round 3 (item 88): per-row content names (see setTrackContentName).
+    // Plain strings: written and read on the message thread only.
+    std::array<std::string, kTracks> trackContent;
+
     std::array<std::atomic<float>, kTracks> trackGain;
     std::array<std::atomic<bool>, kTracks> trackMute;
     std::array<std::atomic<bool>, kTracks> trackSolo;
@@ -2132,6 +2342,17 @@ private:
     std::atomic<long long> takeStartPosA { 0 };
     int recLen = 0;                // audio thread only
     long long transportSamples = 0; // audio thread only
+
+    // Round 2 (item 93): the transport park + pending live seek.
+    std::atomic<long long> transportSeekA { -1 };
+    std::atomic<long long> transportStartPosA { 0 };
+    // Round 2 (item 95): audio-thread gain-smoothing states (one-pole,
+    // ~15 ms) - see process(). Initialised to the targets on the first
+    // block after prepare(), never on a value change.
+    bool gainSmInit = false;
+    float rowGainSm[kTracks] = {};
+    float audioGainSm[kAudioTracks] = {};
+    float vocalGainSm = 0.0f, padBusGainSm = 0.0f, masterGainSm = 1.0f;
 
     std::atomic<bool> playing { false }, dirty { true };
     std::atomic<int>  playStep { -1 };

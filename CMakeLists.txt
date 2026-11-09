@@ -328,6 +328,56 @@ if(BOOMBAP_BUILD_TESTS)
     endif()
     add_test(NAME round1 COMMAND Round1Test)
 
+    # round-2 regression test (Breakdown #1 items 93/94/95/96 + the
+    # Station rework: transport park/seek + double-press skips, the
+    # three clock faces and their persistence, the channel drop-down,
+    # the uniform chain, EQ knob<->node sync, board mute/solo as one
+    # engine state with the audio path to prove it, smoothed fader
+    # gains, the console fader's cap, factory presets, the master VU)
+    add_executable(Round2Test
+        Tests/Round2Test.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(Round2Test PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(Round2Test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(Round2Test PRIVATE X11)
+    endif()
+    add_test(NAME round2 COMMAND Round2Test)
+
+    # round-3 regression test (Breakdown #1 items 88/100/101/80: track
+    # naming in the first column only with LOAD never renaming itself,
+    # the pad name strip, pad captions back + drag copy semantics,
+    # Start/End back to sliders two-way synced with the pull bars, and
+    # the multi-point envelope - model, settings/file round trips, and
+    # the measured effect on the rendered sound)
+    add_executable(Round3Test
+        Tests/Round3Test.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(Round3Test PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(Round3Test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(Round3Test PRIVATE X11)
+    endif()
+    add_test(NAME round3 COMMAND Round3Test)
+
     # recent-projects list test (storage logic, no UI)
     add_executable(RecentProjectsTest Tests/RecentProjectsTest.cpp)
     target_link_libraries(RecentProjectsTest PRIVATE juce::juce_gui_extra juce::juce_gui_basics)
