@@ -64,6 +64,7 @@ void MainComponent::loadSampleFile (int track, const File& file)
         return;
     }
 
+    beginUndoGesture(); // Pass 2 item 38: a sample load is one undoable action (a no-op while a project loads)
     const String shortName = file.getFileNameWithoutExtension().substring (0, 8);
     if (track <= boombap::BoomBapEngine::Clap)
     {
@@ -95,6 +96,7 @@ void MainComponent::loadSampleFile (int track, const File& file)
     }
     if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, shortName);
     fireMediaChanged();
+    endUndoGesture();
 }
 
 void MainComponent::fireMediaChanged()
@@ -120,6 +122,7 @@ void MainComponent::loadPadFile (int pad, const File& file)
         return;
     }
 
+    beginUndoGesture(); // Pass 2 item 38
     engine.loadPadSample (pad, std::move (mono), fileSr);
     padFiles[(size_t) pad] = file;
     if (padBank != nullptr) padBank->refreshPad (pad);
@@ -128,6 +131,7 @@ void MainComponent::loadPadFile (int pad, const File& file)
         sequencerPanel->setRowLoadText (boombap::BoomBapEngine::Sample1 + pad,
                                         file.getFileNameWithoutExtension().substring (0, 8));
     fireMediaChanged();
+    endUndoGesture();
 }
 
 void MainComponent::openPadChooser (int pad)
@@ -158,6 +162,9 @@ void MainComponent::openPadBank()
             [this] (int pad) { openPadChooser (pad); },
             [this] (int pad) { return padDisplayName (pad); });
         padBank->setLookAndFeel (&lookAndFeel);
+        padBank->onBeforeChange = [this] { beginUndoGesture(); };
+        padBank->onAfterChange = [this] { endUndoGesture(); };
+        padBank->onSelectPad = [this] (int ch) { selectChannel (ch); };
         padWindow = std::make_unique<PadWindow> ("BoomBap Pad Bank", boombap::ui::bg());
         padWindow->setLookAndFeel (&lookAndFeel);
         padWindow->setContentNonOwned (padBank.get(), false); // the unique_ptr owns it - the window must not delete it too
@@ -182,6 +189,9 @@ void MainComponent::openPianoRollFor (int track)
     {
         pianoRoll = std::make_unique<PianoRollComponent> (engine);
         pianoRoll->setLookAndFeel (&lookAndFeel);
+        pianoRoll->onBeforeChange = [this] { beginUndoGesture(); };
+        pianoRoll->onAfterChange = [this] { endUndoGesture(); };
+        pianoRoll->onSelectChannel = [this] (int ch) { selectChannel (ch); };
         pianoWindow = std::make_unique<PianoRollWindow> ("BoomBap Piano Roll", boombap::ui::bg());
         pianoWindow->setLookAndFeel (&lookAndFeel);
         pianoWindow->setContentNonOwned (pianoRoll.get(), false); // the unique_ptr owns it - the window must not delete it too
@@ -199,6 +209,8 @@ void MainComponent::openPlaylist()
     {
         playlist = std::make_unique<PlaylistComponent> (engine);
         playlist->setLookAndFeel (&lookAndFeel);
+        playlist->onBeforeChange = [this] { beginUndoGesture(); };
+        playlist->onAfterChange = [this] { endUndoGesture(); };
         playlistWindow = std::make_unique<PlaylistWindow> ("BoomBap Playlist", boombap::ui::bg());
         playlistWindow->setLookAndFeel (&lookAndFeel);
         playlistWindow->setContentNonOwned (playlist.get(), false); // the unique_ptr owns it - the window must not delete it too

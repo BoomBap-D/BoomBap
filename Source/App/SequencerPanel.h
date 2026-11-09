@@ -23,6 +23,10 @@ public:
         std::function<void (int)> onNameMenu;   // a kit row's name was clicked (item 40)
         std::function<void()> onPatternChanged; // pattern A-H switched (the roll follows)
         std::function<void()> onChange;         // a row was added
+        // Pass 2: undo gestures (item 38) + channel selection (the Station follows)
+        std::function<void()> onBeforeChange;
+        std::function<void()> onAfterChange;
+        std::function<void (int)> onSelectRow;
     };
 
     SequencerPanel (boombap::BoomBapEngine& eng, Callbacks cb)
@@ -47,12 +51,14 @@ public:
         }
         addTrackButton.onClick = [this]
         {
+            if (callbacks.onBeforeChange) callbacks.onBeforeChange();
             if (engine.addTrack() >= 0)
             {
                 layoutRows();
                 refreshGrid();
                 if (callbacks.onChange) callbacks.onChange();
             }
+            if (callbacks.onAfterChange) callbacks.onAfterChange();
         };
         addAndMakeVisible (addTrackButton);
 
@@ -68,27 +74,45 @@ public:
             row.name.setText (boombap::BoomBapEngine::trackName (t), juce::dontSendNotification);
             row.name.setColour (juce::Label::textColourId, juce::Colours::white);
             row.name.setFont (juce::Font (13.0f, juce::Font::bold));
-            if (t <= boombap::BoomBapEngine::Clap)
-            {
-                // item 40: clicking a kit row's name offers Load / Reset
-                row.name.addMouseListener (this, false);
-            }
+            // Pass 2: any row interaction selects the row's channel (the
+            // Station follows); kit rows also keep their name menu (item 40)
+            row.name.addMouseListener (this, false);
 
             gridContent.addAndMakeVisible (row.load);
-            row.load.onClick = [this, t] { if (callbacks.onLoadSample) callbacks.onLoadSample (t); };
+            row.load.onClick = [this, t]
+            {
+                if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                if (callbacks.onLoadSample) callbacks.onLoadSample (t);
+            };
 
             gridContent.addAndMakeVisible (row.roll);
-            row.roll.onClick = [this, t] { if (callbacks.onRoll) callbacks.onRoll (t); };
+            row.roll.onClick = [this, t]
+            {
+                if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                if (callbacks.onRoll) callbacks.onRoll (t);
+            };
 
             gridContent.addAndMakeVisible (row.mute);
             row.mute.setClickingTogglesState (true);
             row.mute.setColour (juce::TextButton::buttonOnColourId, juce::Colours::indianred);
-            row.mute.onClick = [this, t] { engine.setTrackMute (t, rows[t].mute.getToggleState()); };
+            row.mute.onClick = [this, t]
+            {
+                if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                if (callbacks.onBeforeChange) callbacks.onBeforeChange();
+                engine.setTrackMute (t, rows[t].mute.getToggleState());
+                if (callbacks.onAfterChange) callbacks.onAfterChange();
+            };
 
             gridContent.addAndMakeVisible (row.solo);
             row.solo.setClickingTogglesState (true);
             row.solo.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffa8871a));
-            row.solo.onClick = [this, t] { engine.setTrackSolo (t, rows[t].solo.getToggleState()); };
+            row.solo.onClick = [this, t]
+            {
+                if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                if (callbacks.onBeforeChange) callbacks.onBeforeChange();
+                engine.setTrackSolo (t, rows[t].solo.getToggleState());
+                if (callbacks.onAfterChange) callbacks.onAfterChange();
+            };
 
             gridContent.addAndMakeVisible (row.level);
             gridContent.addAndMakeVisible (row.meter);
@@ -97,6 +121,12 @@ public:
             row.level.setRange (0.0, 1.2, 0.01);
             row.level.setValue (0.8, juce::dontSendNotification);
             row.level.setDoubleClickReturnValue (true, 0.8); // double-click reset, app-wide
+            row.level.onDragStart = [this, t]
+            {
+                if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                if (callbacks.onBeforeChange) callbacks.onBeforeChange();
+            };
+            row.level.onDragEnd = [this] { if (callbacks.onAfterChange) callbacks.onAfterChange(); };
             row.level.onValueChange = [this, t] { engine.setTrackGain (t, (float) rows[t].level.getValue()); };
 
             for (int s = 0; s < kSteps; ++s)
@@ -104,7 +134,13 @@ public:
                 auto& sb = row.steps[s];
                 gridContent.addAndMakeVisible (sb);
                 sb.setBeatShade ((s / 4) % 2 == 0);
-                sb.onChange = [this, t, s] (int v) { engine.setStep (t, s, v); };
+                sb.onChange = [this, t, s] (int v)
+                {
+                    if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                    if (callbacks.onBeforeChange) callbacks.onBeforeChange();
+                    engine.setStep (t, s, v);
+                    if (callbacks.onAfterChange) callbacks.onAfterChange();
+                };
             }
         }
         refreshPatternUi();
@@ -113,7 +149,7 @@ public:
 
     ~SequencerPanel() override
     {
-        for (int t = 0; t <= boombap::BoomBapEngine::Clap; ++t)
+        for (int t = 0; t < kTracks; ++t)
             rows[t].name.removeMouseListener (this);
     }
 
@@ -214,13 +250,15 @@ public:
         layoutRows();
     }
 
-    // (Component is a MouseListener; kit-row name clicks arrive here.)
+    // (Component is a MouseListener; row name clicks arrive here.)
     void mouseDown (const juce::MouseEvent& e) override
     {
-        for (int t = 0; t <= boombap::BoomBapEngine::Clap; ++t)
+        for (int t = 0; t < kTracks; ++t)
             if (e.eventComponent == &rows[t].name)
             {
-                if (callbacks.onNameMenu) callbacks.onNameMenu (t);
+                if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                if (t <= boombap::BoomBapEngine::Clap && callbacks.onNameMenu)
+                    callbacks.onNameMenu (t);
                 return;
             }
     }

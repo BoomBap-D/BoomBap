@@ -2,6 +2,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "Engine/BoomBapEngine.h"
 #include "BoomBapLookAndFeel.h"
+#include <cstdint>
 #include <functional>
 
 // The AUDIO MULTITRACK view (items 32/35, made self-sufficient in fix
@@ -27,7 +28,13 @@
 // - The footer shows the BoomBap file home (item 62): where takes live
 //   is printed, never a mystery.
 // The strip above the ruler shows the mixer running in track order: the
-// instrument rows, then the audio tracks (item 35).
+// instrument rows, then the audio tracks (item 35). Its chips carry the
+// state lights (item 68): a channel that is PLAYING wears a bright
+// outline box (the sounding-clip light of item 54, up top), and the
+// SELECTED channel wears a solid light of its own - the two never read
+// as the same state, and a chip that is both shows both.
+// The docked view scrolls its lanes in place (item 67): the lane
+// scrollbar's total range is the full lane-stack height.
 class MultitrackComponent : public juce::Component, private juce::Timer,
                             private juce::ScrollBar::Listener
 {
@@ -55,22 +62,26 @@ public:
 
         addClipButton.onClick = [this]
         {
+            if (onBeforeChange) onBeforeChange();
             if (engine.placeTakeAsClip() >= 0)
             {
                 rebuildPeaks();
                 repaint();
                 if (onChange) onChange();
             }
+            if (onAfterChange) onAfterChange();
         };
         addAndMakeVisible (addClipButton);
 
         addTrackButton.onClick = [this]
         {
+            if (onBeforeChange) onBeforeChange();
             engine.addAudioTrack();
             layoutLaneControls();
             resized();
             repaint();
             if (onChange) onChange();
+            if (onAfterChange) onAfterChange();
         };
         addAndMakeVisible (addTrackButton);
 
@@ -88,6 +99,12 @@ public:
             lvl.setRange (0.0, 1.2, 0.01);
             lvl.setValue (engine.getAudioTrackGain (t), juce::dontSendNotification);
             lvl.setDoubleClickReturnValue (true, 0.9);
+            lvl.onDragStart = [this, t]
+            {
+                if (onSelectChannel) onSelectChannel (boombap::BoomBapEngine::kAudioChannelBase + t);
+                if (onBeforeChange) onBeforeChange();
+            };
+            lvl.onDragEnd = [this] { if (onAfterChange) onAfterChange(); };
             lvl.onValueChange = [this, t] { engine.setAudioTrackGain (t, (float) laneLevel[(size_t) t].getValue()); };
             addChildComponent (lvl);
 
@@ -96,7 +113,13 @@ public:
             m.setClickingTogglesState (true);
             m.setColour (juce::TextButton::buttonOnColourId, juce::Colours::indianred);
             m.setToggleState (engine.getAudioTrackMute (t), juce::dontSendNotification);
-            m.onClick = [this, t] { engine.setAudioTrackMute (t, laneMute[(size_t) t].getToggleState()); };
+            m.onClick = [this, t]
+            {
+                if (onSelectChannel) onSelectChannel (boombap::BoomBapEngine::kAudioChannelBase + t);
+                if (onBeforeChange) onBeforeChange();
+                engine.setAudioTrackMute (t, laneMute[(size_t) t].getToggleState());
+                if (onAfterChange) onAfterChange();
+            };
             addChildComponent (m);
 
             auto& s = laneSolo[(size_t) t];
@@ -104,7 +127,13 @@ public:
             s.setClickingTogglesState (true);
             s.setColour (juce::TextButton::buttonOnColourId, juce::Colour (0xffa8871a));
             s.setToggleState (engine.getAudioTrackSolo (t), juce::dontSendNotification);
-            s.onClick = [this, t] { engine.setAudioTrackSolo (t, laneSolo[(size_t) t].getToggleState()); };
+            s.onClick = [this, t]
+            {
+                if (onSelectChannel) onSelectChannel (boombap::BoomBapEngine::kAudioChannelBase + t);
+                if (onBeforeChange) onBeforeChange();
+                engine.setAudioTrackSolo (t, laneSolo[(size_t) t].getToggleState());
+                if (onAfterChange) onAfterChange();
+            };
             addChildComponent (s);
         }
 
@@ -132,6 +161,15 @@ public:
     // Item 62: the file home, printed in the footer.
     void setHomePathText (const juce::String& text) { homeLabel.setText (text, juce::dontSendNotification); }
 
+    // Item 68: the selected channel, mirrored here so the mixer-order
+    // strip can light it. The owner pushes it (MainComponent::
+    // selectChannel is the one funnel every selection flows through).
+    void setSelectedChannel (int ch)
+    {
+        if (ch != selectedChannel) { selectedChannel = ch; repaint(); }
+    }
+    int getSelectedChannel() const { return selectedChannel; }
+
     void refreshFromEngine()
     {
         for (int t = 0; t < boombap::BoomBapEngine::kAudioTracks; ++t)
@@ -151,6 +189,7 @@ public:
     {
         if (selectedSlot < 0) return;
         if (! engine.getAudioClip (selectedSlot).active) { selectedSlot = -1; return; }
+        if (onBeforeChange) onBeforeChange();
         engine.clearAudioClip (selectedSlot);
         selectedSlot = -1;
         deleteButton.setEnabled (false);
@@ -158,6 +197,7 @@ public:
         rebuildPeaks();
         repaint();
         if (onChange) onChange();
+        if (onAfterChange) onAfterChange();
     }
 
     bool keyPressed (const juce::KeyPress& key) override
@@ -193,14 +233,37 @@ public:
         for (int i = 0; i < numChips; ++i)
         {
             const bool isAudio = i >= engine.getNumTracks();
+            const int audioIdx = i - engine.getNumTracks();
+            const int chipChannel = isAudio ? boombap::BoomBapEngine::kAudioChannelBase + audioIdx : i;
+            // Item 68: PLAYING wears an outline box (the sounding-clip
+            // light of item 54, up top); SELECTED wears a solid light of
+            // its own. Different treatments on purpose - the two states
+            // must never read as the same, and a chip that is both shows
+            // both: the solid fill carries the selection, the bright box
+            // drawn over it carries the playing.
+            const bool chipSelected = chipChannel == selectedChannel;
+            const bool chipPlaying = chipChannelPlaying (chipChannel, isAudio, audioIdx, mask);
             juce::Rectangle<float> chip (16.0f + i * (chipW + 6.0f), chipY, chipW, chipH);
-            g.setColour (isAudio ? accent().withAlpha (0.22f) : panelAlt());
+            g.setColour (chipSelected ? accent()
+                                      : chipPlaying ? accent().withAlpha (0.35f)
+                                                    : isAudio ? accent().withAlpha (0.22f) : panelAlt());
             g.fillRoundedRectangle (chip, 6.0f);
-            g.setColour (isAudio ? accent() : border().withAlpha (0.7f));
-            g.drawRoundedRectangle (chip, 6.0f, 1.0f);
-            g.setColour (isAudio ? text() : muted());
-            g.setFont (juce::Font (juce::jmin (12.5f, chipW * 0.16f), isAudio ? juce::Font::bold : juce::Font::plain));
-            g.drawText (isAudio ? juce::String ("AUDIO ") + juce::String (i - engine.getNumTracks() + 1)
+            if (chipPlaying)
+            {
+                g.setColour (accentHi());
+                g.drawRoundedRectangle (chip, 6.0f, 2.2f);
+            }
+            else
+            {
+                g.setColour (chipSelected ? accent().darker (0.45f)
+                                          : isAudio ? accent() : border().withAlpha (0.7f));
+                g.drawRoundedRectangle (chip, 6.0f, chipSelected ? 1.4f : 1.0f);
+            }
+            g.setColour (chipSelected ? juce::Colour (0xff14100a)
+                                      : (isAudio || chipPlaying) ? text() : muted());
+            g.setFont (juce::Font (juce::jmin (12.5f, chipW * 0.16f),
+                                   (isAudio || chipSelected || chipPlaying) ? juce::Font::bold : juce::Font::plain));
+            g.drawText (isAudio ? juce::String ("AUDIO ") + juce::String (audioIdx + 1)
                                 : juce::String (boombap::BoomBapEngine::trackName (i)).toUpperCase(),
                         chip, juce::Justification::centred);
         }
@@ -398,8 +461,22 @@ public:
 
         const auto view = lanesViewRect();
         const float contentH = (float) engine.getNumAudioTracks() * kLaneH;
+        // Item 67: the scrollbar's TOTAL range is the full content
+        // height and its visible range is the viewport's height inside
+        // it - the canonical ScrollBar model. The old code set the
+        // limits to (contentH - viewH), the maximum OFFSET, while the
+        // visible range's size was the full viewport height; JUCE clamps
+        // a visible range longer than the total range to the whole
+        // total range (Range::constrainRange), so the thumb filled the
+        // track, the start stayed pinned at 0, and neither a thumb drag
+        // nor the wheel could ever move it - docked, lanes past the
+        // fold were unreachable. (Popped out, the window is tall enough
+        // to show every lane at once, which is why only the docked
+        // view failed.) The wheel handler's clamp (contentH - viewH)
+        // is the maximum START under this model, unchanged.
+        scrollOffset = juce::jlimit (0.0f, juce::jmax (0.0f, contentH - view.getHeight()), scrollOffset);
         laneScroll.setBounds ((int) view.getRight() - 14, (int) view.getY(), 14, (int) view.getHeight());
-        laneScroll.setRangeLimits (0.0, juce::jmax (0.0f, contentH - view.getHeight()));
+        laneScroll.setRangeLimits (0.0, juce::jmax (0.0f, contentH));
         laneScroll.setCurrentRange (scrollOffset, view.getHeight());
         laneScroll.setVisible (contentH > view.getHeight() + 1.0f);
         layoutLaneControls();
@@ -449,6 +526,7 @@ public:
         if (laneIdx >= 0 && e.x < (int) (16.0f + kGutterW))
         {
             engine.setRecTargetTrack (laneIdx);
+            if (onSelectChannel) onSelectChannel (boombap::BoomBapEngine::kAudioChannelBase + laneIdx);
             repaint();
             return;
         }
@@ -464,6 +542,11 @@ public:
         const auto clip = engine.getAudioClip (slot);
         const auto r = clipRect (clip);
         const long long at = xToSamples ((float) e.x);
+        if (onSelectChannel) onSelectChannel (boombap::BoomBapEngine::kAudioChannelBase + clip.track);
+        // Pass 2 (item 38): the whole clip gesture - split, move, trim -
+        // is ONE undoable action; the before-state is captured now, the
+        // gesture closes on mouseUp.
+        if (onBeforeChange) onBeforeChange();
 
         // Item 58: split is checked FIRST, before any selection or drag
         // state exists - the same gesture fires in every state.
@@ -474,6 +557,7 @@ public:
                 rebuildPeaks();
                 if (onChange) onChange();
             }
+            if (onAfterChange) onAfterChange();
             repaint();
             return;
         }
@@ -519,8 +603,14 @@ public:
             rebuildPeaks();
             repaint();
             if (onChange) onChange();
+            if (onAfterChange) onAfterChange();
         }
     }
+
+    // Pass 2 (item 38): undo gesture hooks + Station channel selection,
+    // wired by the owner after construction.
+    std::function<void()> onBeforeChange, onAfterChange;
+    std::function<void (int)> onSelectChannel;
 
 private:
     static constexpr float kRulerY = 78.0f;
@@ -550,6 +640,43 @@ private:
     {
         const int t = (int) ((contentY - kLanesY) / kLaneH);
         return (t >= 0 && t < engine.getNumAudioTracks()) ? t : -1;
+    }
+
+    // Item 68: is this chip's channel making sound right now? The
+    // engine's channel peaks decay per block in the engine itself, so
+    // every reader may peek without starving another (the same values
+    // the Station's meters watch). An audio chip is also live while
+    // any clip on its track is sounding (item 54's mask).
+    static constexpr float kChipLiveFloor = 0.01f; // -40 dB peak
+    bool chipChannelPlaying (int channel, bool isAudio, int audioTrack, unsigned int clipMask) const
+    {
+        if (engine.peekChannelPeak (channel, false) > kChipLiveFloor
+            || engine.peekChannelPeak (channel, true) > kChipLiveFloor)
+            return true;
+        if (isAudio)
+            for (int s = 0; s < boombap::BoomBapEngine::kMaxAudioClips; ++s)
+                if ((clipMask & (1u << s)) != 0u && engine.getAudioClip (s).track == audioTrack)
+                    return true;
+        return false;
+    }
+
+    // The live-chip set as a bitmask over channel ids (item 68): the
+    // timer repaints when it changes, and keeps repainting while any
+    // chip is lit so the peak decay tail is seen through.
+    std::uint64_t chipLiveMask (unsigned int clipMask) const
+    {
+        std::uint64_t live = 0;
+        const int numTracks = engine.getNumTracks();
+        const int numChips = numTracks + engine.getNumAudioTracks();
+        for (int i = 0; i < numChips; ++i)
+        {
+            const bool isAudio = i >= numTracks;
+            const int audioIdx = i - numTracks;
+            const int ch = isAudio ? boombap::BoomBapEngine::kAudioChannelBase + audioIdx : i;
+            if (ch >= 0 && ch < 64 && chipChannelPlaying (ch, isAudio, audioIdx, clipMask))
+                live |= 1ull << ch;
+        }
+        return live;
     }
 
     void layoutLaneControls()
@@ -681,6 +808,12 @@ private:
         bool needRepaint = engine.isPlaying() || engine.isAudioPlaying() || engine.isCapturing()
                            || dragSlot >= 0;
         if (engine.soundingClipMask() != lastMask) { lastMask = engine.soundingClipMask(); needRepaint = true; }
+        // Item 68: the chip strip's PLAYING lights track the channel
+        // peaks even when neither transport is running (a run-on pad or
+        // a ringing tail still shows up top while it sounds).
+        const auto liveChips = chipLiveMask (lastMask);
+        if (liveChips != lastChipLive) { lastChipLive = liveChips; needRepaint = true; }
+        if (liveChips != 0) needRepaint = true;
         if (engine.audioPosition() != lastAudioPos) { lastAudioPos = engine.audioPosition(); needRepaint = true; }
         if (engine.getRecTargetTrack() != lastRecTrack) { lastRecTrack = engine.getRecTargetTrack(); needRepaint = true; }
         // keep the waveform slice under the trim region current while dragging
@@ -725,6 +858,8 @@ private:
 
     std::array<float, 1024> recMins {}, recMaxs {};
     unsigned int lastMask = 0;
+    std::uint64_t lastChipLive = 0;
+    int selectedChannel = -1; // item 68: mirrored by the owner (see setSelectedChannel)
     long long lastAudioPos = -1;
     bool lastAudioPlaying = false;
     int lastNumAudioTracks = 1;

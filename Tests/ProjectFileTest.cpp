@@ -234,6 +234,56 @@ int main()
     check (fp1.settings.numAudioTracks == 1 && fp1.settings.audioClips[0].track == 0,
            "older files default to one audio track, clips on track 0");
 
+    std::printf ("Pass 2: the Station - strips, pans, groups, master limiter\n");
+    auto feq = [] (float a, float b) { return std::abs (a - b) < 0.001f; };
+    ProjectData sd;
+    sd.settings.strips[0].compOn = true;
+    sd.settings.strips[0].compThresholdDb = -22.5f;
+    sd.settings.strips[0].eq[2].on = true;
+    sd.settings.strips[0].eq[2].gainDb = 4.5f;
+    sd.settings.strips[0].eq[2].freqHz = 3200.0f;
+    sd.settings.strips[43].preampOn = true;
+    sd.settings.strips[43].preampDb = 6.0f;
+    sd.settings.strips[43].limiterOn = true;
+    sd.settings.strips[35].eqNumBands = 7;
+    sd.settings.strips[35].eq[6].on = true;
+    sd.settings.strips[35].eq[6].freqHz = 500.0f;
+    sd.settings.trackPan[3] = -0.5f;
+    sd.settings.audioPan[1] = 0.75f;
+    sd.settings.synthPan = 0.25f;
+    sd.settings.synthMute = true;
+    sd.settings.pianoSolo = true;
+    sd.settings.padBusGain = 0.66f;
+    sd.settings.padBusPan = -0.2f;
+    sd.settings.padBusMute = true;
+    sd.settings.vocalGain = 0.55f;
+    sd.settings.vocalPan = 0.1f;
+    sd.settings.vocalSolo = true;
+    sd.settings.masterLimiterOn = true;
+    sd.settings.masterLimiterCeilingDb = -3.0f;
+    ProjectData sback;
+    check (projectFromJson (projectToJson (sd, projectA), projectA, sback, err), "station project parses");
+    check (sback.settings.strips[0].compOn && feq (sback.settings.strips[0].compThresholdDb, -22.5f),
+           "a strip's compressor survives");
+    check (sback.settings.strips[0].eq[2].on && feq (sback.settings.strips[0].eq[2].gainDb, 4.5f)
+           && feq (sback.settings.strips[0].eq[2].freqHz, 3200.0f), "EQ band settings survive");
+    check (sback.settings.strips[43].preampOn && feq (sback.settings.strips[43].preampDb, 6.0f)
+           && sback.settings.strips[43].limiterOn, "the vocal strip's preamp + limiter survive");
+    check (sback.settings.strips[35].eqNumBands == 7 && sback.settings.strips[35].eq[6].on,
+           "an added EQ band survives");
+    check (sback.settings.strips[10].isDefault(), "untouched strips stay default (sparse file)");
+    check (feq (sback.settings.trackPan[3], -0.5f) && feq (sback.settings.audioPan[1], 0.75f)
+           && feq (sback.settings.synthPan, 0.25f), "pans survive");
+    check (sback.settings.synthMute && sback.settings.pianoSolo, "instrument mute/solo survive");
+    check (feq (sback.settings.padBusGain, 0.66f) && sback.settings.padBusMute
+           && feq (sback.settings.padBusPan, -0.2f), "the pad bus channel survives");
+    check (feq (sback.settings.vocalGain, 0.55f) && sback.settings.vocalSolo, "the vocal channel survives");
+    check (sback.settings.masterLimiterOn && feq (sback.settings.masterLimiterCeilingDb, -3.0f),
+           "the master limiter setting survives");
+    check (fp1.settings.strips[0].isDefault() && fp1.settings.trackPan[0] == 0.0f
+           && ! fp1.settings.masterLimiterOn,
+           "older files load with default station state");
+
     root.deleteRecursively();
     std::printf (failures == 0 ? "project file checks passed\n" : "%d CHECK(S) FAILED\n", failures);
     return failures == 0 ? 0 : 1;

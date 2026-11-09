@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <functional>
 #include "Engine/BoomBapEngine.h"
 #include "BoomBapLookAndFeel.h"
 
@@ -15,10 +16,22 @@ public:
     explicit PlaylistComponent (boombap::BoomBapEngine& eng) : engine (eng)
     {
         modeToggle.setToggleState (engine.isSongMode(), juce::dontSendNotification);
-        modeToggle.onClick = [this] { engine.setSongMode (modeToggle.getToggleState()); refreshStatus(); repaint(); };
+        modeToggle.onClick = [this]
+        {
+            if (onBeforeChange) onBeforeChange();
+            engine.setSongMode (modeToggle.getToggleState());
+            if (onAfterChange) onAfterChange();
+            refreshStatus(); repaint();
+        };
         addAndMakeVisible (modeToggle);
 
-        clearButton.onClick = [this] { engine.setSongLength (0); refreshStatus(); repaint(); };
+        clearButton.onClick = [this]
+        {
+            if (onBeforeChange) onBeforeChange();
+            engine.setSongLength (0);
+            if (onAfterChange) onAfterChange();
+            refreshStatus(); repaint();
+        };
         addAndMakeVisible (clearButton);
 
         status.setColour (juce::Label::textColourId, boombap::ui::text());
@@ -93,6 +106,7 @@ public:
         const int slot = slotAt (e.x, e.y);
         if (slot < 0) return;
         const int len = engine.getSongLength();
+        if (onBeforeChange) onBeforeChange();
 
         if (e.mods.isRightButtonDown())
         {
@@ -111,9 +125,13 @@ public:
             engine.setSongSlot (slot, engine.getEditPattern());
             engine.setSongLength (len + 1);
         }
+        if (onAfterChange) onAfterChange();
         refreshStatus();
         repaint();
     }
+
+    // Pass 2 (item 38): undo gesture hooks, wired by the owner.
+    std::function<void()> onBeforeChange, onAfterChange;
 
 private:
     static constexpr int kSlots = boombap::BoomBapEngine::kSongSlots;

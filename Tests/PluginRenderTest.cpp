@@ -256,6 +256,128 @@ int main (int argc, char** argv)
         check (diff > 0.01, "64/dust: Dust on measures a real difference on a clean signal");
     }
 
+    // ---------------- Pass 2: the Station strip DSP, measured ----------------
+    // Item 65's chain on the VOCAL channel, driven through processBlock
+    // exactly like item 64: on vs off, numbers printed.
+    {
+        auto goertzel = [] (const std::vector<float>& v, size_t from, double freq, double sr)
+        {
+            const double w = 2.0 * 3.141592653589793 * freq / sr;
+            const double coeff = 2.0 * std::cos (w);
+            double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+            for (size_t i = from; i < v.size(); ++i) { s0 = (double) v[i] + coeff * s1 - s2; s2 = s1; s1 = s0; }
+            return std::sqrt (std::max (0.0, s1 * s1 + s2 * s2 - coeff * s1 * s2)) / (double) (v.size() - from);
+        };
+        auto peakOf = [] (const std::vector<float>& v, size_t from)
+        {
+            double pk = 0.0;
+            for (size_t i = from; i < v.size(); ++i) pk = std::max (pk, (double) std::abs (v[i]));
+            return pk;
+        };
+        const int vch = boombap::BoomBapEngine::kVocalChannel;
+        const size_t skip = 12 * 512;
+        auto renderStrip = [&] (const boombap::StripSettings& strip,
+                                const std::function<float (long long)>& gen,
+                                double* compGrOut)
+        {
+            BoomBapProcessor proc;
+            proc.prepareToPlay (44100.0, 512);
+            proc.engine.setGlueEnabled (false);
+            proc.engine.setDustEnabled (false);
+            proc.engine.setVocalEnabled (true);
+            proc.engine.setVocalMic (0); // Condenser Clean - the strip is what changes
+            proc.engine.setStripSettings (vch, strip);
+            long long phase = 0;
+            auto out = renderBlocks (proc, 48, gen, phase);
+            if (compGrOut != nullptr) *compGrOut = proc.engine.getChannelCompGrDb (vch);
+            return out;
+        };
+        auto sineGen = [twoPi] (double freq, double amp)
+        {
+            return [twoPi, freq, amp] (long long n)
+            {
+                return (float) (amp * std::sin (twoPi * freq * (double) n / 44100.0));
+            };
+        };
+
+        const boombap::StripSettings off; // a default strip: nothing on
+
+        // EQ: +12 dB peak at the signal's own frequency must lift it
+        {
+            boombap::StripSettings eqOn;
+            eqOn.eq[2].on = true;
+            eqOn.eq[2].type = boombap::GraphicEq::Peak;
+            eqOn.eq[2].freqHz = 300.0f;
+            eqOn.eq[2].gainDb = 12.0f;
+            eqOn.eq[2].q = 1.0f;
+            const auto a = renderStrip (off, sineGen (300.0, 0.30), nullptr);
+            const auto b = renderStrip (eqOn, sineGen (300.0, 0.30), nullptr);
+            const double rOff = rmsOf (a, skip), rOn = rmsOf (b, skip);
+            std::printf ("PASS2 EQ: off rms=%.4f, +12 dB @300 Hz rms=%.4f (x%.2f)\n", rOff, rOn, rOn / std::max (1e-9, rOff));
+            check (rOff > 0.02, "P2/eq: the test signal reaches the output");
+            check (rOn > rOff * 1.6, "P2/eq: a boosted band changes RMS measurably through the plugin");
+        }
+        // COMPRESSOR: a hot signal gets gain reduction and lower RMS
+        {
+            boombap::StripSettings compOn;
+            compOn.compOn = true;
+            compOn.compThresholdDb = -20.0f;
+            compOn.compRatio = 10.0f;
+            compOn.compAttackMs = 1.0f;
+            compOn.compReleaseMs = 100.0f;
+            double gr = 0.0;
+            const auto a = renderStrip (off, sineGen (220.0, 0.85), nullptr);
+            const auto b = renderStrip (compOn, sineGen (220.0, 0.85), &gr);
+            const double rOff = rmsOf (a, skip), rOn = rmsOf (b, skip);
+            std::printf ("PASS2 COMP: off rms=%.4f, on rms=%.4f, strip GR %.1f dB\n", rOff, rOn, gr);
+            check (rOn < rOff * 0.82, "P2/comp: the strip compressor lowers a hot signal measurably");
+            check (gr < -1.0, "P2/comp: the strip GR meter confirms real gain reduction");
+        }
+        // DE-ESSER: a sibilant-band signal loses energy with it on
+        {
+            boombap::StripSettings deOn;
+            deOn.deessOn = true;
+            deOn.deessAmount = 1.0f;
+            const auto a = renderStrip (off, sineGen (7000.0, 0.45), nullptr);
+            const auto b = renderStrip (deOn, sineGen (7000.0, 0.45), nullptr);
+            const double rOff = rmsOf (a, skip), rOn = rmsOf (b, skip);
+            std::printf ("PASS2 DE-ESS: off rms=%.4f, on rms=%.4f (x%.2f)\n", rOff, rOn, rOn / std::max (1e-9, rOff));
+            check (rOff > 0.02, "P2/deess: the sibilant signal reaches the output");
+            check (rOn < rOff * 0.85, "P2/deess: sibilant-band energy drops with the de-esser on");
+        }
+        // SATURATION: harmonic content appears that wasn't there. The
+        // input stays gentle (0.22) so the mic chain ahead of the strip
+        // is still clean - what bends here is the strip's own stage.
+        {
+            boombap::StripSettings satOn;
+            satOn.satOn = true;
+            satOn.satDrive = 0.9f;
+            const auto a = renderStrip (off, sineGen (200.0, 0.22), nullptr);
+            const auto b = renderStrip (satOn, sineGen (200.0, 0.22), nullptr);
+            const double hOff = goertzel (a, skip, 600.0, 44100.0);
+            const double hOn = goertzel (b, skip, 600.0, 44100.0);
+            const double fOff = goertzel (a, skip, 200.0, 44100.0);
+            const double fOn = goertzel (b, skip, 200.0, 44100.0);
+            std::printf ("PASS2 SAT: 3rd-harmonic ratio off=%.4f, on=%.4f (levels %.5f -> %.5f)\n",
+                         hOff / std::max (1e-9, fOff), hOn / std::max (1e-9, fOn), hOff, hOn);
+            check (hOn / std::max (1e-9, fOn) > hOff / std::max (1e-9, fOff) * 1.6,
+                   "P2/sat: saturation adds measurable harmonic content");
+        }
+        // LIMITER: the peak ceiling holds. The vocal path's own peak for
+        // a 0.9 input measures ~0.17, so the ceiling under test is -18 dB.
+        {
+            boombap::StripSettings limOn;
+            limOn.limiterOn = true;
+            limOn.limiterCeilingDb = -18.0f;
+            const auto a = renderStrip (off, sineGen (300.0, 0.9), nullptr);
+            const auto b = renderStrip (limOn, sineGen (300.0, 0.9), nullptr);
+            const double pOff = peakOf (a, skip), pOn = peakOf (b, skip);
+            std::printf ("PASS2 LIMITER: off peak=%.4f, on peak=%.4f (ceiling -18 dB)\n", pOff, pOn);
+            check (pOff > 0.14, "P2/limiter: the unlimited signal is hot enough to test against");
+            check (pOn < 0.125 && pOn < pOff * 0.8, "P2/limiter: the ceiling holds through the plugin");
+        }
+    }
+
     std::printf (failures == 0 ? "plugin render checks passed\n" : "PLUGIN RENDER CHECKS FAILED: %d\n", failures);
 
    #if JUCE_LINUX

@@ -4,6 +4,7 @@
 #include "Playlist.h"
 #include "Multitrack.h"
 #include "SequencerPanel.h"
+#include "StationPanel.h"
 #include "DataHome.h"
 #include "WavWrite.h"
 
@@ -82,6 +83,7 @@ void MainComponent::applyProjectToUi (const boombap::ProjectData& d)
     if (pianoRoll != nullptr) pianoRoll->refreshFromEngine();
     if (playlist != nullptr) playlist->refreshFromEngine();
     if (multitrack != nullptr) multitrack->refreshFromEngine();
+    if (station != nullptr) station->refreshFromEngine(); // Pass 2: strips + board follow the project
     refreshGrid();
 }
 
@@ -128,6 +130,7 @@ void MainComponent::newProject()
     applyProjectToUi (fresh);
     currentFile = File();
     savedJson = currentJson();
+    history.clear(); // a new project starts a new undo history (item 38)
     updateProjectLabel();
     clearRecovery(); // the recovered session, if any, has been replaced
     fireMediaChanged();
@@ -190,6 +193,7 @@ void MainComponent::openProject (const File& file)
     loadProjectData (d, true, false);
     currentFile = file;
     savedJson = currentJson();
+    history.clear(); // an opened project starts a new undo history (item 38)
     updateProjectLabel();
     clearRecovery(); // a saved project on disk now covers the work
     recentProjects.add (file);
@@ -306,7 +310,7 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
     // host state restore and has no clip home yet gets one here, exactly
     // like a fresh recording - placement also stands the raw take loop
     // down, so it can never sound unexplained from behind the interface.
-    if (engine.hasTake() && ! engine.takeIsPlaced())
+    if (engine.hasTake() && ! engine.takeIsPlaced() && ! suppressAutoHome)
         placeTakeAsClip();
 
     applyProjectToUi (d);

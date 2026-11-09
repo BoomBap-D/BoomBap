@@ -137,6 +137,53 @@ String projectToJson (const ProjectData& d, const File& projectFile)
         rowSamples.add (var (o));
     }
 
+    // Pass 2: the Station - per-channel strips (only channels whose strip
+    // differs from default are written), the pans, the group channels and
+    // the master limiter. Older files have no "station" key at all.
+    Array<var> stripArr;
+    for (int ch = 0; ch < ProjectSettings::kNumChannels; ++ch)
+    {
+        const auto& st = s.strips[ch];
+        if (st.isDefault()) continue;
+        Array<var> eqArr;
+        for (int b = 0; b < st.eqNumBands; ++b)
+        {
+            Array<var> band;
+            band.add (st.eq[b].on ? 1 : 0);
+            band.add (st.eq[b].type);
+            band.add ((double) st.eq[b].freqHz);
+            band.add ((double) st.eq[b].gainDb);
+            band.add ((double) st.eq[b].q);
+            eqArr.add (var (band));
+        }
+        stripArr.add (object ({
+            { "ch", ch },
+            { "preampOn", st.preampOn }, { "preampDb", (double) st.preampDb },
+            { "hpfOn", st.hpfOn }, { "hpfHz", (double) st.hpfHz },
+            { "deessOn", st.deessOn }, { "deessAmount", (double) st.deessAmount },
+            { "compOn", st.compOn }, { "compThresholdDb", (double) st.compThresholdDb },
+            { "compRatio", (double) st.compRatio }, { "compAttackMs", (double) st.compAttackMs },
+            { "compReleaseMs", (double) st.compReleaseMs },
+            { "satOn", st.satOn }, { "satDrive", (double) st.satDrive },
+            { "limiterOn", st.limiterOn }, { "limiterCeilingDb", (double) st.limiterCeilingDb },
+            { "eq", var (eqArr) } }));
+    }
+    Array<var> trackPans, audioPans;
+    for (int t = 0; t < ProjectSettings::kTracks; ++t) trackPans.add ((double) s.trackPan[t]);
+    for (int i = 0; i < ProjectSettings::kAudioTracks; ++i) audioPans.add ((double) s.audioPan[i]);
+    var stationObj = object ({
+        { "strips", var (stripArr) },
+        { "trackPans", var (trackPans) },
+        { "audioPans", var (audioPans) },
+        { "synth", object ({ { "pan", (double) s.synthPan }, { "mute", s.synthMute }, { "solo", s.synthSolo } }) },
+        { "piano", object ({ { "pan", (double) s.pianoPan }, { "mute", s.pianoMute }, { "solo", s.pianoSolo } }) },
+        { "padBus", object ({ { "gain", (double) s.padBusGain }, { "pan", (double) s.padBusPan },
+                              { "mute", s.padBusMute } }) },
+        { "vocal", object ({ { "gain", (double) s.vocalGain }, { "pan", (double) s.vocalPan },
+                             { "mute", s.vocalMute }, { "solo", s.vocalSolo } }) },
+        { "masterLimiter", object ({ { "on", s.masterLimiterOn },
+                                     { "ceilingDb", (double) s.masterLimiterCeilingDb } }) } });
+
     var root = object ({
         { "format", "boombap-project" },
         { "version", kProjectFormatVersion },
@@ -162,6 +209,7 @@ String projectToJson (const ProjectData& d, const File& projectFile)
                                  { "releaseMs", (double) s.synthReleaseMs }, { "level", (double) s.synthLevel } }) },
             { "piano", object ({ { "bright", (double) s.pianoBright }, { "decayMs", (double) s.pianoDecayMs },
                                  { "level", (double) s.pianoLevel } }) } }) },
+        { "station", stationObj },
         { "samples", var (samples) },
         { "pads", var (padArr) },
         { "audioTracks", var (audioTracksArr) },
@@ -421,6 +469,76 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
             s.audioClips[slot].track         = getI (item, "track", 0); // item 60 (older files: track 0)
             s.audioClips[slot].active        = s.audioClips[slot].lengthSamples > 0;
         }
+
+    // Pass 2: the Station (older files have no key; defaults stand).
+    {
+        const var station = root.getProperty ("station", var());
+        if (station.isObject())
+        {
+            if (auto* tp = station.getProperty ("trackPans", var()).getArray())
+                for (int t = 0; t < ProjectSettings::kTracks && t < tp->size(); ++t)
+                    s.trackPan[t] = (float) numberOr ((*tp)[t], s.trackPan[t]);
+            if (auto* ap = station.getProperty ("audioPans", var()).getArray())
+                for (int i = 0; i < ProjectSettings::kAudioTracks && i < ap->size(); ++i)
+                    s.audioPan[i] = (float) numberOr ((*ap)[i], s.audioPan[i]);
+            const var syn2 = station.getProperty ("synth", var()), pia2 = station.getProperty ("piano", var());
+            s.synthPan = getF (syn2, "pan", s.synthPan);
+            s.synthMute = getB (syn2, "mute", s.synthMute);
+            s.synthSolo = getB (syn2, "solo", s.synthSolo);
+            s.pianoPan = getF (pia2, "pan", s.pianoPan);
+            s.pianoMute = getB (pia2, "mute", s.pianoMute);
+            s.pianoSolo = getB (pia2, "solo", s.pianoSolo);
+            const var pb = station.getProperty ("padBus", var());
+            s.padBusGain = getF (pb, "gain", s.padBusGain);
+            s.padBusPan = getF (pb, "pan", s.padBusPan);
+            s.padBusMute = getB (pb, "mute", s.padBusMute);
+            const var vc = station.getProperty ("vocal", var());
+            s.vocalGain = getF (vc, "gain", s.vocalGain);
+            s.vocalPan = getF (vc, "pan", s.vocalPan);
+            s.vocalMute = getB (vc, "mute", s.vocalMute);
+            s.vocalSolo = getB (vc, "solo", s.vocalSolo);
+            const var ml = station.getProperty ("masterLimiter", var());
+            s.masterLimiterOn = getB (ml, "on", s.masterLimiterOn);
+            s.masterLimiterCeilingDb = getF (ml, "ceilingDb", s.masterLimiterCeilingDb);
+
+            if (auto* stripsIn = station.getProperty ("strips", var()).getArray())
+                for (const var& item : *stripsIn)
+                {
+                    const int ch = getI (item, "ch", -1);
+                    if (ch < 0 || ch >= ProjectSettings::kNumChannels) continue;
+                    auto& st = s.strips[ch];
+                    st.preampOn = getB (item, "preampOn", st.preampOn);
+                    st.preampDb = getF (item, "preampDb", st.preampDb);
+                    st.hpfOn = getB (item, "hpfOn", st.hpfOn);
+                    st.hpfHz = getF (item, "hpfHz", st.hpfHz);
+                    st.deessOn = getB (item, "deessOn", st.deessOn);
+                    st.deessAmount = getF (item, "deessAmount", st.deessAmount);
+                    st.compOn = getB (item, "compOn", st.compOn);
+                    st.compThresholdDb = getF (item, "compThresholdDb", st.compThresholdDb);
+                    st.compRatio = getF (item, "compRatio", st.compRatio);
+                    st.compAttackMs = getF (item, "compAttackMs", st.compAttackMs);
+                    st.compReleaseMs = getF (item, "compReleaseMs", st.compReleaseMs);
+                    st.satOn = getB (item, "satOn", st.satOn);
+                    st.satDrive = getF (item, "satDrive", st.satDrive);
+                    st.limiterOn = getB (item, "limiterOn", st.limiterOn);
+                    st.limiterCeilingDb = getF (item, "limiterCeilingDb", st.limiterCeilingDb);
+                    if (auto* eqIn = item.getProperty ("eq", var()).getArray())
+                    {
+                        st.eqNumBands = std::min (StripSettings::kEqBands, eqIn->size());
+                        for (int b = 0; b < st.eqNumBands; ++b)
+                        {
+                            auto* band = (*eqIn)[b].getArray();
+                            if (band == nullptr || band->size() < 5) continue;
+                            st.eq[b].on     = numberOr ((*band)[0], 0.0) > 0.5;
+                            st.eq[b].type   = (int) std::lround (numberOr ((*band)[1], 0.0));
+                            st.eq[b].freqHz = (float) numberOr ((*band)[2], 1000.0);
+                            st.eq[b].gainDb = (float) numberOr ((*band)[3], 0.0);
+                            st.eq[b].q      = (float) numberOr ((*band)[4], 1.0);
+                        }
+                    }
+                }
+        }
+    }
     s.sanitize();
 
     const var ex = root.getProperty ("export", var());

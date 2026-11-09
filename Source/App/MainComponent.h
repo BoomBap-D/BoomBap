@@ -10,6 +10,8 @@
 #include "RecentProjects.h"
 
 #include "UiComponents.h"
+#include "UndoHistory.h"
+#include "StationPanel.h"
 
 class PadBankComponent;
 class PadWindow;
@@ -58,6 +60,37 @@ public:
     bool tabViewVisible (int index) { auto* c = tabContent (index); return c != nullptr && c->isVisible(); }
     int activeTabIndex() const { return activeTab; }
     void showInitialTab() { selectTab (0); }
+
+    // Item 66: the dock-back regression test drives the tab system through
+    // the very same code paths as the tab bar, the Pop out / Dock back
+    // button, and the pop-out window's X button - no test-only back doors.
+    void driveSelectTab (int index) { selectTab (index); }
+    void drivePopOutTab (int index) { popOutTab (index); }
+    void driveDockTab (int index) { dockTab (index); }
+    void driveClosePopOutWindow (int index)
+    {
+        if (productionWindows[index] != nullptr)
+            productionWindows[index]->closeButtonPressed();
+    }
+    bool tabIsPoppedOut (int index) const { return tabPoppedOut[index]; }
+    juce::Component* tabContentComponent (int index) { return tabContent (index); }
+
+    // ---- Pass 2: the Station + global undo (items 19/38) ----
+    void openStation();
+    void selectChannel (int ch);
+    int selectedChannelId() const { return selectedChannel; }
+    void beginUndoGesture();
+    void endUndoGesture();
+    void runUndoable (std::function<void()> fn);
+    void undoProject();
+    void redoProject();
+    bool canUndoProject() const { return history.canUndo(); }
+    bool canRedoProject() const { return history.canRedo(); }
+    int undoDepth() const { return history.totalItems(); }
+    void applyHistoryJson (const juce::String& json);
+    void rewindTransport();
+    void fastForwardTransport();
+    boombap::StationPanel* stationPanel() { return station.get(); }
 
 private:
     static constexpr int kTracks = boombap::BoomBapEngine::kTracks;
@@ -124,6 +157,7 @@ private:
 
     void startExport();
     void exportTo (const juce::File& file);
+    void refreshViewsAfterEdit(); // Pass 2: after an undoable edit, the other views re-read the engine
 
     void setupSlider (LabeledSlider& s, const juce::String& name, double min, double max, double init,
                       double step, const juce::String& suffix, std::function<void()> onChange);
@@ -242,6 +276,16 @@ private:
     std::unique_ptr<PlaylistComponent> playlist;
     std::unique_ptr<PlaylistWindow> playlistWindow;
     std::atomic<bool> exporting { false };
+
+    // Pass 2: the Station window + the global undo history (item 38)
+    juce::TextButton stationButton { "STATION" };
+    std::unique_ptr<boombap::StationPanel> station;
+    std::unique_ptr<boombap::StationWindow> stationWindow;
+    int selectedChannel = 0;
+    boombap::UndoHistory history;
+    bool suppressAutoHome = false; // history snapshots carry their clips explicitly (item 61 stays for files/host)
+    int gestureIdleTicks = 0;
+    juce::String gestureSnapshot;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

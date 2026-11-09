@@ -1,5 +1,6 @@
 #pragma once
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <functional>
 #include "Engine/BoomBapEngine.h"
 #include "BoomBapLookAndFeel.h"
 
@@ -40,6 +41,8 @@ public:
 
         clearButton.onClick = [this]
         {
+            selectBoundChannel();
+            if (onBeforeChange) onBeforeChange();
             if (stepsMode && bound >= 0)
             {
                 for (int s = 0; s < boombap::BoomBapEngine::kSteps; ++s) engine.setStep (bound, s, 0);
@@ -48,6 +51,7 @@ public:
             {
                 for (int s = 0; s < boombap::BoomBapEngine::kSteps; ++s) setStepAt (s, 0);
             }
+            if (onAfterChange) onAfterChange();
             repaint();
         };
         addAndMakeVisible (clearButton);
@@ -278,14 +282,19 @@ public:
         {
             const int s = stepLaneAt (e.x, e.y);
             if (s < 0) return;
+            selectBoundChannel();
+            if (onBeforeChange) onBeforeChange();
             const int v = engine.getStep (bound, s);
             const int next = e.mods.isRightButtonDown() ? 0 : (v == 0 ? 90 : (v < 110 ? 127 : 0));
             engine.setStep (bound, s, next);
+            if (onAfterChange) onAfterChange();
             repaint();
             return;
         }
         const auto cell = cellAt (e.x, e.y);
         if (cell.x < 0) return;
+        selectBoundChannel();
+        if (onBeforeChange) onBeforeChange(); // the stroke is one gesture; mouseUp closes it
         const int value = (12 - cell.y) + 25;
         erasing = stepAt (cell.x) == value;
         applyAt (cell.x, cell.y);
@@ -297,6 +306,25 @@ public:
         const auto cell = cellAt (e.x, e.y);
         if (cell.x < 0) return;
         applyAt (cell.x, cell.y);
+    }
+
+    void mouseUp (const juce::MouseEvent&) override
+    {
+        if (onAfterChange) onAfterChange();
+    }
+
+    // Pass 2 (item 38): undo gesture hooks + Station channel selection,
+    // wired by the owner after construction.
+    std::function<void()> onBeforeChange, onAfterChange;
+    std::function<void (int)> onSelectChannel;
+
+private:
+    void selectBoundChannel()
+    {
+        if (! onSelectChannel) return;
+        if (bound >= 0) onSelectChannel (bound);
+        else if (bound == kBindSynth) onSelectChannel (boombap::BoomBapEngine::kSynthChannel);
+        else if (bound == kBindPiano) onSelectChannel (boombap::BoomBapEngine::kPianoChannel);
     }
 
 private:

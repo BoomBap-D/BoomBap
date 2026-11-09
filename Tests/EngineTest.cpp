@@ -1002,5 +1002,162 @@ int main()
         std::printf ("Fix pass 2 checks: ok\n");
     }
 
+    // ---- 13. pass 2: the Station - channel model, pans, strips, master
+    // limiter (the measured strip-DSP verdicts live in PluginRenderTest) ----
+    {
+        int failures = 0;
+        auto CHECK = [&] (bool ok, const char* what)
+        {
+            std::printf ("  [%s] %s\n", ok ? "ok" : "FAIL", what);
+            if (! ok) ++failures;
+        };
+        auto feq = [] (float a, float b) { return std::abs (a - b) < 0.001f; };
+
+        // the whole station state rides through applySettings/getSettings
+        {
+            ProjectSettings in;
+            in.strips[0].compOn = true;
+            in.strips[0].compThresholdDb = -22.5f;
+            in.strips[0].eq[2].on = true;
+            in.strips[0].eq[2].gainDb = 4.5f;
+            in.strips[BoomBapEngine::kVocalChannel].preampOn = true;
+            in.strips[BoomBapEngine::kVocalChannel].limiterOn = true;
+            in.trackPan[3] = -0.5f;
+            in.audioPan[1] = 0.75f;
+            in.synthMute = true;
+            in.pianoSolo = true;
+            in.padBusGain = 0.66f;
+            in.padBusMute = true;
+            in.vocalGain = 0.55f;
+            in.vocalSolo = true;
+            in.masterLimiterOn = true;
+            in.masterLimiterCeilingDb = -3.0f;
+            auto e = fresh();
+            e->applySettings (in);
+            const auto out = e->getSettings();
+            CHECK (out.strips[0].compOn && feq (out.strips[0].compThresholdDb, -22.5f)
+                   && out.strips[0].eq[2].on && feq (out.strips[0].eq[2].gainDb, 4.5f),
+                   "P2: strip settings round-trip through the engine");
+            CHECK (out.strips[BoomBapEngine::kVocalChannel].preampOn
+                   && out.strips[BoomBapEngine::kVocalChannel].limiterOn,
+                   "P2: the vocal strip's preamp + limiter round-trip");
+            CHECK (feq (out.trackPan[3], -0.5f) && feq (out.audioPan[1], 0.75f)
+                   && out.synthMute && out.pianoSolo,
+                   "P2: pans and instrument mute/solo round-trip");
+            CHECK (feq (out.padBusGain, 0.66f) && out.padBusMute && feq (out.vocalGain, 0.55f)
+                   && out.vocalSolo && out.masterLimiterOn
+                   && feq (out.masterLimiterCeilingDb, -3.0f),
+                   "P2: pad bus, vocal channel and master limiter round-trip");
+        }
+
+        // the unified channel API routes to the right state
+        {
+            auto e = fresh();
+            e->setChannelGain (BoomBapEngine::kAudioChannelBase + 1, 0.33f);
+            e->setChannelPan (3, -0.4f);
+            e->setChannelMute (BoomBapEngine::kPadBusChannel, true);
+            e->setChannelSolo (BoomBapEngine::kVocalChannel, true);
+            auto st = e->getStripSettings (7);
+            st.satOn = true;
+            st.satDrive = 0.7f;
+            e->setStripSettings (7, st);
+            const auto s = e->getSettings();
+            CHECK (feq (s.audioGain[1], 0.33f) && feq (s.trackPan[3], -0.4f)
+                   && s.padBusMute && s.vocalSolo,
+                   "P2: channel gain/pan/mute/solo route to the right settings");
+            CHECK (e->getStripSettings (7).satOn && feq (e->getStripSettings (7).satDrive, 0.7f)
+                   && feq (s.strips[7].satDrive, 0.7f),
+                   "P2: strip edits route and persist");
+            CHECK (BoomBapEngine::channelName (BoomBapEngine::kPadBusChannel, 8, 1) == "Pad Bus"
+                   && BoomBapEngine::channelName (BoomBapEngine::kVocalChannel, 8, 1) == "Vocal"
+                   && BoomBapEngine::channelHasPreamp (BoomBapEngine::kVocalChannel)
+                   && ! BoomBapEngine::channelHasPreamp (0),
+                   "P2: channel identity - names + preamp only on audio/vocal");
+        }
+
+        // pan is real: a hard-panned kick leaves the other side quiet
+        {
+            auto e = fresh();
+            e->clearPattern();
+            e->setStep (BoomBapEngine::Kick, 0, 127);
+            std::vector<float> l (512), r (512);
+            auto renderStereo = [&] (float pan)
+            {
+                e->setChannelPan (BoomBapEngine::Kick, pan);
+                e->setPlaying (false);
+                e->process (nullptr, l.data(), r.data(), 512); // settle the station state
+                e->setPlaying (true);
+                double pl = 0.0, pr = 0.0;
+                for (int b = 0; b < 24; ++b)
+                {
+                    e->process (nullptr, l.data(), r.data(), 512);
+                    for (int i = 0; i < 512; ++i)
+                    {
+                        pl = std::max (pl, (double) std::abs (l[(size_t) i]));
+                        pr = std::max (pr, (double) std::abs (r[(size_t) i]));
+                    }
+                }
+                e->setPlaying (false);
+                return std::pair<double, double> (pl, pr);
+            };
+            const auto left = renderStereo (-1.0f);
+            const auto right = renderStereo (1.0f);
+            const auto centre = renderStereo (0.0f);
+            CHECK (left.first > 0.1 && left.second < left.first * 0.25,
+                   "P2: hard-left pan silences the right side");
+            CHECK (right.second > 0.1 && right.first < right.second * 0.25,
+                   "P2: hard-right pan silences the left side");
+            CHECK (centre.first > 0.1 && std::abs (centre.first - centre.second) < 0.02,
+                   "P2: centre pan is balanced (and unity - old mixes don't move)");
+        }
+
+        // the master limiter holds its ceiling on a kicked beat
+        {
+            auto e = fresh();
+            e->clearPattern();
+            e->setStep (BoomBapEngine::Kick, 0, 127);
+            std::vector<float> l (512), r (512);
+            double minGr = 0.0;
+            auto renderPeak = [&] (bool limiter)
+            {
+                e->setMasterLimiterOn (limiter);
+                e->setMasterLimiterCeilingDb (-12.0f);
+                e->setPlaying (false);
+                e->process (nullptr, l.data(), r.data(), 512);
+                e->setPlaying (true);
+                double pk = 0.0;
+                minGr = 0.0;
+                for (int b = 0; b < 48; ++b)
+                {
+                    e->process (nullptr, l.data(), r.data(), 512);
+                    // GR sampled during the render - the transient is long
+                    // gone (and released) by the final block
+                    minGr = std::min (minGr, (double) e->getMasterLimiterGrDb());
+                    for (int i = 0; i < 512; ++i)
+                        pk = std::max (pk, (double) std::abs (l[(size_t) i]));
+                }
+                e->setPlaying (false);
+                return pk;
+            };
+            const double off = renderPeak (false);
+            const double on = renderPeak (true);
+            std::printf ("  MASTER LIMITER: off peak=%.4f, on peak=%.4f (ceiling -12 dB), min GR %.1f dB\n",
+                         off, on, minGr);
+            CHECK (off > 0.35, "P2: the unlimited beat is loud enough to test against");
+            // the app's fixed output drive (x1.4 into the final tanh) sits
+            // AFTER the limiter - pre-existing master character, present in
+            // both renders - so the ceiling is judged relatively
+            CHECK (on < off * 0.6, "P2: the master limiter holds its ceiling");
+            CHECK (minGr < -1.0, "P2: the master limiter's GR meter confirms work");
+        }
+
+        if (failures > 0)
+        {
+            std::printf ("PASS 2 CHECKS FAILED: %d\n", failures);
+            return 1;
+        }
+        std::printf ("Pass 2 checks: ok\n");
+    }
+
     std::printf ("engine checks passed\n");
 }

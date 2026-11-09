@@ -19,6 +19,74 @@ struct AudioClip
                                   // older files have no track - they mean 0)
 };
 
+// One band of the Station's graphic EQ (Pass 2, item 9). Type matches
+// GraphicEq: 0 peak, 1 low shelf, 2 high shelf, 3 high-pass, 4 low-pass.
+struct EqBandSettings
+{
+    bool  on     = false;
+    int   type   = 0;
+    float freqHz = 1000.0f;
+    float gainDb = 0.0f;
+    float q      = 1.0f;
+};
+
+// One channel's Master Station strip (Pass 2, items 19/26/65): the chain
+// PREAMP -> HPF -> DE-ESSER -> COMPRESSOR -> SATURATION -> GRAPHIC EQ ->
+// LIMITER, each section with its own on/off. Plain data; the engine
+// translates it into StripChain params. Fader + pan live in the mixer
+// fields of ProjectSettings, not here.
+struct StripSettings
+{
+    bool  preampOn = false;
+    float preampDb = 0.0f;
+    bool  hpfOn = false;
+    float hpfHz = 20.0f;
+    bool  deessOn = false;
+    float deessAmount = 0.0f;
+    bool  compOn = false;
+    float compThresholdDb = -18.0f, compRatio = 4.0f, compAttackMs = 10.0f, compReleaseMs = 100.0f;
+    bool  satOn = false;
+    float satDrive = 0.0f;
+    static constexpr int kEqBands = 8;
+    EqBandSettings eq[kEqBands];
+    int   eqNumBands = 6;
+    bool  limiterOn = false;
+    float limiterCeilingDb = -1.0f;
+
+    StripSettings()
+    {
+        // the starting band set (item 65's chain, the approved EQ
+        // mockup's shape): HP, low shelf, mud peak, presence peak,
+        // air shelf, LP - all present, all flat/off until touched
+        eq[0] = { false, 3, 80.0f,    0.0f, 0.9f };
+        eq[1] = { false, 1, 150.0f,   0.0f, 0.7f };
+        eq[2] = { false, 0, 350.0f,   0.0f, 1.0f };
+        eq[3] = { false, 0, 3200.0f,  0.0f, 1.0f };
+        eq[4] = { false, 2, 10000.0f, 0.0f, 0.7f };
+        eq[5] = { false, 4, 16000.0f, 0.0f, 0.9f };
+        eq[6] = { false, 0, 1000.0f,  0.0f, 1.0f };
+        eq[7] = { false, 0, 1000.0f,  0.0f, 1.0f };
+    }
+
+    bool isDefault() const
+    {
+        const StripSettings d;
+        if (preampOn != d.preampOn || preampDb != d.preampDb || hpfOn != d.hpfOn || hpfHz != d.hpfHz
+            || deessOn != d.deessOn || deessAmount != d.deessAmount
+            || compOn != d.compOn || compThresholdDb != d.compThresholdDb || compRatio != d.compRatio
+            || compAttackMs != d.compAttackMs || compReleaseMs != d.compReleaseMs
+            || satOn != d.satOn || satDrive != d.satDrive
+            || limiterOn != d.limiterOn || limiterCeilingDb != d.limiterCeilingDb
+            || eqNumBands != d.eqNumBands)
+            return false;
+        for (int i = 0; i < kEqBands; ++i)
+            if (eq[i].on != d.eq[i].on || eq[i].type != d.eq[i].type || eq[i].freqHz != d.eq[i].freqHz
+                || eq[i].gainDb != d.eq[i].gainDb || eq[i].q != d.eq[i].q)
+                return false;
+        return true;
+    }
+};
+
 struct ProjectSettings
 {
     // Fix pass 2: a pattern is TWO bars (item 48: 32 steps), and the track
@@ -87,6 +155,32 @@ struct ProjectSettings
     // patSynth plays the synth (root C3), patPiano the piano (root C4).
     int patSynth[kPatterns][kSteps];
     int patPiano[kPatterns][kSteps];
+
+    // ---- The Station (Pass 2): mixer channels + strips ----
+    // Every element is its own channel (items 7/20): the 32 sequencer
+    // rows are channels 0..31, then the two instruments, the pad bus
+    // (item 7's one fader for the whole pad set, fed BY the pad rows'
+    // own channels), the 8 audio tracks, and the vocal channel. The
+    // master bus is not a strip channel - it carries the Glue plus its
+    // own limiter, below.
+    static constexpr int kSynthChannel = kTracks;                    // 32
+    static constexpr int kPianoChannel = kTracks + 1;                // 33
+    static constexpr int kPadBusChannel = kTracks + 2;               // 34
+    static constexpr int kAudioChannelBase = kTracks + 3;            // 35..42
+    static constexpr int kVocalChannel = kTracks + 3 + kAudioTracks; // 43 (kAudioTracks declared below)
+    static constexpr int kNumChannels = kTracks + 4 + kAudioTracks;  // 44
+
+    StripSettings strips[kNumChannels];
+    float trackPan[kTracks] = {};       // per-row pan (faders stay in trackGain)
+    float audioPan[kAudioTracks] = {};  // per-audio-track pan
+    float synthPan = 0.0f, pianoPan = 0.0f;
+    bool  synthMute = false, synthSolo = false, pianoMute = false, pianoSolo = false;
+    float padBusGain = 1.0f, padBusPan = 0.0f;  // item 7: one fader for the pad set
+    bool  padBusMute = false;
+    float vocalGain = 0.9f, vocalPan = 0.0f;    // the vocal channel's fader/pan
+    bool  vocalMute = false, vocalSolo = false;
+    bool  masterLimiterOn = false;              // the master bus's final stage
+    float masterLimiterCeilingDb = -1.0f;
 
     // Instrument sounds are global, like the drum sounds.
     int   synthWave = 0;              // 0 saw, 1 square, 2 triangle, 3 sine
@@ -187,6 +281,36 @@ struct ProjectSettings
         for (int i = 0; i < kAudioTracks; ++i)
         {
             audioGain[i] = std::clamp (audioGain[i], 0.0f, 1.2f);
+        }
+        // The Station (Pass 2)
+        for (int t = 0; t < kTracks; ++t) trackPan[t] = std::clamp (trackPan[t], -1.0f, 1.0f);
+        for (int i = 0; i < kAudioTracks; ++i) audioPan[i] = std::clamp (audioPan[i], -1.0f, 1.0f);
+        synthPan = std::clamp (synthPan, -1.0f, 1.0f);
+        pianoPan = std::clamp (pianoPan, -1.0f, 1.0f);
+        padBusGain = std::clamp (padBusGain, 0.0f, 1.2f);
+        padBusPan = std::clamp (padBusPan, -1.0f, 1.0f);
+        vocalGain = std::clamp (vocalGain, 0.0f, 1.2f);
+        vocalPan = std::clamp (vocalPan, -1.0f, 1.0f);
+        masterLimiterCeilingDb = std::clamp (masterLimiterCeilingDb, -12.0f, 0.0f);
+        for (auto& st : strips)
+        {
+            st.preampDb = std::clamp (st.preampDb, -12.0f, 24.0f);
+            st.hpfHz = std::clamp (st.hpfHz, 10.0f, 400.0f);
+            st.deessAmount = std::clamp (st.deessAmount, 0.0f, 1.0f);
+            st.compThresholdDb = std::clamp (st.compThresholdDb, -48.0f, 0.0f);
+            st.compRatio = std::clamp (st.compRatio, 1.0f, 20.0f);
+            st.compAttackMs = std::clamp (st.compAttackMs, 0.1f, 300.0f);
+            st.compReleaseMs = std::clamp (st.compReleaseMs, 10.0f, 1000.0f);
+            st.satDrive = std::clamp (st.satDrive, 0.0f, 1.0f);
+            st.eqNumBands = std::clamp (st.eqNumBands, 0, StripSettings::kEqBands);
+            for (auto& b : st.eq)
+            {
+                b.type = std::clamp (b.type, 0, 4);
+                b.freqHz = std::clamp (b.freqHz, 15.0f, 20000.0f);
+                b.gainDb = std::clamp (b.gainDb, -30.0f, 30.0f);
+                b.q = std::clamp (b.q, 0.1f, 18.0f);
+            }
+            st.limiterCeilingDb = std::clamp (st.limiterCeilingDb, -12.0f, 0.0f);
         }
         for (int p = 0; p < kPads; ++p)
         {

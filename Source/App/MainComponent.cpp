@@ -4,6 +4,7 @@
 #include "Playlist.h"
 #include "Multitrack.h"
 #include "SequencerPanel.h"
+#include "StationPanel.h"
 #include "AppSettings.h"
 #include "DataHome.h"
 
@@ -49,13 +50,28 @@ public:
         setResizeLimits (560, 320, 4000, 3000);
     }
 
+    // Item 66: the component whose lifetime the deferred dock depends on
+    // (the MainComponent). If it is gone when the deferred call lands,
+    // the call must not happen.
+    void setDockGuard (juce::Component* ownerComponent) { dockGuard = ownerComponent; }
+
     void closeButtonPressed() override
     {
-        if (closeCallback) closeCallback();
+        // Item 66: the dock callback DESTROYS this window (dockTab resets
+        // productionWindows[index]). Running it synchronously here meant
+        // the window was deleted inside its own close handler, leaving
+        // the close machinery executing on a freed object - one half of
+        // the dock-back crash. Hide now (what the user sees is the window
+        // closing) and dock on the next message turn, from a clean stack.
+        setVisible (false);
+        auto cb = closeCallback;
+        auto guard = dockGuard;
+        juce::MessageManager::callAsync ([cb, guard] { if (guard != nullptr && cb) cb(); });
     }
 
 private:
     std::function<void()> closeCallback;
+    juce::Component::SafePointer<juce::Component> dockGuard;
 };
 } // namespace
 
@@ -65,6 +81,10 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
 {
     formats.registerBasicFormats();
     boombap::ensureDataHome(); // item 62: Documents/BoomBap exists from first run, both shells
+    // Pass 2 (item 38): the undo history snapshots the whole project JSON;
+    // applying one goes back through the normal project-load path.
+    history.setCallbacks ([this] { return currentJson(); },
+                          [this] (const juce::String& json) { applyHistoryJson (json); });
     setLookAndFeel (&lookAndFeel);
     setSize (1560, 900); // Pass 1 item 1: landscape design size; the layout scales to fit smaller windows
     setWantsKeyboardFocus (true);
@@ -84,6 +104,10 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     saveAsButton.onClick = [this] { saveProjectAs ({}); };
     recentButton.onClick = [this] { showRecentMenu(); };
 
+    // Pass 2: the Station opens from the project bar (item 19)
+    addAndMakeVisible (stationButton);
+    stationButton.onClick = [this] { openStation(); };
+
     // ---- transport (Pass 1 item 2: big labelled MPC-style buttons) ----
     addAndMakeVisible (playButton);
     addAndMakeVisible (stopButton);
@@ -93,8 +117,8 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     playButton.setColour (TextButton::textColourOffId, Colour (0xff14100a));
     playButton.onClick  = [this] { startTransport(); };
     stopButton.onClick  = [this] { stopTransport(); };
-    clearButton.onClick = [this] { engine.clearPattern(); refreshGrid(); };
-    resetButton.onClick = [this] { engine.loadDefaultPattern(); refreshGrid(); };
+    clearButton.onClick = [this] { runUndoable ([this] { engine.clearPattern(); refreshGrid(); }); };
+    resetButton.onClick = [this] { runUndoable ([this] { engine.loadDefaultPattern(); refreshGrid(); }); };
 
     // ---- metronome (Pass 1 item 5) + pad activity (item 4b) ----
     addAndMakeVisible (metroButton);
@@ -119,8 +143,8 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     addAndMakeVisible (glueMeter);
     addAndMakeVisible (glueBar);
     glueToggle.setToggleState (true, dontSendNotification);
-    dustToggle.onClick = [this] { engine.setDustEnabled (dustToggle.getToggleState()); };
-    glueToggle.onClick = [this] { engine.setGlueEnabled (glueToggle.getToggleState()); };
+    dustToggle.onClick = [this] { runUndoable ([this] { engine.setDustEnabled (dustToggle.getToggleState()); }); };
+    glueToggle.onClick = [this] { runUndoable ([this] { engine.setGlueEnabled (glueToggle.getToggleState()); }); };
     glueMeter.setJustificationType (Justification::centredLeft);
     glueMeter.setColour (Label::textColourId, Colours::lightgrey);
 
@@ -188,6 +212,9 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         scb.onRoll = [this] (int t) { openPianoRollFor (t); };
         scb.onNameMenu = [this] (int t) { showKitMenu (t); };
         scb.onPatternChanged = [this] { if (pianoRoll != nullptr) pianoRoll->refreshFromEngine(); };
+        scb.onBeforeChange = [this] { beginUndoGesture(); };
+        scb.onAfterChange = [this] { endUndoGesture(); };
+        scb.onSelectRow = [this] (int t) { selectChannel (t); };
         sequencerPanel = std::make_unique<SequencerPanel> (engine, scb);
     }
     sequencerPanel->setLookAndFeel (&lookAndFeel);
@@ -200,6 +227,9 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         [this] (int pad) { openPadChooser (pad); },
         [this] (int pad) { return padDisplayName (pad); });
     mpcPanel->setLookAndFeel (&lookAndFeel);
+    mpcPanel->onBeforeChange = [this] { beginUndoGesture(); };
+    mpcPanel->onAfterChange = [this] { endUndoGesture(); };
+    mpcPanel->onSelectPad = [this] (int ch) { selectChannel (ch); };
     // Item 59: hidden tabs are added as CHILD components, never via
     // addAndMakeVisible (which un-hides them) - updateTabChrome below is
     // the single authority on which production view is visible, so the
@@ -211,10 +241,14 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         [this] { startAudioOnlyPlayback(); },
         [this] { stopTransport(); });
     multitrack->setLookAndFeel (&lookAndFeel);
+    multitrack->onBeforeChange = [this] { beginUndoGesture(); };
+    multitrack->onAfterChange = [this] { endUndoGesture(); };
+    multitrack->onSelectChannel = [this] (int ch) { selectChannel (ch); };
     addChildComponent (multitrack.get());
     multitrack->setVisible (false);
     multitrack->setHomePathText ("BoomBap home: " + boombap::dataHome().getFullPathName()
                                  + "  -  takes land in its Takes folder");
+    multitrack->setSelectedChannel (selectedChannel); // item 68: the strip's initial light
     updateTabChrome();
     refreshGrid();
 
@@ -255,10 +289,15 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     micBox.addItem ("Vienna Tube 251", 7);
     micBox.addItem ("Reference Studio", 8);
     micBox.setSelectedId (3, dontSendNotification);
-    micBox.onChange = [this] { engine.setVocalMic (micBox.getSelectedId() - 1); };
+    micBox.onChange = [this]
+    {
+        selectChannel (boombap::BoomBapEngine::kVocalChannel);
+        runUndoable ([this] { engine.setVocalMic (micBox.getSelectedId() - 1); });
+    };
 
     vocalToggle.onClick = [this]
     {
+        selectChannel (boombap::BoomBapEngine::kVocalChannel);
         const bool on = vocalToggle.getToggleState();
         engine.setVocalEnabled (on);
         if (ownAudioDevice)
@@ -269,6 +308,11 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         // in a plugin the host owns the audio device; the toggle just arms the vocal channel
     };
 
+    // NOTE: no selectChannel in these slider lambdas - setupSlider fires
+    // its apply lambda once at construction (a programmatic set, not a
+    // user gesture), which would otherwise yank the Station's channel to
+    // VOCAL before the user touches anything. The vocal channel is
+    // selected by the MONITOR toggle's click and by the take lane.
     setupSlider (vocalDistance, "Distance", 3.0, 40.0, 15.0, 0.5, " cm", [this] { engine.setVocalDistance ((float) vocalDistance.slider.getValue()); });
     setupSlider (vocalInput,    "Input",   -12.0, 24.0, 0.0, 0.5, " dB", [this] { engine.setVocalInputDb ((float) vocalInput.slider.getValue()); });
 
@@ -282,7 +326,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     addAndMakeVisible (takeLabel);
     recordButton.onClick = [this] { toggleRecording(); };
     takeToggle.setToggleState (false, dontSendNotification); // item 56: off until chosen
-    takeToggle.onClick = [this] { engine.setTakeEnabled (takeToggle.getToggleState()); refreshTakeUi(); };
+    takeToggle.onClick = [this] { runUndoable ([this] { engine.setTakeEnabled (takeToggle.getToggleState()); refreshTakeUi(); }); };
     takeLabel.setColour (Label::textColourId, boombap::ui::muted());
     refreshTakeUi();
 
@@ -313,7 +357,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     synthWaveBox.addItem ("Triangle", 3);
     synthWaveBox.addItem ("Sine", 4);
     synthWaveBox.setSelectedId (1, dontSendNotification);
-    synthWaveBox.onChange = [this] { engine.setSynthWave (synthWaveBox.getSelectedId() - 1); };
+    synthWaveBox.onChange = [this] { runUndoable ([this] { engine.setSynthWave (synthWaveBox.getSelectedId() - 1); }); };
 
     setupSlider (synthCutoff,  "Cutoff",  300.0, 12000.0, 4500.0, 50.0, " Hz", [this] { engine.setSynthCutoff ((float) synthCutoff.slider.getValue()); });
     setupSlider (synthReso,    "Reso",    0.0,   1.0,     0.25,   0.01, "",    [this] { engine.setSynthReso ((float) synthReso.slider.getValue()); });
@@ -374,6 +418,8 @@ void MainComponent::setupSlider (LabeledSlider& s, const String& name, double mi
     s.slider.setValue (init, dontSendNotification);
     s.slider.setDoubleClickReturnValue (true, init); // Pass 1 item 4: double-click resets, app-wide
     s.slider.setTextValueSuffix (suffix);
+    s.slider.onDragStart = [this] { beginUndoGesture(); }; // Pass 2 item 38: a drag is one undoable action
+    s.slider.onDragEnd = [this] { endUndoGesture(); };
     s.slider.onValueChange = std::move (onChange);
 
     s.label.setText (name, dontSendNotification);
@@ -409,6 +455,7 @@ void MainComponent::selectInstrument (int which)
 {
     shownInstrument = which;
     const bool synth = which == 0;
+    selectChannel (synth ? boombap::BoomBapEngine::kSynthChannel : boombap::BoomBapEngine::kPianoChannel);
 
     synthWaveBox.setVisible (synth);
     for (auto* s : { &synthCutoff, &synthReso, &synthAttack, &synthRelease, &synthLevel })
@@ -458,7 +505,14 @@ void MainComponent::popOutTab (int index)
     if (content == nullptr || tabPoppedOut[index]) return;
     static const char* titles[3] = { "BoomBap - Step Sequencer", "BoomBap - MPC Panel", "BoomBap - Audio Multitrack" };
     auto win = std::make_unique<PopOutWindow> (titles[index], [this, index] { dockTab (index); });
-    win->setContentOwned (content, false);
+    win->setDockGuard (this);
+    // Item 66: NON-owned - the panels live in MainComponent's unique_ptrs
+    // (sequencerPanel / mpcPanel / multitrack), exactly like the pad bank,
+    // piano roll, playlist and Station windows. setContentOwned here made
+    // dockTab's clearContentComponent() DELETE the panel; dockTab then
+    // re-parented the corpse and MainComponent's destructor deleted it a
+    // second time. That was the dock-back crash.
+    win->setContentNonOwned (content, false);
     win->setSize (juce::jmax (760, content->getWidth()), juce::jmax (380, content->getHeight() + 40));
     win->centreWithSize (win->getWidth(), win->getHeight());
     productionWindows[index] = std::move (win);
@@ -473,9 +527,10 @@ void MainComponent::dockTab (int index)
 {
     auto* content = tabContent (index);
     if (content == nullptr) { tabPoppedOut[index] = false; return; }
+    if (! tabPoppedOut[index] && productionWindows[index] == nullptr) return; // already docked
     if (productionWindows[index] != nullptr)
     {
-        productionWindows[index]->clearContentComponent();
+        productionWindows[index]->clearContentComponent(); // non-owned: detaches the panel, never deletes it
         productionWindows[index].reset();
     }
     tabPoppedOut[index] = false;
@@ -512,10 +567,13 @@ void MainComponent::showKitMenu (int track)
         if (choice == 1) openSampleChooser (track);
         else if (choice == 2)
         {
-            engine.clearKitSample (track);
-            rowFiles[track] = juce::File();
-            if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, "Load...");
-            fireMediaChanged();
+            runUndoable ([this, track]
+            {
+                engine.clearKitSample (track);
+                rowFiles[track] = juce::File();
+                if (sequencerPanel != nullptr) sequencerPanel->setRowLoadText (track, "Load...");
+                fireMediaChanged();
+            });
         }
     });
 }
@@ -567,6 +625,127 @@ void MainComponent::startAudioOnlyPlayback()
     engine.setAudioPlaying (true);
 }
 
+//==============================================================================
+// Pass 2: the Station + global undo (items 19/38).
+void MainComponent::openStation()
+{
+    if (stationWindow == nullptr)
+    {
+        boombap::StationPanel::Callbacks cb;
+        cb.onSelectChannel = [this] (int ch) { selectChannel (ch); };
+        cb.onPlay = [this] { startTransport(); };
+        cb.onStopAll = [this] { stopTransport(); }; // item 45's stop, same button by another face
+        cb.onRewind = [this] { rewindTransport(); };
+        cb.onFastForward = [this] { fastForwardTransport(); };
+        cb.onUndo = [this] { undoProject(); };
+        cb.onRedo = [this] { redoProject(); };
+        cb.canUndo = [this] { return canUndoProject(); };
+        cb.canRedo = [this] { return canRedoProject(); };
+        cb.onBeforeChange = [this] { beginUndoGesture(); };
+        cb.onAfterChange = [this] { endUndoGesture(); };
+        station = std::make_unique<boombap::StationPanel> (engine, cb);
+        station->setLookAndFeel (&lookAndFeel);
+        stationWindow = std::make_unique<boombap::StationWindow> ("BoomBap - The Station", boombap::ui::bg());
+        stationWindow->setLookAndFeel (&lookAndFeel);
+        stationWindow->setContentNonOwned (station.get(), false); // the unique_ptr owns it
+        stationWindow->centreWithSize (1240, 660);
+    }
+    station->bindToChannel (selectedChannel);
+    stationWindow->setVisible (true);
+    stationWindow->toFront (true);
+}
+
+void MainComponent::selectChannel (int ch)
+{
+    // Selection is a user gesture: a project load (including undo/redo
+    // applies) must never move it - control refreshes during a load fire
+    // change callbacks (the mic profile box among them) that would
+    // otherwise yank the Station to the vocal channel on every undo.
+    if (loadingProject) return;
+    selectedChannel = juce::jlimit (0, boombap::BoomBapEngine::kMasterChannel, ch);
+    engine.setAnalysedChannel (selectedChannel);
+    if (station != nullptr)
+        station->bindToChannel (selectedChannel);
+    // Item 68: the multitrack's mixer-order strip lights the selected
+    // channel too - selection is mirrored, never re-derived there.
+    if (multitrack != nullptr)
+        multitrack->setSelectedChannel (selectedChannel);
+}
+
+// The Station transport's REWIND: back to the top - the pattern/song
+// position restarts and the audio playhead returns to zero.
+void MainComponent::rewindTransport()
+{
+    engine.setAudioPlayhead (0);
+    if (engine.isPlaying()) { engine.setPlaying (false); engine.setPlaying (true); }
+    if (engine.isAudioPlaying()) { engine.setAudioPlaying (false); engine.setAudioPlaying (true); }
+}
+
+// FAST FORWARD: the audio playhead steps one bar on.
+void MainComponent::fastForwardTransport()
+{
+    const long long bar = (long long) std::llround (engine.barSamples());
+    if (bar > 0)
+        engine.setAudioPlayhead (engine.audioPosition() + bar);
+}
+
+void MainComponent::beginUndoGesture()
+{
+    if (loadingProject || history.isApplying())
+        return;
+    history.beginGesture();
+    if (history.gestureIsOpen())
+    {
+        gestureSnapshot = currentJson();
+        gestureIdleTicks = 0;
+    }
+}
+
+void MainComponent::endUndoGesture()
+{
+    if (! history.gestureIsOpen())
+        return;
+    history.endGesture();
+    refreshViewsAfterEdit();
+}
+
+void MainComponent::runUndoable (std::function<void()> fn)
+{
+    if (loadingProject || history.isApplying())
+    {
+        fn();
+        return;
+    }
+    history.perform (fn);
+    refreshViewsAfterEdit();
+}
+
+void MainComponent::undoProject() { history.undo(); }
+void MainComponent::redoProject() { history.redo(); }
+
+void MainComponent::applyHistoryJson (const juce::String& json)
+{
+    boombap::ProjectData d;
+    juce::String error;
+    if (! boombap::projectFromJson (json, currentFile, d, error))
+        return;
+    // A history snapshot carries its clips explicitly - item 61's
+    // auto-homing is for files and host restores, and must not invent a
+    // clip here (undoing a clip delete depends on that).
+    suppressAutoHome = true;
+    loadProjectData (d, false, true);
+    suppressAutoHome = false;
+}
+
+void MainComponent::refreshViewsAfterEdit()
+{
+    const auto s = engine.getSettings();
+    if (sequencerPanel != nullptr) sequencerPanel->refreshMixerFromSettings (s);
+    if (multitrack != nullptr) multitrack->refreshFromEngine();
+    if (station != nullptr) station->refreshFromEngine();
+    refreshGrid();
+}
+
 bool MainComponent::keyPressed (const KeyPress& key)
 {
     if (key == KeyPress::spaceKey)
@@ -590,6 +769,8 @@ bool MainComponent::keyPressed (const KeyPress& key)
     if (mods.isCommandDown())
     {
         const int c = (int) CharacterFunctions::toLowerCase ((juce_wchar) key.getKeyCode());
+        if (c == 'z') { if (mods.isShiftDown()) redoProject(); else undoProject(); return true; } // Pass 2 item 38
+        if (c == 'y') { redoProject(); return true; }
         if (c == 's') { if (mods.isShiftDown()) saveProjectAs ({}); else saveProject ({}); return true; }
         if (c == 'o') { confirmDiscardThen ([this] { openProjectChooser(); }); return true; }
         if (c == 'n') { confirmDiscardThen ([this] { newProject(); }); return true; }
@@ -600,6 +781,21 @@ bool MainComponent::keyPressed (const KeyPress& key)
 void MainComponent::timerCallback()
 {
     if (sequencerPanel != nullptr) sequencerPanel->tick();
+
+    // Pass 2 (item 38): an undo gesture left open by a continuous control
+    // closes itself once its edits settle (~0.4 s of no change).
+    if (history.gestureIsOpen())
+    {
+        if (currentJson() == gestureSnapshot)
+        {
+            if (++gestureIdleTicks >= 12) endUndoGesture();
+        }
+        else
+        {
+            gestureSnapshot = currentJson();
+            gestureIdleTicks = 0;
+        }
+    }
 
     const bool playingNow = engine.isPlaying();
     if (playingNow != lastPlayingState)
@@ -802,6 +998,7 @@ void MainComponent::checkForRecovery()
                                     if (boombap::loadProjectFile (recovery, d, error))
                                     {
                                         safe->loadProjectData (d, false, false);
+                                        safe->history.clear(); // the restored session starts a fresh history
                                         safe->savedJson.clear(); // still unsaved work - keep the * and the recovery file
                                         safe->updateProjectLabel();
                                     }
@@ -888,6 +1085,7 @@ void MainComponent::resized()
     recentButton.setBounds (RB (326, 6, 76, 28));
     audioButton.setBounds (RB (408, 6, 80, 28));
     projectName.setBounds (RB (500, 6, 430, 28));
+    stationButton.setBounds (RB (1058, 6, 86, 28));
     pianoButton.setBounds (RB (1150, 6, 96, 28));
     playlistButton.setBounds (RB (1254, 6, 88, 28));
     padBankButton.setBounds (RB (1350, 6, 100, 28));

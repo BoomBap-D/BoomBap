@@ -12,6 +12,8 @@
 #include "../../Core/PadsMPC/MpcSwing.h"
 #include "../../Core/Sampler950/S950Crusher.h"
 #include "../../Core/ChannelStrip/BusCompressor.h"
+#include "../../Core/ChannelStrip/StripChain.h"
+#include "../../Core/Common/Limiter.h"
 #include "../../Core/VocalChain/VocalChain.h"
 #include "../../Core/Instruments/Synth.h"
 #include "../../Core/Instruments/Piano.h"
@@ -54,6 +56,51 @@ public:
         return "Track " + std::to_string (t + 1);
     }
 
+    // ---- Pass 2: the Station's channels (items 7/19/20) ----
+    // Every element is its own channel: rows 0..31, the two instruments,
+    // the pad bus the pad rows feed, the audio tracks, the vocal channel.
+    // kMasterChannel is a UI/analyser id only - the master bus is not a
+    // strip channel (it carries the Glue + its limiter instead).
+    static constexpr int kNumChannels    = ProjectSettings::kNumChannels;   // 44
+    static constexpr int kSynthChannel   = ProjectSettings::kSynthChannel;  // 32
+    static constexpr int kPianoChannel   = ProjectSettings::kPianoChannel;  // 33
+    static constexpr int kPadBusChannel  = ProjectSettings::kPadBusChannel; // 34
+    static constexpr int kAudioChannelBase = ProjectSettings::kAudioChannelBase; // 35
+    static constexpr int kVocalChannel   = ProjectSettings::kVocalChannel;  // 43
+    static constexpr int kMasterChannel  = kNumChannels;                    // 44
+
+    enum ChannelKind { KindRow = 0, KindSynth, KindPiano, KindPadBus, KindAudio, KindVocal, KindMaster };
+    static int channelKind (int ch)
+    {
+        if (ch >= 0 && ch < kTracks) return KindRow;
+        if (ch == kSynthChannel) return KindSynth;
+        if (ch == kPianoChannel) return KindPiano;
+        if (ch == kPadBusChannel) return KindPadBus;
+        if (ch >= kAudioChannelBase && ch < kAudioChannelBase + kAudioTracks) return KindAudio;
+        if (ch == kVocalChannel) return KindVocal;
+        return KindMaster;
+    }
+    // Item 26: the preamp head and the limiter tail live on the channels
+    // that carry recorded audio - the audio tracks and the vocal channel.
+    static bool channelHasPreamp (int ch) { const int k = channelKind (ch); return k == KindAudio || k == KindVocal; }
+    static bool channelHasLimiter (int ch) { return channelHasPreamp (ch); }
+    static bool isPadRow (int track) { return track >= Sample1 && track < Sample1 + kPads; }
+
+    static std::string channelName (int ch, int numTracks, int numAudioTracks)
+    {
+        switch (channelKind (ch))
+        {
+            case KindRow:    return trackName (ch);
+            case KindSynth:  return "Synth";
+            case KindPiano:  return "Piano";
+            case KindPadBus: return "Pad Bus";
+            case KindAudio:  return "Audio " + std::to_string (ch - kAudioChannelBase + 1);
+            case KindVocal:  return "Vocal";
+            default:         return "Master";
+        }
+        (void) numTracks; (void) numAudioTracks;
+    }
+
     BoomBapEngine()
     {
         for (auto& c : patGrid) c.store (0);
@@ -82,11 +129,16 @@ public:
         kick.prepare (sr); snare.prepare (sr); hat.prepare (sr); clap.prepare (sr);
         pads.prepare (sr);
         dust.prepare (sr);
+        dustR.prepare (sr);
         bus.prepare (sr);
         vocal.prepare (sr);
         takeVocal.prepare (sr);
+        for (auto& c : clipChains) c.prepare (sr);
         synth.prepare (sr);
         piano.prepare (sr);
+        for (auto& s : stripDsp) s.prepare (sr);
+        masterLimiter.prepare (sr);
+        stationDirty.store (true);
         applyParams();
         tick = 0; samplesToNextTick = 0.0; wasPlaying = false;
         audioPos = 0; wasAudioPlaying = false;
@@ -167,6 +219,11 @@ public:
         for (int t = 0; t <= Clap; ++t) kitBoundA[(size_t) t].store (o.kitBoundA[(size_t) t].load());
         for (int t = kFirstOwnRow; t < kTracks; ++t)
             ownBoundA[(size_t) (t - kFirstOwnRow)].store (o.ownBoundA[(size_t) (t - kFirstOwnRow)].load());
+        {
+            std::scoped_lock lock (o.stationMutex, stationMutex);
+            station = o.station;
+        }
+        stationDirty.store (true);
         clipRevision.fetch_add (1);
         pads.stopAll();
         synth.stopAll();
@@ -236,6 +293,22 @@ public:
             p.audioGain[i] = audioGainA[(size_t) i].load();
             p.audioMute[i] = audioMuteA[(size_t) i].load();
             p.audioSolo[i] = audioSoloA[(size_t) i].load();
+        }
+        {
+            std::lock_guard<std::mutex> lock (stationMutex);
+            for (int ch = 0; ch < kNumChannels; ++ch) p.strips[ch] = station.strips[(size_t) ch];
+            for (int t = 0; t < kTracks; ++t) p.trackPan[t] = station.pan[(size_t) t];
+            for (int i = 0; i < kAudioTracks; ++i) p.audioPan[i] = station.pan[(size_t) (kAudioChannelBase + i)];
+            p.synthPan = station.pan[kSynthChannel];
+            p.pianoPan = station.pan[kPianoChannel];
+            p.padBusGain = station.padBusGain; p.padBusPan = station.pan[kPadBusChannel];
+            p.padBusMute = station.padBusMute;
+            p.vocalGain = station.vocalGain;   p.vocalPan = station.pan[kVocalChannel];
+            p.vocalMute = station.vocalMute;   p.vocalSolo = station.vocalSolo;
+            p.synthMute = station.synthMute;   p.synthSolo = station.synthSolo;
+            p.pianoMute = station.pianoMute;   p.pianoSolo = station.pianoSolo;
+            p.masterLimiterOn = station.masterLimiterOn;
+            p.masterLimiterCeilingDb = station.masterLimiterCeilingDb;
         }
         return p;
     }
@@ -334,6 +407,24 @@ public:
             std::lock_guard<std::mutex> lock (sampleMutex);
             for (auto& d : clipData) d.clear();
         }
+        {
+            std::lock_guard<std::mutex> lock (stationMutex);
+            for (int ch = 0; ch < kNumChannels; ++ch) station.strips[(size_t) ch] = p.strips[ch];
+            for (int t = 0; t < kTracks; ++t) station.pan[(size_t) t] = p.trackPan[t];
+            for (int i = 0; i < kAudioTracks; ++i) station.pan[(size_t) (kAudioChannelBase + i)] = p.audioPan[i];
+            station.pan[kSynthChannel] = p.synthPan;
+            station.pan[kPianoChannel] = p.pianoPan;
+            station.pan[kPadBusChannel] = p.padBusPan;
+            station.pan[kVocalChannel] = p.vocalPan;
+            station.padBusGain = p.padBusGain; station.padBusMute = p.padBusMute;
+            station.vocalGain = p.vocalGain;   station.vocalMute = p.vocalMute; station.vocalSolo = p.vocalSolo;
+            station.synthMute = p.synthMute;   station.synthSolo = p.synthSolo;
+            station.pianoMute = p.pianoMute;   station.pianoSolo = p.pianoSolo;
+            station.masterLimiterOn = p.masterLimiterOn;
+            station.masterLimiterCeilingDb = p.masterLimiterCeilingDb;
+        }
+        stationDirty.store (true);
+        stationRevision.fetch_add (1);
         clipRevision.fetch_add (1);
         dirty.store (true);
     }
@@ -529,6 +620,8 @@ public:
 
     // ---------------- mixer ----------------
     void setTrackGain (int t, float linear) { trackGain[t].store (linear); }
+    float getTrackGain (int t) const        { return (t >= 0 && t < kTracks) ? trackGain[(size_t) t].load() : 0.0f; }
+    bool getTrackMute (int t) const         { return t >= 0 && t < kTracks && trackMute[(size_t) t].load(); }
     void setTrackMute (int t, bool m)       { trackMute[t].store (m); }
     void setMasterDb (float db)             { masterDb.store (db); }
 
@@ -978,6 +1071,9 @@ public:
         if (dirty.exchange (false))
             applyParams();
 
+        if (stationDirty.load())
+            applyStationLocked();
+
         std::unique_lock<std::mutex> lock (sampleMutex, std::try_to_lock);
         const bool samplesOk = lock.owns_lock();
 
@@ -1059,7 +1155,14 @@ public:
         bool cap = recording.load();
         const float master = std::pow (10.0f, masterDb.load() / 20.0f);
 
-        const bool soloActive = anySoloActive();
+        // Pass 2: the Station's UNIFIED solo (item 20's rule) - a solo on
+        // ANY channel (a row, an instrument, an audio track, the vocal
+        // channel) silences every channel that is not itself soloed.
+        // Before this pass the rows and the audio tracks soloed in two
+        // separate worlds; one mixer means one solo logic.
+        bool anyAudioSoloNow = false;
+        for (int t = 0; t < kAudioTracks; ++t) anyAudioSoloNow = anyAudioSoloNow || audioSoloA[(size_t) t].load();
+        const bool soloActive = anySoloActive() || anyAudioSoloNow || synthSoloRt || pianoSoloRt || vocalSoloRt;
         float gains[kTracks];
         for (int t = 0; t < kTracks; ++t)
             gains[t] = (trackMute[t].load() || (soloActive && ! trackSolo[t].load())) ? 0.0f
@@ -1067,18 +1170,26 @@ public:
         const float clickLvl = metronomeLevel.load();
         if (! isPlayingNow) clickSamplesLeft = 0;
 
-        // Audio tracks (Fix pass item 35; item 60 made them many): each is
-        // silent when muted, or when a solo - instrument or audio - is
-        // active somewhere and this track is not itself soloed. Clips live
-        // on the audio timeline, which is not fenced by the pattern loop.
-        bool anyAudioSolo = false;
-        for (int t = 0; t < kAudioTracks; ++t) anyAudioSolo = anyAudioSolo || audioSoloA[(size_t) t].load();
+        // Audio tracks (Fix pass item 35; item 60 made them many). Clips
+        // live on the audio timeline, which is not fenced by the pattern.
         float aGain[kAudioTracks];
         for (int t = 0; t < kAudioTracks; ++t)
             aGain[t] = (audioMuteA[(size_t) t].load()
-                        || (soloActive && ! audioSoloA[(size_t) t].load())
-                        || (anyAudioSolo && ! audioSoloA[(size_t) t].load()))
+                        || (soloActive && ! audioSoloA[(size_t) t].load()))
                            ? 0.0f : audioGainA[(size_t) t].load();
+        // The group + instrument channel gates for this block. The synth
+        // and piano levels live inside their voices (their channel faders
+        // ARE those levels), so here they only get the mute/solo gate.
+        bool anyPadRowSolo = false;
+        for (int t = Sample1; t < Sample1 + kPads; ++t) anyPadRowSolo = anyPadRowSolo || trackSolo[t].load();
+        const float synthGate = (! synthMuteRt && (! soloActive || synthSoloRt)) ? 1.0f : 0.0f;
+        const float pianoGate = (! pianoMuteRt && (! soloActive || pianoSoloRt)) ? 1.0f : 0.0f;
+        const float vocalGainBlock = vocalGainRt * ((! vocalMuteRt && (! soloActive || vocalSoloRt)) ? 1.0f : 0.0f);
+        const float padBusGainBlock = padBusGainRt * ((! padBusMuteRt && (! soloActive || anyPadRowSolo)) ? 1.0f : 0.0f);
+        const int analysedCh = analysedChannel.load();
+        int anaW = analyserWrite.load();
+        float chanPkL[kNumChannels] = {}, chanPkR[kNumChannels] = {};
+        float masterPkL = 0.0f, masterPkR = 0.0f;
         const bool useClips = samplesOk && audioClipCount() > 0;
         unsigned int clipMask = 0; // clips sounding this block (item 54)
         // Item 36: the take records the CLEAN input - input-gain staging only.
@@ -1126,34 +1237,30 @@ public:
                 samplesToNextTick -= 1.0;
             }
 
+            // ---- sources, one per channel (Pass 2 routing) ----
             // Drums: a row bound to a sample (item 40) sounds its one-shot
             // voice instead of the synthesized drum (which then never
             // triggers, so its process() just returns silence).
+            float rowSig[kTracks] = {};
             float kv = kick.process(), snv = snare.process(), cv = clap.process();
             const float hv = hat.process();
             if (kitVoices[Kick].active)  kv  = renderOneShot (kitVoices[Kick]);
             if (kitVoices[Snare].active) snv = renderOneShot (kitVoices[Snare]);
             if (kitVoices[Clap].active)  cv  = renderOneShot (kitVoices[Clap]);
-            float hatMix = hv * gains[hatTrack];
-            pk[hatTrack] = std::max (pk[hatTrack], std::abs (hv * gains[hatTrack]));
+            rowSig[Kick] += kv;
+            rowSig[Snare] += snv;
+            rowSig[Clap] += cv;
             if (kitVoices[ClosedHat].active || kitVoices[OpenHat].active)
             {
-                hatMix = 0.0f;
                 for (int ht : { ClosedHat, OpenHat })
                     if (kitVoices[(size_t) ht].active)
-                    {
-                        const float pv = renderOneShot (kitVoices[(size_t) ht]) * gains[ht];
-                        hatMix += pv;
-                        pk[ht] = std::max (pk[ht], std::abs (pv));
-                    }
+                        rowSig[ht] += renderOneShot (kitVoices[(size_t) ht]);
             }
-            float mix = kv * gains[Kick] + snv * gains[Snare]
-                      + cv * gains[Clap]  + hatMix
-                      + synth.process() + piano.process();
-
-            pk[Kick]  = std::max (pk[Kick],  std::abs (kv * gains[Kick]));
-            pk[Snare] = std::max (pk[Snare], std::abs (snv * gains[Snare]));
-            pk[Clap]  = std::max (pk[Clap],  std::abs (cv * gains[Clap]));
+            else rowSig[hatTrack] += hv;
+            const float synthSig = synth.process();
+            const float pianoSig = piano.process();
+            float auditionSig = 0.0f;
+            float loosePadSig = 0.0f;
 
             if (samplesOk)
             {
@@ -1162,17 +1269,11 @@ public:
                 for (int p = 0; p < kPads; ++p)
                 {
                     const int row = Sample1 + p;
-                    if (row < activeTracks)
-                    {
-                        const float pv = pads.processPad (p) * gains[row];
-                        mix += pv;
-                        pk[row] = std::max (pk[row], std::abs (pv));
-                        if (std::abs (pv) > padPk) { padPk = std::abs (pv); padPkIdx = p; }
-                    }
+                    if (row < activeTracks) rowSig[row] += pads.processPad (p);
                     else
                     {
                         const float pv = pads.processPad (p);
-                        mix += pv;
+                        loosePadSig += pv;
                         if (std::abs (pv) > padPk) { padPk = std::abs (pv); padPkIdx = p; }
                     }
                 }
@@ -1180,23 +1281,74 @@ public:
                 for (int t = kFirstOwnRow; t < activeTracks; ++t)
                 {
                     auto& v = ownVoices[(size_t) (t - kFirstOwnRow)];
-                    if (v.active)
-                    {
-                        const float pv = renderOneShot (v) * gains[t];
-                        mix += pv;
-                        pk[t] = std::max (pk[t], std::abs (pv));
-                    }
+                    if (v.active) rowSig[t] += renderOneShot (v);
                 }
                 // the waveform panel's audition (item 46)
                 if (auditionVoice.active)
-                    mix += renderOneShot (auditionVoice);
+                    auditionSig = renderOneShot (auditionVoice);
             }
 
-            if (useDust) mix = dust.process (mix);
+            // ---- channel stage: strip -> fader -> pan -> bus ----
+            float beatL = 0.0f, beatR = 0.0f, padBusMono = 0.0f;
+            for (int t = 0; t < activeTracks; ++t)
+            {
+                float s = rowSig[t];
+                if (stripActiveRt[(size_t) t]) s = stripDsp[(size_t) t].process (s);
+                s *= gains[t];
+                pk[t] = std::max (pk[t], std::abs (s));
+                float gl, gr; panLaw (chanPanRt[(size_t) t], gl, gr);
+                chanPkL[t] = std::max (chanPkL[t], std::abs (s * gl));
+                chanPkR[t] = std::max (chanPkR[t], std::abs (s * gr));
+                if (t == analysedCh) analyserRing[(size_t) (anaW++ & (kAnalyserSize - 1))] = s;
+                if (isPadRow (t))
+                {
+                    padBusMono += s; // pad rows feed the PAD BUS (item 7+20)
+                    if (t >= Sample1 && t < Sample1 + kPads && std::abs (s) > padPk)
+                    { padPk = std::abs (s); padPkIdx = t - Sample1; }
+                }
+                else { beatL += s * gl; beatR += s * gr; }
+            }
+            {
+                // the pad bus: the pad rows' group channel (its strip,
+                // its fader, its pan) - one fader for the whole pad set
+                float s = padBusMono;
+                if (stripActiveRt[kPadBusChannel]) s = stripDsp[kPadBusChannel].process (s);
+                s *= padBusGainBlock;
+                float gl, gr; panLaw (chanPanRt[kPadBusChannel], gl, gr);
+                beatL += s * gl; beatR += s * gr;
+                chanPkL[kPadBusChannel] = std::max (chanPkL[kPadBusChannel], std::abs (s * gl));
+                chanPkR[kPadBusChannel] = std::max (chanPkR[kPadBusChannel], std::abs (s * gr));
+                if (analysedCh == kPadBusChannel) analyserRing[(size_t) (anaW++ & (kAnalyserSize - 1))] = s;
+            }
+            {
+                float s = synthSig;
+                if (stripActiveRt[kSynthChannel]) s = stripDsp[kSynthChannel].process (s);
+                s *= synthGate;
+                float gl, gr; panLaw (chanPanRt[kSynthChannel], gl, gr);
+                beatL += s * gl; beatR += s * gr;
+                chanPkL[kSynthChannel] = std::max (chanPkL[kSynthChannel], std::abs (s * gl));
+                chanPkR[kSynthChannel] = std::max (chanPkR[kSynthChannel], std::abs (s * gr));
+                if (analysedCh == kSynthChannel) analyserRing[(size_t) (anaW++ & (kAnalyserSize - 1))] = s;
+            }
+            {
+                float s = pianoSig;
+                if (stripActiveRt[kPianoChannel]) s = stripDsp[kPianoChannel].process (s);
+                s *= pianoGate;
+                float gl, gr; panLaw (chanPanRt[kPianoChannel], gl, gr);
+                beatL += s * gl; beatR += s * gr;
+                chanPkL[kPianoChannel] = std::max (chanPkL[kPianoChannel], std::abs (s * gl));
+                chanPkR[kPianoChannel] = std::max (chanPkR[kPianoChannel], std::abs (s * gr));
+                if (analysedCh == kPianoChannel) analyserRing[(size_t) (anaW++ & (kAnalyserSize - 1))] = s;
+            }
+            beatL += auditionSig + loosePadSig;
+            beatR += auditionSig + loosePadSig;
+
+            // Dust colours the whole beat bus, as it always has - now in
+            // stereo, one crusher per side, same settings.
+            if (useDust) { beatL = dust.process (beatL); beatR = dustR.process (beatR); }
 
             float vocalSample = 0.0f;
             if (wantVocal) vocalSample = vocal.process (vocalIn[i]);
-            if (useVocal) mix += vocalSample;
 
             if (cap && samplesOk && recLen < (int) recData.size())
             {
@@ -1206,53 +1358,80 @@ public:
                 if (recLen >= (int) recData.size()) recording.store (false); // length cap
             }
 
-            // The vocal bus (items 32/36): the stored take and the clips
-            // cut from it are the same CLEAN recording, so they sum here and
-            // run through the one playback chain - the mic-locker treatment
-            // is applied at playback, switchable any time, never burned in.
+            float masterL = beatL, masterR = beatR;
             {
-                float vocalBus = 0.0f;
-                bool vocalPresent = false;
+                // The VOCAL channel (items 26/32/36): the live monitor and
+                // the stored take's raw loop sum here, run through the
+                // take's playback treatment (item 36: the mic emulation is
+                // a stored playback setting), then this channel's strip.
+                float s = 0.0f;
+                if (useVocal) s += vocalSample;
                 if (samplesOk && takeOn.load() && takeLenAtomic.load() > 0 && isPlayingNow)
                 {
                     const long long rel = transportSamples - takeStartPosA.load();
-                    if (rel >= 0)
-                    {
-                        vocalBus += takeData[(size_t) (rel % takeLenAtomic.load())];
-                        vocalPresent = true;
-                    }
+                    if (rel >= 0) s += takeVocal.process (takeData[(size_t) (rel % takeLenAtomic.load())]);
                 }
-                // Fix pass 2 (item 48): clips sit on the AUDIO timeline,
-                // which is not fenced by the pattern loop - it runs while
-                // either transport runs, as far as the audio goes.
-                if (useClips && (isPlayingNow || audioNow))
+                if (stripActiveRt[kVocalChannel]) s = stripDsp[kVocalChannel].process (s);
+                s *= vocalGainBlock;
+                float gl, gr; panLaw (chanPanRt[kVocalChannel], gl, gr);
+                masterL += s * gl; masterR += s * gr;
+                chanPkL[kVocalChannel] = std::max (chanPkL[kVocalChannel], std::abs (s * gl));
+                chanPkR[kVocalChannel] = std::max (chanPkR[kVocalChannel], std::abs (s * gr));
+                if (analysedCh == kVocalChannel) analyserRing[(size_t) (anaW++ & (kAnalyserSize - 1))] = s;
+            }
+
+            // Audio tracks: clips sum per track (item 60), run through
+            // that track's own mic treatment + strip, then its fader/pan.
+            // Fix pass 2 (item 48): the audio timeline is not fenced by
+            // the pattern loop - it runs while either transport runs.
+            if (useClips && (isPlayingNow || audioNow))
+            {
+                float clipSig[kAudioTracks] = {};
+                bool clipHit[kAudioTracks] = {};
+                for (int ci = 0; ci < kMaxAudioClips; ++ci)
                 {
-                    for (int ci = 0; ci < kMaxAudioClips; ++ci)
+                    const auto& c = clipsA[(size_t) ci];
+                    if (! c.active.load()) continue;
+                    const int tr = std::clamp (c.track.load(), 0, kAudioTracks - 1);
+                    if (aGain[(size_t) tr] <= 0.0f) continue;
+                    const long long pos = audioPos - c.start.load();
+                    if (pos < 0 || pos >= c.length.load()) continue;
+                    const auto& data = clipData[(size_t) ci];
+                    const long long src = c.srcStart.load() + pos;
+                    if (src >= 0 && src < (long long) data.size())
                     {
-                        const auto& c = clipsA[(size_t) ci];
-                        if (! c.active.load()) continue;
-                        const float g = aGain[(size_t) std::clamp (c.track.load(), 0, kAudioTracks - 1)];
-                        if (g <= 0.0f) continue;
-                        const long long pos = audioPos - c.start.load();
-                        if (pos < 0 || pos >= c.length.load()) continue;
-                        const auto& data = clipData[(size_t) ci];
-                        const long long src = c.srcStart.load() + pos;
-                        if (src >= 0 && src < (long long) data.size())
-                        {
-                            vocalBus += data[(size_t) src] * g;
-                            vocalPresent = true;
-                            clipMask |= (1u << ci);
-                        }
+                        clipSig[tr] += data[(size_t) src];
+                        clipHit[tr] = true;
+                        clipMask |= (1u << ci);
                     }
                 }
-                if (vocalPresent) mix += takeVocal.process (vocalBus);
+                for (int t = 0; t < kAudioTracks; ++t)
+                {
+                    if (! clipHit[t]) continue;
+                    const int ch = kAudioChannelBase + t;
+                    float s = clipChains[(size_t) t].process (clipSig[t]);
+                    if (stripActiveRt[(size_t) ch]) s = stripDsp[(size_t) ch].process (s);
+                    s *= aGain[(size_t) t];
+                    float gl, gr; panLaw (chanPanRt[(size_t) ch], gl, gr);
+                    masterL += s * gl; masterR += s * gr;
+                    chanPkL[ch] = std::max (chanPkL[ch], std::abs (s * gl));
+                    chanPkR[ch] = std::max (chanPkR[ch], std::abs (s * gr));
+                    if (analysedCh == ch) analyserRing[(size_t) (anaW++ & (kAnalyserSize - 1))] = s;
+                }
             }
 
             if (isPlayingNow) { ++transportSamples; audioPos = transportSamples; }
             else if (audioNow) ++audioPos;
 
-            float l = mix, r = mix;
+            float l = masterL, r = masterR;
             if (useGlue) bus.process (l, r);
+            // Pass 2: the master limiter sits after the Glue - the last
+            // stage before the master fader's tanh (its distinct mastering
+            // LOOK is Pass 6; the DSP lands now).
+            if (masterLimiterOnRt) masterLimiter.processStereo (l, r);
+            masterPkL = std::max (masterPkL, std::abs (l));
+            masterPkR = std::max (masterPkR, std::abs (r));
+            if (analysedCh == kMasterChannel) analyserRing[(size_t) (anaW++ & (kAnalyserSize - 1))] = (l + r) * 0.5f;
 
             if (clickSamplesLeft > 0) // metronome click burst (post-glue, pre-master)
             {
@@ -1297,10 +1476,253 @@ public:
         audioPosAtomic.store (audioPos);
         soundingClipMaskA.store (clipMask);
         auditionSounding.store (auditionVoice.active);
+        // Peaks decay in the engine (per block) so EVERY reader can peek:
+        // the Station VU and the mixing board watch the same channels and
+        // must never starve each other the way consume-on-read would.
+        for (int ch = 0; ch < kNumChannels; ++ch)
+        {
+            chanPeakL[(size_t) ch].store (std::max (chanPkL[ch], chanPeakL[(size_t) ch].load() * 0.96f));
+            chanPeakR[(size_t) ch].store (std::max (chanPkR[ch], chanPeakR[(size_t) ch].load() * 0.96f));
+            chanCompGr[(size_t) ch].store (stripActiveRt[(size_t) ch] ? stripDsp[(size_t) ch].getCompGrDb() : 0.0f);
+            chanDeessGr[(size_t) ch].store (stripActiveRt[(size_t) ch] ? stripDsp[(size_t) ch].getDeessGrDb() : 0.0f);
+            chanLimGr[(size_t) ch].store (stripActiveRt[(size_t) ch] ? stripDsp[(size_t) ch].getLimiterGrDb() : 0.0f);
+        }
+        masterPeakL.store (std::max (masterPkL, masterPeakL.load() * 0.96f));
+        masterPeakR.store (std::max (masterPkR, masterPeakR.load() * 0.96f));
+        masterLimGr.store (masterLimiterOnRt ? masterLimiter.getGainReductionDb() : 0.0f);
+        analyserWrite.store (anaW);
         glueGr.store (useGlue ? bus.getGainReductionDb() : 0.0f);
     }
 
+    // ---- Pass 2: the Station API ----
+    // The settings-side station state (strips, pans, group channels, the
+    // master limiter) lives under stationMutex; the audio thread picks it
+    // up through stationDirty. These accessors are the UI's only door.
+    StripSettings getStripSettings (int ch) const
+    {
+        std::lock_guard<std::mutex> lock (stationMutex);
+        return (ch >= 0 && ch < kNumChannels) ? station.strips[(size_t) ch] : StripSettings();
+    }
+    void setStripSettings (int ch, const StripSettings& s)
+    {
+        if (ch < 0 || ch >= kNumChannels) return;
+        {
+            std::lock_guard<std::mutex> lock (stationMutex);
+            station.strips[(size_t) ch] = s;
+        }
+        stationDirty.store (true);
+        stationRevision.fetch_add (1);
+    }
+    float getChannelPan (int ch) const
+    {
+        if (ch < 0 || ch >= kNumChannels) return 0.0f;
+        std::lock_guard<std::mutex> lock (stationMutex);
+        return station.pan[(size_t) ch];
+    }
+    void setChannelPan (int ch, float pan)
+    {
+        if (ch < 0 || ch >= kNumChannels) return;
+        {
+            std::lock_guard<std::mutex> lock (stationMutex);
+            station.pan[(size_t) ch] = std::clamp (pan, -1.0f, 1.0f);
+        }
+        stationDirty.store (true);
+        stationRevision.fetch_add (1);
+    }
+
+    // One gain/mute/solo surface for every channel kind - the board and
+    // the Station read and write through these, never around them.
+    float getChannelGain (int ch) const
+    {
+        switch (channelKind (ch))
+        {
+            case KindRow:    return getTrackGain (ch);
+            case KindSynth:  return synthLevel.load();
+            case KindPiano:  return pianoLevel.load();
+            case KindPadBus: { std::lock_guard<std::mutex> lock (stationMutex); return station.padBusGain; }
+            case KindAudio:  return getAudioTrackGain (ch - kAudioChannelBase);
+            case KindVocal:  { std::lock_guard<std::mutex> lock (stationMutex); return station.vocalGain; }
+            default:         return dbToGain (masterDb.load());
+        }
+    }
+    void setChannelGain (int ch, float g)
+    {
+        switch (channelKind (ch))
+        {
+            case KindRow:    setTrackGain (ch, g); break;
+            case KindSynth:  setSynthLevel (g); break;
+            case KindPiano:  setPianoLevel (g); break;
+            case KindPadBus: { std::lock_guard<std::mutex> lock (stationMutex);
+                               station.padBusGain = std::clamp (g, 0.0f, 1.2f); }
+                             stationDirty.store (true); stationRevision.fetch_add (1); break;
+            case KindAudio:  setAudioTrackGain (ch - kAudioChannelBase, g); break;
+            case KindVocal:  { std::lock_guard<std::mutex> lock (stationMutex);
+                               station.vocalGain = std::clamp (g, 0.0f, 1.2f); }
+                             stationDirty.store (true); stationRevision.fetch_add (1); break;
+            default:         setMasterDb (std::max (-60.0f, 20.0f * std::log10 (std::max (g, 0.0001f)))); break;
+        }
+    }
+    bool getChannelMute (int ch) const
+    {
+        switch (channelKind (ch))
+        {
+            case KindRow:    return getTrackMute (ch);
+            case KindSynth:  { std::lock_guard<std::mutex> lock (stationMutex); return station.synthMute; }
+            case KindPiano:  { std::lock_guard<std::mutex> lock (stationMutex); return station.pianoMute; }
+            case KindPadBus: { std::lock_guard<std::mutex> lock (stationMutex); return station.padBusMute; }
+            case KindAudio:  return getAudioTrackMute (ch - kAudioChannelBase);
+            case KindVocal:  { std::lock_guard<std::mutex> lock (stationMutex); return station.vocalMute; }
+            default:         return false;
+        }
+    }
+    void setChannelMute (int ch, bool m)
+    {
+        switch (channelKind (ch))
+        {
+            case KindRow:    setTrackMute (ch, m); return;
+            case KindAudio:  setAudioTrackMute (ch - kAudioChannelBase, m); return;
+            case KindSynth:  { std::lock_guard<std::mutex> lock (stationMutex); station.synthMute = m; } break;
+            case KindPiano:  { std::lock_guard<std::mutex> lock (stationMutex); station.pianoMute = m; } break;
+            case KindPadBus: { std::lock_guard<std::mutex> lock (stationMutex); station.padBusMute = m; } break;
+            case KindVocal:  { std::lock_guard<std::mutex> lock (stationMutex); station.vocalMute = m; } break;
+            default: return;
+        }
+        stationDirty.store (true);
+        stationRevision.fetch_add (1);
+    }
+    bool getChannelSolo (int ch) const
+    {
+        switch (channelKind (ch))
+        {
+            case KindRow:    return getTrackSolo (ch);
+            case KindSynth:  { std::lock_guard<std::mutex> lock (stationMutex); return station.synthSolo; }
+            case KindPiano:  { std::lock_guard<std::mutex> lock (stationMutex); return station.pianoSolo; }
+            case KindAudio:  return getAudioTrackSolo (ch - kAudioChannelBase);
+            case KindVocal:  { std::lock_guard<std::mutex> lock (stationMutex); return station.vocalSolo; }
+            default:         return false; // the pad bus and master carry no solo
+        }
+    }
+    void setChannelSolo (int ch, bool s)
+    {
+        switch (channelKind (ch))
+        {
+            case KindRow:    setTrackSolo (ch, s); return;
+            case KindAudio:  setAudioTrackSolo (ch - kAudioChannelBase, s); return;
+            case KindSynth:  { std::lock_guard<std::mutex> lock (stationMutex); station.synthSolo = s; } break;
+            case KindPiano:  { std::lock_guard<std::mutex> lock (stationMutex); station.pianoSolo = s; } break;
+            case KindVocal:  { std::lock_guard<std::mutex> lock (stationMutex); station.vocalSolo = s; } break;
+            default: return;
+        }
+        stationDirty.store (true);
+        stationRevision.fetch_add (1);
+    }
+
+    bool getMasterLimiterOn() const { std::lock_guard<std::mutex> lock (stationMutex); return station.masterLimiterOn; }
+    void setMasterLimiterOn (bool on)
+    {
+        { std::lock_guard<std::mutex> lock (stationMutex); station.masterLimiterOn = on; }
+        stationDirty.store (true); stationRevision.fetch_add (1);
+    }
+    float getMasterLimiterCeilingDb() const { std::lock_guard<std::mutex> lock (stationMutex); return station.masterLimiterCeilingDb; }
+    void setMasterLimiterCeilingDb (float db)
+    {
+        { std::lock_guard<std::mutex> lock (stationMutex); station.masterLimiterCeilingDb = std::clamp (db, -12.0f, 0.0f); }
+        stationDirty.store (true); stationRevision.fetch_add (1);
+    }
+    int stationRevisionCount() const { return stationRevision.load(); }
+
+    // Per-channel meters (post-fader peaks + the strip's gain reduction).
+    float consumeChannelPeak (int ch, bool right)
+    {
+        if (ch < 0 || ch > kMasterChannel) return 0.0f;
+        auto& a = (ch == kMasterChannel) ? (right ? masterPeakR : masterPeakL)
+                                         : (right ? chanPeakR[(size_t) ch] : chanPeakL[(size_t) ch]);
+        return a.exchange (0.0f);
+    }
+    float peekChannelPeak (int ch, bool right) const
+    {
+        if (ch < 0 || ch > kMasterChannel) return 0.0f;
+        if (ch == kMasterChannel) return right ? masterPeakR.load() : masterPeakL.load();
+        return right ? chanPeakR[(size_t) ch].load() : chanPeakL[(size_t) ch].load();
+    }
+    float getChannelCompGrDb (int ch) const   { return (ch >= 0 && ch < kNumChannels) ? chanCompGr[(size_t) ch].load() : 0.0f; }
+    float getChannelDeessGrDb (int ch) const  { return (ch >= 0 && ch < kNumChannels) ? chanDeessGr[(size_t) ch].load() : 0.0f; }
+    float getChannelLimGrDb (int ch) const    { return (ch >= 0 && ch < kNumChannels) ? chanLimGr[(size_t) ch].load() : 0.0f; }
+    float getGlueGrDb() const                 { return glueGr.load(); }
+    float getMasterLimiterGrDb() const        { return masterLimGr.load(); }
+
+    // The graphic EQ's analyser: the selected channel's post-fader mono.
+    void setAnalysedChannel (int ch) { analysedChannel.store (std::clamp (ch, 0, kMasterChannel)); }
+    int analysedChannelId() const { return analysedChannel.load(); }
+    int copyAnalyserSamples (float* out, int maxN) const
+    {
+        const int n = std::min (maxN, kAnalyserSize);
+        const int w = analyserWrite.load();
+        for (int i = 0; i < n; ++i)
+            out[i] = analyserRing[(size_t) ((w - n + i) & (kAnalyserSize - 1))];
+        return n;
+    }
+
 private:
+    static float dbToGain (float db) { return std::pow (10.0f, db / 20.0f); }
+
+    // Constant-power pan with sqrt(2) centre compensation: centre keeps
+    // unity gain (existing mixes don't move level), a hard pan puts
+    // sqrt(2) on one side - the standard constant-power trade.
+    static void panLaw (float pan, float& gl, float& gr)
+    {
+        const float a = (std::clamp (pan, -1.0f, 1.0f) + 1.0f) * 0.78539816339f; // 0..pi/2
+        gl = std::cos (a) * 1.41421356f;
+        gr = std::sin (a) * 1.41421356f;
+    }
+
+    static StripChain::Params toChainParams (const StripSettings& s)
+    {
+        StripChain::Params cp;
+        cp.preampOn = s.preampOn; cp.preampDb = s.preampDb;
+        cp.hpfOn = s.hpfOn; cp.hpfHz = s.hpfHz;
+        cp.deessOn = s.deessOn; cp.deessAmount = s.deessAmount;
+        cp.compOn = s.compOn; cp.compThresholdDb = s.compThresholdDb;
+        cp.compRatio = s.compRatio; cp.compAttackMs = s.compAttackMs; cp.compReleaseMs = s.compReleaseMs;
+        cp.satOn = s.satOn; cp.satDrive = s.satDrive;
+        cp.eq.numBands = s.eqNumBands;
+        for (int i = 0; i < StripSettings::kEqBands; ++i)
+        {
+            cp.eq.bands[i].on = s.eq[i].on;
+            cp.eq.bands[i].type = (GraphicEq::Type) std::clamp (s.eq[i].type, 0, 4);
+            cp.eq.bands[i].freqHz = s.eq[i].freqHz;
+            cp.eq.bands[i].gainDb = s.eq[i].gainDb;
+            cp.eq.bands[i].q = s.eq[i].q;
+        }
+        cp.limiterOn = s.limiterOn; cp.limiterCeilingDb = s.limiterCeilingDb;
+        return cp;
+    }
+
+    // Audio thread, from process(): picks up settings-side station edits.
+    // try_lock like the sample path - a missed block just retries.
+    void applyStationLocked()
+    {
+        std::unique_lock<std::mutex> lock (stationMutex, std::try_to_lock);
+        if (! lock.owns_lock()) return;
+        stationDirty.store (false);
+        for (int ch = 0; ch < kNumChannels; ++ch)
+        {
+            stripDsp[(size_t) ch].setParams (toChainParams (station.strips[(size_t) ch]));
+            stripActiveRt[(size_t) ch] = stripDsp[(size_t) ch].isActive();
+            chanPanRt[(size_t) ch] = station.pan[(size_t) ch];
+        }
+        padBusGainRt = station.padBusGain; padBusMuteRt = station.padBusMute;
+        vocalGainRt = station.vocalGain;   vocalMuteRt = station.vocalMute; vocalSoloRt = station.vocalSolo;
+        synthMuteRt = station.synthMute;   synthSoloRt = station.synthSolo;
+        pianoMuteRt = station.pianoMute;   pianoSoloRt = station.pianoSolo;
+        masterLimiterOnRt = station.masterLimiterOn;
+        {
+            Limiter::Params lp;
+            lp.ceilingDb = station.masterLimiterCeilingDb;
+            masterLimiter.setParams (lp);
+        }
+    }
+
     void fireTick (int t, float swingPercent, bool samplesOk, double samplesPerTick)
     {
         playStep.store (t / kTicksPer16th);
@@ -1452,6 +1874,7 @@ private:
         S950Crusher::Params dp;
         dp.sampleRateHz = dustRate.load(); dp.filterQ = 1.1f;
         dust.setParams (dp);
+        dustR.setParams (dp); // Pass 2: the right side of the stereo beat bus
 
         BusCompressor::Params bp;
         bp.thresholdDb = glueThreshold.load(); bp.ratioIndex = 0; bp.attackIndex = 4;
@@ -1473,6 +1896,10 @@ private:
         vp.inputDb = vocalInputDb.load();
         vocal.setParams (vp);
         takeVocal.setParams (vp); // item 36: the take's playback treatment tracks the same settings
+        // Pass 2: each audio track's clips run through that track's own
+        // copy of the same mic treatment, so a clip sounds the way it did
+        // summed through the one chain - per channel now, not per bus.
+        for (auto& c : clipChains) c.setParams (vp);
     }
 
     double sr = 44100.0;
@@ -1486,6 +1913,10 @@ private:
     BusCompressor bus;
     VocalChain vocal;
     VocalChain takeVocal; // item 36: treats the clean recorded take at playback
+    S950Crusher dustR;    // Pass 2: the beat bus is stereo - one crusher per side
+    std::array<VocalChain, kAudioTracks> clipChains; // Pass 2: per-track clip treatment
+    std::array<StripChain, kNumChannels> stripDsp;   // Pass 2: the Station strips
+    Limiter masterLimiter;                           // Pass 2: after the Glue
 
     // pattern + mixer state (shared with the UI thread)
     std::array<std::atomic<uint8_t>, kPatterns * kTracks * kSteps> patGrid;
@@ -1607,5 +2038,34 @@ private:
     int hatTrack = ClosedHat;
 
     mutable std::mutex sampleMutex;
+
+    // ---- Pass 2: the Station state ----
+    struct StationState
+    {
+        std::array<StripSettings, kNumChannels> strips;
+        std::array<float, kNumChannels> pan {};
+        float padBusGain = 1.0f; bool padBusMute = false;
+        float vocalGain = 0.9f; bool vocalMute = false, vocalSolo = false;
+        bool synthMute = false, synthSolo = false, pianoMute = false, pianoSolo = false;
+        bool masterLimiterOn = false; float masterLimiterCeilingDb = -1.0f;
+    };
+    StationState station;
+    mutable std::mutex stationMutex;
+    std::atomic<bool> stationDirty { true };
+    std::atomic<int> stationRevision { 0 };
+    // audio-thread copies (written by applyStationLocked)
+    std::array<bool, kNumChannels> stripActiveRt {};
+    std::array<float, kNumChannels> chanPanRt {};
+    float padBusGainRt = 1.0f; bool padBusMuteRt = false;
+    float vocalGainRt = 0.9f; bool vocalMuteRt = false, vocalSoloRt = false;
+    bool synthMuteRt = false, synthSoloRt = false, pianoMuteRt = false, pianoSoloRt = false;
+    bool masterLimiterOnRt = false;
+    // per-channel meters + the EQ analyser ring
+    std::array<std::atomic<float>, kNumChannels> chanPeakL, chanPeakR, chanCompGr, chanDeessGr, chanLimGr;
+    std::atomic<float> masterPeakL { 0.0f }, masterPeakR { 0.0f }, masterLimGr { 0.0f };
+    static constexpr int kAnalyserSize = 4096;
+    std::array<float, kAnalyserSize> analyserRing {};
+    std::atomic<int> analyserWrite { 0 };
+    std::atomic<int> analysedChannel { 0 };
 };
 } // namespace boombap

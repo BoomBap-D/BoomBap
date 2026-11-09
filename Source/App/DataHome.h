@@ -16,10 +16,11 @@ inline juce::File dataHome()
 inline juce::File projectsDir() { return dataHome().getChildFile ("Projects"); }
 inline juce::File takesDir()    { return dataHome().getChildFile ("Takes"); }
 inline juce::File exportsDir()  { return dataHome().getChildFile ("Exports"); }
+inline juce::File presetsDir()  { return dataHome().getChildFile ("Presets"); } // Pass 2: strip presets
 
 inline void ensureDataHome()
 {
-    for (const auto& d : { dataHome(), projectsDir(), takesDir(), exportsDir() })
+    for (const auto& d : { dataHome(), projectsDir(), takesDir(), exportsDir(), presetsDir() })
         d.createDirectory();
 }
 

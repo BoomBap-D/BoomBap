@@ -34,6 +34,8 @@ target_sources(BoomBap PRIVATE
     Source/App/Playlist.h
     Source/App/Multitrack.h
     Source/App/SequencerPanel.h
+    Source/App/StationPanel.h
+    Source/App/UndoHistory.h
     Source/App/ProjectFile.cpp
     Source/App/ProjectFile.h
     Source/App/Engine/BoomBapEngine.h)
@@ -87,6 +89,8 @@ target_sources(BoomBapPlugin PRIVATE
     Source/App/Playlist.h
     Source/App/Multitrack.h
     Source/App/SequencerPanel.h
+    Source/App/StationPanel.h
+    Source/App/UndoHistory.h
     Source/App/ProjectFile.cpp
     Source/App/ProjectFile.h
     Source/App/Engine/BoomBapEngine.h)
@@ -169,6 +173,63 @@ if(BOOMBAP_BUILD_TESTS)
         target_link_libraries(PluginRenderTest PRIVATE X11)
     endif()
     add_test(NAME plugin_render COMMAND PluginRenderTest)
+
+    # undo/redo test (Pass 2 item 38: step/fader/clip/strip actions undo
+    # and redo to exact prior state; transport never enters the history)
+    add_executable(UndoTest
+        Tests/UndoTest.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(UndoTest PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(UndoTest PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(UndoTest PRIVATE X11)
+    endif()
+    add_test(NAME undo COMMAND UndoTest)
+
+    # dock-back regression test (item 66: pop-out -> dock-back cycles for
+    # all three production views, both dock paths, plus shutdown-while-
+    # popped; the tab system lives in MainComponent, hosted here by the
+    # plugin editor exactly as in EditorLifecycleTest)
+    add_executable(DockBackTest
+        Tests/DockBackTest.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(DockBackTest PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(DockBackTest PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(DockBackTest PRIVATE X11)
+    endif()
+    add_test(NAME dock_back COMMAND DockBackTest)
+
+    # micro-fix regression test (items 67-68: the docked multitrack's
+    # lane scrollbar must actually scroll - its range model pinned the
+    # start at 0 - and the mixer-order chips must render PLAYING as an
+    # outline box and SELECTED as a different, solid light; the
+    # component is header-only over the pure-C++ engine, hosted on the
+    # desktop exactly as the app hosts it)
+    add_executable(MicroFixTest Tests/MicroFixTest.cpp)
+    target_link_libraries(MicroFixTest PRIVATE juce::juce_gui_basics)
+    target_compile_definitions(MicroFixTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(MicroFixTest PRIVATE X11)
+    endif()
+    add_test(NAME micro_fix COMMAND MicroFixTest)
 
     # recent-projects list test (storage logic, no UI)
     add_executable(RecentProjectsTest Tests/RecentProjectsTest.cpp)

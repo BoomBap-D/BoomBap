@@ -268,9 +268,11 @@ public:
         // item 44: the selected pad's waveform, trimmable in place
         waveView.onTrim = [this] (float s, float e)
         {
+            if (onBeforeChange) onBeforeChange();
             startRow.slider.setValue (s * 100.0, juce::dontSendNotification);
             endRow.slider.setValue (e * 100.0, juce::dontSendNotification);
             pushEditor();
+            if (onAfterChange) onAfterChange();
         };
         waveView.onAudition = [this]
         {
@@ -285,14 +287,24 @@ public:
         setupRow (gainRow, "Gain", 0.0, 2.0, 0.01, 1.0);
         setupRow (velRow, "Vel sens", 0.0, 1.0, 0.01, 1.0);
 
-        reverseToggle.onClick = [this] { pushEditor(); };
+        reverseToggle.onClick = [this]
+        {
+            if (onBeforeChange) onBeforeChange();
+            pushEditor();
+            if (onAfterChange) onAfterChange();
+        };
         addAndMakeVisible (reverseToggle);
 
         muteLabel.setText ("Mute group", juce::dontSendNotification);
         addAndMakeVisible (muteLabel);
         muteGroupBox.addItem ("None", 1);
         for (int gnum = 1; gnum <= 4; ++gnum) muteGroupBox.addItem (juce::String (gnum), gnum + 1);
-        muteGroupBox.onChange = [this] { pushEditor(); };
+        muteGroupBox.onChange = [this]
+        {
+            if (onBeforeChange) onBeforeChange();
+            pushEditor();
+            if (onAfterChange) onAfterChange();
+        };
         addAndMakeVisible (muteGroupBox);
 
         hint.setText ("Click a pad to play it. Pads 1-3 are the sequencer's sample rows - same samples, "
@@ -333,12 +345,20 @@ public:
         selected = pad;
         for (int i = 0; i < 16; ++i) pads[i].setSelected (i == pad);
         pullEditor();
+        // Pass 2: the Station follows the pad to its row channel (the hit
+        // itself is performance - never an undoable edit)
+        if (onSelectPad) onSelectPad (boombap::BoomBapEngine::Sample1 + pad);
         if (trigger)
         {
             engine.triggerPad (pad, 1.0f);
             pads[pad].triggerFlash();
         }
     }
+
+    // Pass 2 (item 38): undo gesture hooks + Station channel selection,
+    // wired by the owner after construction.
+    std::function<void()> onBeforeChange, onAfterChange;
+    std::function<void (int)> onSelectPad;
 
     void paint (juce::Graphics& g) override
     {
@@ -425,6 +445,8 @@ private:
         row.slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 52, 22);
         row.slider.setRange (lo, hi, step);
         row.slider.setDoubleClickReturnValue (true, def); // Pass 1: double-click reset
+        row.slider.onDragStart = [this] { if (onBeforeChange) onBeforeChange(); };
+        row.slider.onDragEnd = [this] { if (onAfterChange) onAfterChange(); };
         row.slider.onValueChange = [this] { pushEditor(); };
         addAndMakeVisible (row.slider);
     }
