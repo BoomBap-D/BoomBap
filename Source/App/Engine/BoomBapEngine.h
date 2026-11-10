@@ -76,8 +76,25 @@ public:
     {
         return (t >= 0 && t < kTracks) ? trackContent[(size_t) t] : std::string();
     }
+    // Round 5 (item 107): the owner's own name for a track, set by
+    // right-click rename. It lives beside the content name and WINS
+    // over it everywhere (displayTrackName below, and every surface
+    // reads names through channelDisplayName). An empty string means
+    // no override - the track falls back to its derived name. Like
+    // the content names this is message-thread state (the audio path
+    // never reads names), persisted through ProjectSettings.
+    void setTrackCustomName (int t, const std::string& name)
+    {
+        if (t >= 0 && t < kTracks) trackCustom[(size_t) t] = name.substr (0, 48);
+    }
+    std::string trackCustomName (int t) const
+    {
+        return (t >= 0 && t < kTracks) ? trackCustom[(size_t) t] : std::string();
+    }
     std::string displayTrackName (int t) const
     {
+        const std::string custom = trackCustomName (t);
+        if (! custom.empty()) return custom;
         const std::string c = trackContentName (t);
         return c.empty() ? trackName (t) : c;
     }
@@ -208,6 +225,7 @@ public:
             trackGain[t].store (o.trackGain[t].load());
             trackMute[t].store (o.trackMute[t].load());
             trackSolo[t].store (o.trackSolo[t].load());
+            trackCustom[(size_t) t] = o.trackCustom[(size_t) t];
         }
         bpm.store (o.bpm.load());           swing.store (o.swing.load());
         masterDb.store (o.masterDb.load());
@@ -300,6 +318,7 @@ public:
             p.trackGain[t] = trackGain[t].load();
             p.trackMute[t] = trackMute[t].load();
             p.trackSolo[t] = trackSolo[t].load();
+            p.trackCustomName[t] = trackCustom[t]; // item 107
         }
         for (int pt = 0; pt < kPatterns; ++pt)
         {
@@ -403,6 +422,7 @@ public:
             trackGain[t].store (p.trackGain[t]);
             trackMute[t].store (p.trackMute[t]);
             trackSolo[t].store (p.trackSolo[t]);
+            trackCustom[(size_t) t] = p.trackCustomName[t]; // item 107
         }
         for (int pt = 0; pt < kPatterns; ++pt)
         {
@@ -1078,6 +1098,118 @@ public:
         padHit[pad].store ((int) std::lround (std::clamp (velocity, 0.0f, 1.0f) * 127.0f));
     }
 
+    // =================================================================
+    // Round 5 (item 105): THE LIVE-NOTE FUNNEL.
+    //
+    // Every played note - the on-screen keyboard's mouse, the QWERTY
+    // rows, and (Pass 5) MIDI controllers - enters through liveNoteOn
+    // / liveNoteOff and nowhere else. Producers (any thread) push a
+    // small event into a lock-free ring; the audio thread drains it
+    // in process(), beside the pad hits, under the same sample lock.
+    //
+    // Routing (the selected channel is whatever the caller passes -
+    // the UI reads the one global selection at press time):
+    //   rows 0..31   the row's sound pitched around C4 (note 60):
+    //                pad rows go through the MPC pad voice path, so
+    //                trims, the item-101 envelope and tune apply
+    //                exactly as a pad hit hears them; a kit-bound
+    //                drum row sounds its kit voice pitched; the
+    //                unbound kick is pitch-tracked; the unbound
+    //                snare / hats / clap have no pitched voice and
+    //                simply sound at their root; rows past the pad
+    //                bank (their own samples, item 39) pitch their
+    //                own voice.
+    //   Synth (32)   synth voices at pitch (root C3); note-off
+    //                releases the voice for real.
+    //   Piano (33)   piano voices at pitch (root C4); note-off is
+    //                the damper - the ring collapses fast.
+    //   anything else (pad bus, audio tracks, vocal, master) is not
+    //   a note channel and stays silent.
+    //
+    // Note-off is a NO-OP for the one-shot voices (rows): classic
+    // sampler behaviour - a drum hit rings out; only the sustained
+    // instruments (synth, piano damper) answer an off. Live notes
+    // never touch recording (item 56: they are not takes) and never
+    // reach the item-31 pad capture (a separate, deliberate door);
+    // they die with the global stop like every voice (item 45).
+    // =================================================================
+    static bool channelIsPlayable (int channel)
+    {
+        return (channel >= 0 && channel < kTracks)
+            || channel == kSynthChannel || channel == kPianoChannel;
+    }
+
+    void liveNoteOn (int channel, int midiNote, float velocity)
+    {
+        if (! channelIsPlayable (channel)) return;
+        pushLiveNote ({ channel, midiNote, std::clamp (velocity, 0.0f, 1.0f), true });
+    }
+    void liveNoteOff (int channel, int midiNote)
+    {
+        if (! channelIsPlayable (channel)) return;
+        pushLiveNote ({ channel, midiNote, 0.0f, false });
+    }
+    // Release whatever a channel is holding (the UI's focus-loss and
+    // "no stuck notes, ever" backstop).
+    void liveAllNotesOff (int channel)
+    {
+        if (channel == kSynthChannel)
+            for (int n = 0; n < 128; ++n) liveNoteOff (channel, n);
+    }
+
+    // Round 5 (item 105d): STEP-WRITE. While the transport plays, a
+    // played note lands - quantized to the step sounding right now -
+    // in the PLAYING pattern, in the channel's Round 4 lane:
+    //   Synth / Piano   their pitched lanes, value = offset + 25
+    //                   (the roll's own encoding, roots C3 / C4).
+    //   Kick / pad rows a note AT the root (C4) writes the row's STEP
+    //                   - Round 4 shows a row's steps as notes on its
+    //                   root row, so writing the root writes the step;
+    //                   a note OFF the root writes the row's melody
+    //                   lane at that pitch and claims the lane's
+    //                   source for the row (the same claim opening
+    //                   the roll on the row would make).
+    //   Snare / hats / clap / own-sample rows have no pitched lane:
+    //                   any note writes the row's step.
+    // Returns true when a note landed. Message thread; undo grouping
+    // is the caller's (one gesture per pass).
+    bool stepWriteNote (int channel, int midiNote, float velocity)
+    {
+        if (! playing.load()) return false;
+        const int step = currentStep();
+        if (step < 0 || step >= kSteps) return false;
+        const int pat = playPattern.load();
+        const auto laneValue = [] (int offset)
+        {
+            return std::clamp (offset + 25, 1, 49);
+        };
+        if (channel == kSynthChannel)
+        {
+            patSynth[(size_t) pat * kSteps + step].store (laneValue (midiNote - 48));
+            dirty.store (true);
+            return true;
+        }
+        if (channel == kPianoChannel)
+        {
+            patPiano[(size_t) pat * kSteps + step].store (laneValue (midiNote - 60));
+            dirty.store (true);
+            return true;
+        }
+        if (channel < 0 || channel >= kTracks || channel >= numTracksA.load()) return false;
+        const int vel127 = std::clamp ((int) std::lround (velocity * 127.0f), 1, 127);
+        const int offset = midiNote - 60;
+        if (trackHasGhostLane (channel) && offset != 0)
+        {
+            patMelody[(size_t) pat * kSteps + step].store (laneValue (offset));
+            patMelodySource[(size_t) pat].store (channel == Kick ? 0 : channel - Sample1 + 1);
+            dirty.store (true);
+            return true;
+        }
+        patGrid[(size_t) gIdx (pat, channel, step)].store ((uint8_t) vel127);
+        dirty.store (true);
+        return true;
+    }
+
     void setPadParams (int pad, const MpcPads::PadParams& p)
     {
         if (pad < 0 || pad >= kPads) return;
@@ -1597,6 +1729,13 @@ public:
                     capturedPad.store (p);
                 }
             }
+
+        // Round 5 (item 105): the live-note funnel drains here, under
+        // the same lock as the pad hits - the voices it fires read the
+        // same sample state. (Events wait in the ring while a sample
+        // swap holds the lock, exactly like a pad hit does.)
+        if (samplesOk)
+            drainLiveNotes();
 
         const double samplesPerTick = sr * 60.0 / ((double) bpm.load() * kPPQN);
         const bool isPlayingNow = playing.load();
@@ -2560,6 +2699,7 @@ private:
     // Round 3 (item 88): per-row content names (see setTrackContentName).
     // Plain strings: written and read on the message thread only.
     std::array<std::string, kTracks> trackContent;
+    std::array<std::string, kTracks> trackCustom;   // Round 5 (item 107): rename overrides
 
     std::array<std::atomic<float>, kTracks> trackGain;
     std::array<std::atomic<bool>, kTracks> trackMute;
@@ -2572,6 +2712,124 @@ private:
     double clickPhase = 0.0, clickFreq = 1500.0; // audio thread only
     std::array<std::atomic<float>, kTracks> trackPeak;
     std::array<std::atomic<int>, MpcPads::kNumPads> padHit;
+
+    // Round 5 (item 105): the live-note funnel's ring (see the API
+    // above). Single-producer (the message thread in practice) /
+    // single-consumer (the audio thread) with atomic indices; 128
+    // events is far past any chord a hand can play in one block.
+    struct LiveNoteEvent { int channel = 0, note = 60; float velocity = 0.0f; bool on = false; };
+    static constexpr int kLiveRingSize = 128;
+    LiveNoteEvent liveRing[kLiveRingSize];
+    std::atomic<int> liveWrite { 0 }, liveRead { 0 };
+    void pushLiveNote (LiveNoteEvent e)
+    {
+        const int w = liveWrite.load();
+        if (w - liveRead.load() >= kLiveRingSize) return; // full: drop, never block a UI
+        liveRing[(size_t) (w & (kLiveRingSize - 1))] = e;
+        liveWrite.store (w + 1);
+    }
+    void drainLiveNotes()
+    {
+        for (;;)
+        {
+            const int r = liveRead.load();
+            if (r >= liveWrite.load()) break;
+            const auto e = liveRing[(size_t) (r & (kLiveRingSize - 1))];
+            liveRead.store (r + 1);
+            fireLiveNote (e);
+        }
+    }
+    // Audio thread, under the sample lock. Fires the channel's own
+    // voice - the same voices the sequencer's trigger() fires - so a
+    // keyboard note hears the row's trims, envelopes and kit exactly
+    // as a step does.
+    void fireLiveNote (const LiveNoteEvent& e)
+    {
+        const int offset = e.note - 60; // semitones from the C4 root
+        if (! e.on)
+        {
+            if (e.channel == kSynthChannel) synth.noteOff ((float) (e.note - 48));
+            else if (e.channel == kPianoChannel) piano.noteOff ((float) offset);
+            return; // one-shots ignore offs - classic sampler behaviour
+        }
+        const float vel = std::clamp (e.velocity, 0.0f, 1.0f);
+        if (e.channel == kSynthChannel)
+        {
+            synth.noteOn ((float) (e.note - 48), vel, (int) (sr * 60.0)); // held until the off
+            return;
+        }
+        if (e.channel == kPianoChannel)
+        {
+            piano.noteOn ((float) offset, vel);
+            return;
+        }
+        if (e.channel < 0 || e.channel >= kTracks || e.channel >= numTracksA.load()) return;
+        const int t = e.channel;
+        if (isPadRow (t))
+        {
+            const int pad = t - Sample1;
+            pads.triggerWithTune (pad, vel, offset);
+            lastPadIndex.store (pad);
+            padActivityPeak.store (std::max (padActivityPeak.load(), vel));
+            return;
+        }
+        // A bound sample voice started at a pitch: tryKitVoice's
+        // start, with the playback rate bent by the note's offset.
+        auto startPitched = [this] (OneShotVoice& v,
+                                    const std::shared_ptr<const std::vector<float>>& data,
+                                    double srcSr, float v0, int off)
+        {
+            if (data == nullptr) return;
+            v.data = data;
+            v.rate = (srcSr / sr) * std::pow (2.0, off / 12.0);
+            v.pos = 0.0;
+            v.age = 0;
+            v.vel = std::clamp (v0, 0.0f, 1.0f);
+            v.active = true;
+        };
+        if (t >= kFirstOwnRow)
+        {
+            const size_t oi = (size_t) (t - kFirstOwnRow);
+            if (ownBoundA[oi].load())
+                startPitched (ownVoices[oi], ownData[oi], ownSrcSr[oi], vel, offset);
+            return;
+        }
+        switch (t)
+        {
+            case Kick:
+                if (kitBoundA[(size_t) Kick].load())
+                    startPitched (kitVoices[(size_t) Kick], kitData[(size_t) Kick],
+                                  kitSrcSr[(size_t) Kick], vel, offset);
+                else
+                    kick.triggerPitched (vel, offset);
+                break;
+            case Snare:
+                if (kitBoundA[(size_t) Snare].load())
+                    startPitched (kitVoices[(size_t) Snare], kitData[(size_t) Snare],
+                                  kitSrcSr[(size_t) Snare], vel, offset);
+                else snare.trigger (vel);
+                break;
+            case ClosedHat:
+                if (kitBoundA[(size_t) ClosedHat].load())
+                    startPitched (kitVoices[(size_t) ClosedHat], kitData[(size_t) ClosedHat],
+                                  kitSrcSr[(size_t) ClosedHat], vel, offset);
+                else { hat.triggerClosed (vel); hatTrack = ClosedHat; } // chokes an open hat
+                break;
+            case OpenHat:
+                if (kitBoundA[(size_t) OpenHat].load())
+                    startPitched (kitVoices[(size_t) OpenHat], kitData[(size_t) OpenHat],
+                                  kitSrcSr[(size_t) OpenHat], vel, offset);
+                else { hat.triggerOpen (vel); hatTrack = OpenHat; }
+                break;
+            case Clap:
+                if (kitBoundA[(size_t) Clap].load())
+                    startPitched (kitVoices[(size_t) Clap], kitData[(size_t) Clap],
+                                  kitSrcSr[(size_t) Clap], vel, offset);
+                else clap.trigger (vel);
+                break;
+            default: break;
+        }
+    }
     std::array<std::atomic<int>, kPatterns * kSteps> patMelody;
     std::array<std::atomic<int>, kPatterns> patMelodySource;
     std::array<std::atomic<int>, kPatterns * kSteps> patSynth, patPiano;

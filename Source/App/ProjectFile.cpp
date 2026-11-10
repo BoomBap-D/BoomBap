@@ -61,7 +61,18 @@ String projectToJson (const ProjectData& d, const File& projectFile)
                                 { "piano", var (laneNotes (s.patPiano[p])) } }));
     }
     for (int t = 0; t < ProjectSettings::kTracks; ++t)
-        tracks.add (object ({ { "gain", (double) s.trackGain[t] }, { "mute", s.trackMute[t] }, { "solo", s.trackSolo[t] } }));
+    {
+        auto* o = new DynamicObject();
+        o->setProperty ("gain", (double) s.trackGain[t]);
+        o->setProperty ("mute", s.trackMute[t]);
+        o->setProperty ("solo", s.trackSolo[t]);
+        // Round 5 (item 107): the rename override rides the track
+        // object, written only when set (like the item-101 "env"
+        // keys) so unrenamed projects stay byte-compatible.
+        if (! s.trackCustomName[t].empty())
+            o->setProperty ("name", String (s.trackCustomName[t]));
+        tracks.add (var (o));
+    }
 
     Array<var> chain;
     for (int i = 0; i < ProjectSettings::kSongSlots; ++i) chain.add (s.songChain[i]);
@@ -361,6 +372,8 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
             s.trackGain[t] = getF ((*tr)[t], "gain", s.trackGain[t]);
             s.trackMute[t] = getB ((*tr)[t], "mute", s.trackMute[t]);
             s.trackSolo[t] = getB ((*tr)[t], "solo", s.trackSolo[t]);
+            // Round 5 (item 107): the rename override (absent = none).
+            s.trackCustomName[t] = (*tr)[t].getProperty ("name", var()).toString().toStdString();
         }
 
     const var drums = root.getProperty ("drums", var());

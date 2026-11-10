@@ -402,6 +402,30 @@ if(BOOMBAP_BUILD_TESTS)
     endif()
     add_test(NAME round4 COMMAND Round4Test)
 
+    # round-5 test (Breakdown #1 items 105/107: the KEYBOARD tab - the
+    # live-note funnel measured per track kind, the two-row QWERTY map,
+    # focus rules, step-write into the playing pattern's lanes with
+    # one undo gesture per pass - and track rename: the engine-level
+    # override every surface reads, persisted in the project file)
+    add_executable(Round5Test
+        Tests/Round5Test.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(Round5Test PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(Round5Test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(Round5Test PRIVATE X11)
+    endif()
+    add_test(NAME round5 COMMAND Round5Test)
+
     # recent-projects list test (storage logic, no UI)
     add_executable(RecentProjectsTest Tests/RecentProjectsTest.cpp)
     target_link_libraries(RecentProjectsTest PRIVATE juce::juce_gui_extra juce::juce_gui_basics)

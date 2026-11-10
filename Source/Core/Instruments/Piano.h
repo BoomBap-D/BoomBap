@@ -60,6 +60,23 @@ public:
         v->active = true;
     }
 
+    // Round 5 (item 105): the damper. A piano note is percussive and
+    // rings to its natural decay while HELD; a note-off drops the
+    // pedal - the voice's decay collapses to a fast ~60 ms damp
+    // instead of the multi-second ring. One voice per call.
+    void noteOff (float semitones)
+    {
+        const double target = (double) (kRootHz * std::pow (2.0f, semitones / 12.0f));
+        const double dampSamples = std::max (20.0, 0.06 * sr);
+        for (auto& v : voices)
+            if (v.active && std::abs (v.freq - target) < 1.0e-6)
+            {
+                for (int k = 0; k < kHarmonics; ++k)
+                    v.coef[k] = (float) std::pow (0.001, 1.0 / dampSamples);
+                return;
+            }
+    }
+
     void stopAll()
     {
         for (auto& v : voices) v.active = false;

@@ -275,8 +275,8 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     // replacing the old corner toggle D could not find. Every tab can
     // pop out into its own window and dock back (his Reaper grammar).
     {
-        const char* names[3] = { "STEP SEQUENCER", "PAD BANK", "AUDIO MULTITRACK" };
-        for (int i = 0; i < 3; ++i)
+        const char* names[4] = { "STEP SEQUENCER", "PAD BANK", "AUDIO MULTITRACK", "KEYBOARD" };
+        for (int i = 0; i < 4; ++i)
         {
             tabButtons[i].setButtonText (names[i]);
             tabButtons[i].onClick = [this, i] { selectTab (i); };
@@ -300,10 +300,17 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         scb.onNameMenu = [this] (int t)
         {
             // kit rows get the item 40 menu; user-added rows get the
-            // item 69 menu (Load sample / Delete track)
+            // item 69 menu (Load sample / Delete track); pad rows get
+            // the Round 5 rename menu (item 107 - every row's menu
+            // carries Rename now)
             if (t >= boombap::BoomBapEngine::kFirstOwnRow) showRowMenu (t);
+            else if (t >= boombap::BoomBapEngine::Sample1
+                     && t < boombap::BoomBapEngine::Sample1 + boombap::BoomBapEngine::kPads)
+                showPadRowMenu (t);
             else showKitMenu (t);
         };
+        // Round 5 (item 107): a committed rename is one undoable edit.
+        scb.onRenameTrack = [this] (int t, const juce::String& name) { commitTrackRename (t, name); };
         // item 87: the row's visible X runs the same guarded, undoable
         // delete as the menu (item 69) - one action, two doors.
         scb.onDeleteRow = [this] (int t) { deleteSequencerRow (t); };
@@ -359,6 +366,18 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     multitrack->setHomePathText ("BoomBap home: " + boombap::dataHome().getFullPathName()
                                  + "  -  takes land in its Takes folder");
     multitrack->setSelectedChannel (selectedChannel); // item 68: the strip's initial light
+
+    // Round 5 (item 105): the KEYBOARD tab - same item-59 discipline
+    // (a hidden child until updateTabChrome shows it). Its notes go
+    // through the owner's one door (keyboardNoteOn for step-write,
+    // the engine funnel for everything), never around it.
+    keyboardPanel = std::make_unique<KeyboardPanel> (engine);
+    keyboardPanel->setLookAndFeel (&lookAndFeel);
+    keyboardPanel->getSelectedChannel = [this] { return selectedChannel; };
+    keyboardPanel->onNoteOn = [this] (int ch, int note, float vel) { keyboardNoteOn (ch, note, vel); };
+    keyboardPanel->onNoteOff = [this] (int ch, int note) { engine.liveNoteOff (ch, note); };
+    addChildComponent (keyboardPanel.get());
+    keyboardPanel->setVisible (false);
     updateTabChrome();
     refreshGrid();
 
@@ -591,6 +610,7 @@ juce::Component* MainComponent::tabContent (int index)
 {
     if (index == 0) return sequencerPanel.get();
     if (index == 1) return mpcPanel.get();
+    if (index == 3) return keyboardPanel.get();
     return multitrack.get();
 }
 
@@ -600,6 +620,15 @@ void MainComponent::selectTab (int index)
     updateTabChrome();
     if (index == 2 && multitrack != nullptr && ! tabPoppedOut[2])
         multitrack->refreshFromEngine();
+    // Round 5 (item 105c): selecting the KEYBOARD tab hands it the
+    // keyboard focus, so the QWERTY rows play immediately - and
+    // leaving the tab moves focus away, which is what makes the
+    // capture rule ("QWERTY only while this tab is active") true.
+    if (index == 3 && keyboardPanel != nullptr && ! tabPoppedOut[3])
+    {
+        keyboardPanel->refreshTarget();
+        keyboardPanel->grabKeyboardFocus();
+    }
     resized();
     repaint();
 }
@@ -621,7 +650,7 @@ void MainComponent::popOutTab (int index)
 {
     auto* content = tabContent (index);
     if (content == nullptr || tabPoppedOut[index]) return;
-    static const char* titles[3] = { "BoomBap - Step Sequencer", "BoomBap - Pad Bank", "BoomBap - Audio Multitrack" };
+    static const char* titles[4] = { "BoomBap - Step Sequencer", "BoomBap - Pad Bank", "BoomBap - Audio Multitrack", "BoomBap - Keyboard" };
     auto win = std::make_unique<PopOutWindow> (titles[index], [this, index] { dockTab (index); });
     win->setLookAndFeel (&lookAndFeel); // like every other window (items 77/78: its title bar is BoomBap-drawn)
     win->setDockGuard (this);
@@ -662,7 +691,7 @@ void MainComponent::dockTab (int index)
 
 void MainComponent::updateTabChrome()
 {
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 4; ++i)
     {
         const bool sel = i == activeTab;
         tabButtons[i].setColour (TextButton::buttonColourId, sel ? boombap::ui::accent() : boombap::ui::panelAlt());
@@ -676,14 +705,20 @@ void MainComponent::updateTabChrome()
 }
 
 // Item 40: clicking a kit row's name offers to change that row's sound.
+// Round 5 (item 107): every row's menu also carries Rename track...
 void MainComponent::showKitMenu (int track)
 {
     juce::PopupMenu menu;
     menu.addItem (1, "Load sample for this row...");
     menu.addItem (2, "Reset to the built-in sound", engine.kitHasSample (track));
+    menu.addItem (3, "Rename track...");
     menu.showMenuAsync (juce::PopupMenu::Options(), [this, track] (int choice)
     {
         if (choice == 1) openSampleChooser (track);
+        else if (choice == 3)
+        {
+            if (sequencerPanel != nullptr) sequencerPanel->showRenameEditor (track);
+        }
         else if (choice == 2)
         {
             runUndoable ([this, track]
@@ -704,11 +739,104 @@ void MainComponent::showRowMenu (int track)
     juce::PopupMenu menu;
     menu.addItem (1, "Load sample for this row...");
     menu.addItem (2, "Delete track");
+    menu.addItem (3, "Rename track...");
     menu.showMenuAsync (juce::PopupMenu::Options(), [this, track] (int choice)
     {
         if (choice == 1) openSampleChooser (track);
         else if (choice == 2) deleteSequencerRow (track);
+        else if (choice == 3)
+        {
+            if (sequencerPanel != nullptr) sequencerPanel->showRenameEditor (track);
+        }
     });
+}
+
+// Round 5 (item 107): the pad rows had no name menu at all before
+// this round - theirs carries the one thing every row gets: Rename.
+// (A pad row's sample is the pad's business - the pad bank's own
+// menus own loading there.)
+void MainComponent::showPadRowMenu (int track)
+{
+    juce::PopupMenu menu;
+    menu.addItem (1, "Rename track...");
+    menu.showMenuAsync (juce::PopupMenu::Options(), [this, track] (int choice)
+    {
+        if (choice == 1 && sequencerPanel != nullptr)
+            sequencerPanel->showRenameEditor (track);
+    });
+}
+
+// Round 5 (item 107): a committed rename. The custom name lives in
+// the engine beside Round 3's derived names and overrides them
+// everywhere the one channelDisplayName is read; an empty commit
+// clears the override. One undoable edit; playback is untouched
+// (names are message-thread state - the audio path never reads
+// them, so renaming mid-play cannot disturb a sounding note).
+void MainComponent::commitTrackRename (int track, const juce::String& text)
+{
+    if (track < 0 || track >= kTracks) return;
+    const std::string name = text.trim().toStdString();
+    if (engine.trackCustomName (track) == name) return; // no-op commits cost no undo step
+    runUndoable ([this, track, name]
+    {
+        engine.setTrackCustomName (track, name);
+    });
+    // runUndoable already refreshed the standard views; the sequencer
+    // row label + the roll's drop-down read the name on their own
+    // paths, so refresh those explicitly too.
+    if (sequencerPanel != nullptr) sequencerPanel->refreshRowName (track);
+    if (pianoRoll != nullptr) pianoRoll->refreshFromEngine();
+    if (keyboardPanel != nullptr) keyboardPanel->refreshTarget();
+}
+
+// Round 5 (item 105): the keyboard tab's ONE note door on the owner
+// side. Every note-on - mouse or QWERTY, they converge in the panel
+// before they get here - sounds through the engine's live-note
+// funnel, and, while WRITE is armed and the transport plays, also
+// lands in the playing pattern at the playhead (the engine's
+// stepWriteNote, the Round 4 lane model). Audition-only while WRITE
+// is off or the transport is stopped.
+void MainComponent::keyboardNoteOn (int channel, int note, float velocity)
+{
+    engine.liveNoteOn (channel, note, velocity);
+    if (keyboardPanel != nullptr && keyboardPanel->isWriteArmed() && engine.isPlaying())
+    {
+        if (! stepGestureOpen)
+        {
+            beginUndoGesture();
+            stepGestureOpen = history.gestureIsOpen();
+            lastStepWriteStep = -1;
+        }
+        if (engine.stepWriteNote (channel, note, velocity))
+            lastStepWriteStep = engine.currentStep();
+    }
+}
+
+// Round 5 (item 105d): the step-write undo grouping - ONE gesture
+// per pass. A pass ends when the playhead wraps to an earlier step,
+// the transport stops, WRITE is disarmed, or the track changes
+// (selectChannel closes it too); the next written note opens the
+// next pass's gesture. Runs on the UI timer, beside the history's
+// own idle auto-close (which only ever closes a gesture whose JSON
+// stopped changing - a written note changes it).
+void MainComponent::updateStepWriteGesture()
+{
+    if (! stepGestureOpen) return;
+    bool close = false;
+    if (! engine.isPlaying()) close = true;
+    else if (keyboardPanel == nullptr || ! keyboardPanel->isWriteArmed()) close = true;
+    else
+    {
+        const int s = engine.currentStep();
+        if (s >= 0 && lastStepWriteStep >= 0 && s < lastStepWriteStep) close = true; // wrapped
+        else if (s >= 0) lastStepWriteStep = s;
+    }
+    if (close)
+    {
+        stepGestureOpen = false;
+        lastStepWriteStep = -1;
+        endUndoGesture();
+    }
 }
 
 // Fix Pass 3 (item 69): delete a user-added sequencer row whole - its
@@ -896,6 +1024,17 @@ void MainComponent::selectChannel (int ch)
     // lights the same row here.
     if (sequencerPanel != nullptr)
         sequencerPanel->setSelectedRow (selectedChannel);
+    // Round 5: the keyboard plays the selected track, so its header
+    // names it; a selection change also ends any step-write pass in
+    // flight (a phrase belongs to one track).
+    if (keyboardPanel != nullptr)
+        keyboardPanel->refreshTarget();
+    if (stepGestureOpen)
+    {
+        stepGestureOpen = false;
+        lastStepWriteStep = -1;
+        endUndoGesture();
+    }
 }
 
 // =====================================================================
@@ -922,7 +1061,7 @@ void MainComponent::updateMinimiseCoupling (bool minimised)
 {
     juce::DocumentWindow* aux[] = { stationWindow.get(),
                                     productionWindows[0].get(), productionWindows[1].get(),
-                                    productionWindows[2].get(),
+                                    productionWindows[2].get(), productionWindows[3].get(),
                                     padWindow.get(), pianoWindow.get(), playlistWindow.get(),
                                     audioWindow.get() };
     if (minimised)
@@ -1066,6 +1205,7 @@ bool MainComponent::keyPressed (const KeyPress& key)
 void MainComponent::timerCallback()
 {
     pollMinimiseCoupling(); // item 102: follow the main window's minimise state
+    updateStepWriteGesture(); // Round 5: one step-write undo gesture per pass
     mainClock.setPosition (engine.transportPosition(), engine.getSampleRate(),
                            (double) engine.getBpm(), clockFormat); // item 93
     if (sequencerPanel != nullptr) sequencerPanel->tick();
@@ -1413,6 +1553,7 @@ void MainComponent::resized()
     tabButtons[0].setBounds (RB (20, 178, 190, 28));
     tabButtons[1].setBounds (RB (218, 178, 150, 28));
     tabButtons[2].setBounds (RB (376, 178, 210, 28));
+    tabButtons[3].setBounds (RB (594, 178, 150, 28)); // Round 5: KEYBOARD
     patternModeButton.setBounds (RB (1096, 178, 140, 28)); // item 99b
     songModeButton.setBounds (RB (1244, 178, 140, 28));
     popOutButton.setBounds (RB (1420, 178, 112, 28));
@@ -1423,6 +1564,8 @@ void MainComponent::resized()
         mpcPanel->setBounds (RB (16, 212, 1528, 336));
     if (multitrack != nullptr && ! tabPoppedOut[2])
         multitrack->setBounds (RB (16, 212, 1528, 336));
+    if (keyboardPanel != nullptr && ! tabPoppedOut[3])
+        keyboardPanel->setBounds (RB (16, 212, 1528, 336));
 
     // waveform panel
     for (int i = 0; i < 3; ++i)

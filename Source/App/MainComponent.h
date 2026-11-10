@@ -12,6 +12,7 @@
 #include "UiComponents.h"
 #include "UndoHistory.h"
 #include "StationPanel.h"
+#include "KeyboardPanel.h"
 
 class PadBankComponent;
 class PadWindow;
@@ -93,6 +94,8 @@ public:
     // sequencer panel and the real minimise-coupling step - the same
     // objects and functions the UI drives, no test-only back doors.
     SequencerPanel* sequencerPanelComponent() { return sequencerPanel.get(); }
+    // Round 5: the keyboard tab's panel, for the suite + the shots.
+    KeyboardPanel* keyboardPanelComponent() { return keyboardPanel.get(); }
     void driveMinimiseCoupling (bool minimised) { updateMinimiseCoupling (minimised); }
     int auxWindowsHiddenByMinimise() const { return (int) hiddenByMinimise.size(); }
     void driveLoadWaveformSample (int slot, const juce::File& f)
@@ -180,7 +183,13 @@ private:
     void updateTabChrome();
     void showKitMenu (int track);               // item 40
     void showRowMenu (int track);               // Fix Pass 3 item 69: user-row name menu
+    void showPadRowMenu (int track);            // Round 5 item 107: pad rows get a (rename) menu too
     void deleteSequencerRow (int track);        // Fix Pass 3 item 69: one undoable row deletion
+    // Round 5: the keyboard tab's note door + step-write bookkeeping,
+    // and the rename commit (items 105/107).
+    void keyboardNoteOn (int channel, int note, float velocity);
+    void updateStepWriteGesture();
+    void commitTrackRename (int track, const juce::String& text);
     juce::Component* tabContent (int index);
     // audio device setup (Pass 1 item 8) + autosave / recovery (item 7)
     void showAudioSettings();
@@ -356,14 +365,22 @@ private:
     // Fix pass 2, items 37/42: the Production Area is a TAB BAR - STEP
     // SEQUENCER / MPC PANEL / AUDIO MULTITRACK - and every tab can pop
     // out into its own window and dock back (his Reaper grammar).
-    juce::TextButton tabButtons[3];
+    // Round 5 (item 105): KEYBOARD joins as the fourth tab, same
+    // grammar - docked in the bottom section, pop-out capable.
+    juce::TextButton tabButtons[4];
     juce::TextButton popOutButton { "Pop out" };
     juce::Label tabPoppedLabel;
     int activeTab = 0;
-    bool tabPoppedOut[3] = {};
-    std::unique_ptr<juce::DocumentWindow> productionWindows[3];
+    bool tabPoppedOut[4] = {};
+    std::unique_ptr<juce::DocumentWindow> productionWindows[4];
     std::unique_ptr<PadBankComponent> mpcPanel; // the MPC PANEL tab's pad bank
     std::unique_ptr<MultitrackComponent> multitrack;
+    std::unique_ptr<KeyboardPanel> keyboardPanel; // Round 5 (item 105)
+    // Round 5 (item 105d): step-write undo bookkeeping - a gesture
+    // opens on a pass's first written note and closes when the pass
+    // ends (playhead wrap, transport stop, WRITE off, track change).
+    bool stepGestureOpen = false;
+    int lastStepWriteStep = -1;
 
     // item 40: audio files bound to rows outside the sample slots and
     // pad bank (kit rows 0-4, added rows 21+) - persisted in the project

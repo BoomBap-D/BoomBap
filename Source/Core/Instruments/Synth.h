@@ -63,6 +63,21 @@ public:
         v->active = true;
     }
 
+    // Round 5 (item 105): a real note-off for live playing, so a held
+    // keyboard note ends when the key comes up instead of when its
+    // gate runs out. Releases at most one voice per call (the noteOn
+    // pitch is recomputed identically, so the match is exact).
+    void noteOff (float semitones)
+    {
+        const double target = (double) (kRootHz * std::pow (2.0f, semitones / 12.0f));
+        for (auto& v : voices)
+            if (v.active && ! v.releasing && std::abs (v.freq - target) < 1.0e-6)
+            {
+                v.releasing = true;
+                return;
+            }
+    }
+
     void stopAll()
     {
         for (auto& v : voices) v.active = false;

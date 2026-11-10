@@ -29,6 +29,9 @@ public:
         std::function<void()> onBeforeChange;
         std::function<void()> onAfterChange;
         std::function<void (int)> onSelectRow;
+        // Round 5 (item 107): a rename committed in the inline editor
+        // (already trimmed; empty = clear the override).
+        std::function<void (int, const juce::String&)> onRenameTrack;
     };
 
     SequencerPanel (boombap::BoomBapEngine& eng, Callbacks cb)
@@ -369,16 +372,67 @@ public:
             if (e.eventComponent == &rows[t].name)
             {
                 if (callbacks.onSelectRow) callbacks.onSelectRow (t);
-                if (e.mods.isRightButtonDown()
-                    && (t <= boombap::BoomBapEngine::Clap
-                        || t >= boombap::BoomBapEngine::kFirstOwnRow)
-                    && callbacks.onNameMenu)
+                // Round 5 (item 107): EVERY row's right-click opens
+                // its menu now - the pad rows (5..20) had none, and
+                // rename belongs on all of them.
+                if (e.mods.isRightButtonDown() && callbacks.onNameMenu)
                     callbacks.onNameMenu (t);
                 return;
             }
     }
 
+    // Round 5 (item 107): the inline rename editor, opened over the
+    // row's name by the owner's menu. Prefilled with the CURRENT
+    // custom name (the derived name shows as the placeholder, so
+    // clearing the box and committing is visibly "back to the file
+    // name"). Enter commits, Esc cancels, losing focus commits -
+    // the JUCE editor convention; a guard keeps a commit single.
+    void showRenameEditor (int track)
+    {
+        if (track < 0 || track >= kTracks) return;
+        cancelRenameEditor();
+        renameTrack = track;
+        renameEditor = std::make_unique<juce::TextEditor>();
+        auto& ed = *renameEditor;
+        ed.setText (juce::String (engine.trackCustomName (track)), false);
+        ed.setTextToShowWhenEmpty (juce::String (engine.displayTrackName (track)),
+                                   boombap::ui::muted());
+        ed.setSelectAllWhenFocused (true);
+        ed.setFont (juce::Font (13.0f));
+        ed.setColour (juce::TextEditor::backgroundColourId, boombap::ui::panelAlt());
+        ed.setColour (juce::TextEditor::textColourId, boombap::ui::text());
+        ed.setColour (juce::TextEditor::highlightColourId, boombap::ui::accent());
+        ed.setBounds (rows[track].name.getBounds());
+        ed.onReturnKey = [this] { commitRenameEditor(); };
+        ed.onEscapeKey = [this] { cancelRenameEditor(); };
+        ed.onFocusLost = [this] { commitRenameEditor(); };
+        gridContent.addAndMakeVisible (ed);
+        ed.grabKeyboardFocus();
+    }
+    bool renameEditorOpen() const { return renameEditor != nullptr; }
+    // Test seams: the same commit/cancel the editor's keys run.
+    void commitRenameForTest() { commitRenameEditor(); }
+    void cancelRenameForTest() { cancelRenameEditor(); }
+    juce::TextEditor* renameEditorForTest() { return renameEditor.get(); }
+
 private:
+    void commitRenameEditor()
+    {
+        if (renameEditor == nullptr || renameCommitting) return;
+        renameCommitting = true;
+        const int track = renameTrack;
+        const juce::String text = renameEditor->getText().trim();
+        renameEditor.reset();
+        renameTrack = -1;
+        renameCommitting = false;
+        if (callbacks.onRenameTrack) callbacks.onRenameTrack (track, text);
+    }
+    void cancelRenameEditor()
+    {
+        if (renameEditor == nullptr) return;
+        renameEditor.reset();
+        renameTrack = -1;
+    }
     static constexpr int kTracks = boombap::BoomBapEngine::kTracks;
     static constexpr int kSteps  = boombap::BoomBapEngine::kSteps;
 
@@ -575,6 +629,10 @@ private:
     // Item 76 swipe state (see applySwipe).
     bool swipeHeld = false;
     int swipeTrack = -1, swipeValue = 0, lastSwipeStep = -1, lastRowH = 0;
+    // Round 5 (item 107): the inline rename editor's state.
+    std::unique_ptr<juce::TextEditor> renameEditor;
+    int renameTrack = -1;
+    bool renameCommitting = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SequencerPanel)
 };
