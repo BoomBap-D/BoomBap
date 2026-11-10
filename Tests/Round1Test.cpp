@@ -181,10 +181,15 @@ int main()
         check (selects == 2 && lastSelect == 3, "86: a right name click still selects first");
         check (menus == 1 && lastMenu == 3, "86: a right name click opens the row menu");
 
-        // A pad row's name has no menu on either button.
+        // A pad row's name: Round 5 (item 107) supersedes the Round 1
+        // rule written here before - pad rows had no menu then; now
+        // EVERY row's right-click opens its menu, because rename
+        // belongs on all of them. The select-first half of the old
+        // rule stands.
         auto& name10 = panel.rowNameLabel (10);
         panel.mouseDown (makeEvent (name10, 5.0f, 5.0f, true));
-        check (lastSelect == 10 && menus == 1, "86: a pad-row name selects; it has no menu to open");
+        check (lastSelect == 10 && menus == 2 && lastMenu == 10,
+               "86/107: a pad-row name selects, and its menu opens (the rename menu since Round 5)");
 
         // Item 86: the selected row's name carries the standout light.
         panel.setSelectedRow (3);
