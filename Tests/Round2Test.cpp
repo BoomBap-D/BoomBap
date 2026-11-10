@@ -386,48 +386,54 @@ int main()
                "95: the cap is painted at the value's own position");
         fader4->mouseUp (makeEvent (*fader4, cap.x, cap.y - 45.0f));
         fader4->mouseDown (makeEvent (*fader4, cap.x, cap.y, 2)); // double-click
-        check (std::abs (fader4->getValue() - 0.8) < 0.01 && std::abs ((double) eng.getChannelGain (4) - 0.8) < 0.01,
-               "95: double-click resets the board fader (item 6 survives)");
+        // AMENDED by Round 6 (item 113): the double-click target used
+        // to be 0.8 - the track rows' old per-kind default. Item 113
+        // makes every fader start FLAT and return to FLAT: 1.0.
+        check (std::abs (fader4->getValue() - 1.0) < 0.01 && std::abs ((double) eng.getChannelGain (4) - 1.0) < 0.01,
+               "95/113: double-click returns the board fader to FLAT (item 6 survives, item 113's target)");
 
         // ---- item 93: the Station transport + clock ----------------
+        // AMENDED by Round 6 (item 115): the labelled text buttons are
+        // family-A console keys now (glyphs, no text). The suite takes
+        // them from the panel's transport door and presses them
+        // through the keys' own mouse handler; item 93's semantics
+        // (park / step / double-press bar) are asserted unchanged.
         st->setBoardMode (false);
         pump (20);
-        std::vector<juce::TextButton*> sbtns;
-        collectChildren (*st, sbtns);
-        juce::TextButton* toStart = nullptr; juce::TextButton* rew = nullptr;
-        juce::TextButton* toEnd = nullptr;   juce::TextButton* stop = nullptr;
-        for (auto* b : sbtns)
-        {
-            if (b->getButtonText() == "|<< START") toStart = b;
-            if (b->getButtonText() == "REW") rew = b;
-            if (b->getButtonText() == "END >>|") toEnd = b;
-            if (b->getButtonText() == "STOP") stop = b;
-        }
-        check (toStart != nullptr && rew != nullptr && toEnd != nullptr && stop != nullptr,
-               "93: the Station transport carries TO START / REW / STOP / TO END");
+        auto* toStart = st->stationTransportButtonForTest (0);
+        auto* rew     = st->stationTransportButtonForTest (1);
+        auto* stop    = st->stationTransportButtonForTest (4);
+        auto* toEnd   = st->stationTransportButtonForTest (6);
+        check (toStart != nullptr && rew != nullptr && stop != nullptr && toEnd != nullptr
+                && toStart->getGlyph() == TransportButton::Glyph::ToStart
+                && rew->getGlyph() == TransportButton::Glyph::Rewind
+                && stop->getGlyph() == TransportButton::Glyph::Stop
+                && toEnd->getGlyph() == TransportButton::Glyph::ToEnd,
+               "93/115: the Station transport carries TO START / REW / STOP / TO END (family-A keys)");
+        auto pressKey = [] (TransportButton* b) { b->mouseDown (makeEvent (*b, 5.0f, 5.0f)); };
         const long long len = eng.transportLengthSamples();
         const double step = eng.stepSamples();
-        toEnd->triggerClick();
+        pressKey (toEnd);
         pump (30);
         check (eng.transportStartPosition() == len, "93: TO END parks at the end of the pattern");
-        rew->triggerClick();
+        pressKey (rew);
         pump (30);
         check (std::abs ((double) (len - eng.transportStartPosition()) - step) < 4.0,
                "93: one REW press parks one step back");
-        rew->triggerClick(); // inside the double-press window
+        pressKey (rew); // inside the double-press window
         pump (30);
         check (std::abs ((double) (len - eng.transportStartPosition()) - 17.0 * step) < 6.0,
                "93: a double REW press parks a bar further back");
-        rew->triggerClick(); // the pair was consumed: a step again
+        pressKey (rew); // the pair was consumed: a step again
         pump (30);
         check (std::abs ((double) (len - eng.transportStartPosition()) - 18.0 * step) < 6.0,
                "93: the third press is a single step again");
-        toStart->triggerClick();
+        pressKey (toStart);
         pump (30);
         check (eng.transportStartPosition() == 0, "93: TO START parks at zero");
-        toEnd->triggerClick();
+        pressKey (toEnd);
         pump (30);
-        stop->triggerClick();
+        pressKey (stop);
         pump (30);
         renderBlocks (eng, 2);
         check (eng.transportStartPosition() == 0 && eng.transportPosition() == 0,

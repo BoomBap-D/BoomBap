@@ -189,8 +189,12 @@ int main()
     ProjectData oldf;
     check (projectFromJson ("{\"format\":\"boombap-project\",\"version\":1}", projectA, oldf, err),
            "pre-fix-pass file loads");
-    check (! oldf.settings.audioClips[0].active && oldf.settings.audioGain[0] == 0.9f,
-           "old files get the default audio track and no clips");
+    // AMENDED by Round 6 (item 113): the no-data default for a
+    // channel gain used to be 0.9; item 113 makes every fader start
+    // FLAT, so a legacy file carrying no gain data now comes up at
+    // unity (stored values still win wherever a file carries them).
+    check (! oldf.settings.audioClips[0].active && oldf.settings.audioGain[0] == 1.0f,
+           "old files get the default audio track (flat, item 113) and no clips");
 
     std::printf ("Fix pass 2: track count, row samples, 32 steps\n");
     ProjectData td;

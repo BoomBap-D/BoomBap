@@ -363,8 +363,12 @@ int main()
         {
             auto m = fresh();
             m->clearPattern();
-            m->loadPadSample (4, std::vector<float> (8000, 0.4f), sr);
-            m->setMelodySource (5);   // pad 5
+            // AMENDED by Round 6 (item 109): the melody lane sounds the
+            // sample ROWS' own store now - rows and pads are separate
+            // stores, so the lane's source sample is loaded as a ROW
+            // sample (source 5 = sample row 5, the lane's own world).
+            m->loadSample (BoomBapEngine::Sample1 + 4, std::vector<float> (8000, 0.4f), sr);
+            m->setMelodySource (5);   // sample row 5
             m->setMelodyStep (0, 25); // root note on step 1
             m->setPlaying (true);
             assert (peakOf (render (*m, sr / 2)) > 0.1f);
@@ -503,14 +507,21 @@ int main()
         assert (peakRange (clicks, stepSamples * 4, stepSamples * 4 + 1500) > 0.05f); // beat 2 click
         assert (peakRange (clicks, stepSamples * 2, stepSamples * 2 + 1500) < 0.01f); // no click off the beat
 
-        // pad activity: a sequencer pad hit and a live pad hit both register
+        // pad activity: a live pad hit registers.
+        // AMENDED by Round 6 (item 109): the first half used to assert
+        // a sequencer ROW step also registered as PAD activity - true
+        // only while a row WAS its pad. Rows hold their own store now:
+        // a row step sounds the row and touches no pad state, which is
+        // what the first block asserts instead (the row still SOUNDS -
+        // the render peak is the row channel's business, checked by
+        // the row suites; here the pad-activity signals must stay cold).
         auto p = fresh();
         p->loadSample (BoomBapEngine::Sample1, std::vector<float> (4000, 0.5f), sr);
         p->setStep (BoomBapEngine::Sample1, 0, 127);
         p->setPlaying (true);
         render (*p, 2048);
-        assert (p->consumePadActivityPeak() > 0.05f);
-        assert (p->lastTriggeredPad() == 0);
+        assert (p->consumePadActivityPeak() < 0.05f);
+        assert (p->lastTriggeredPad() == -1);
         auto p2 = fresh();
         p2->loadPadSample (5, std::vector<float> (4000, 0.5f), sr);
         p2->triggerPad (5, 1.0f);

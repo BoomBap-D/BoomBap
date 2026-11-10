@@ -454,16 +454,27 @@ public:
             expectEquals (engine.ghostNoteValue (BoomBapEngine::Kick, 5), 0, "the kick lost the lane");
         }
 
-        beginTest ("item 99a: the strip shows under a lane-owning row only, and obeys its switch");
+        beginTest ("item 99a/125: the strip shows under a CONTENT-carrying row only, and obeys its switch");
         {
+            // AMENDED by Round 6 (item 125): Round 4 showed the strip
+            // for any lane-OWNING row the moment it was selected; the
+            // owner's rule now is that the ghost is earned by content
+            // - the lane must hold notes. The setup therefore gives
+            // the kick's lane a note, and the block also asserts the
+            // new law (an owned but EMPTY lane raises nothing).
             BoomBapEngine engine;
             engine.prepare (sr);
+            engine.setEditPattern (0);
+            engine.setMelodySource (0); // the kick owns the lane
             SequencerPanel::Callbacks cb;
             SequencerPanel panel (engine, cb);
             panel.setSize (1580, 360);
             panel.setGhostEnabled (true);
             panel.setSelectedRow (BoomBapEngine::Kick);
-            expect (panel.ghostStripShowing(), "strip under the kick");
+            expect (! panel.ghostStripShowing(), "125: an owned but empty lane raises no strip");
+            engine.setMelodyStep (5, 30);
+            panel.refreshGrid();
+            expect (panel.ghostStripShowing(), "strip under the kick once its lane carries a note");
             panel.setSelectedRow (BoomBapEngine::Snare);
             expect (! panel.ghostStripShowing(), "no strip under a lane-less row");
             panel.setSelectedRow (BoomBapEngine::Kick);

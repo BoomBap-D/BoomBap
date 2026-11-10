@@ -431,8 +431,13 @@ int main()
         check (std::abs (tgt.startFrac - 0.2f) < 0.001f && std::abs (tgt.endFrac - 0.8f) < 0.001f
                  && tgt.envPoints.size() == 5,
                "100: the copy carries the settings snapshot (trim + envelope)");
-        check (seq->rowNameLabel (14).getText() == "Round3Snare",
-               "100: the target pad's row takes the sample's name too");
+        // AMENDED by Round 6 (item 109 - D's ruling): this line used
+        // to assert the target pad's ROW took the sample's name too.
+        // That was the pad<->row coupling itself: rows and pads are
+        // separate stores now, a pad copy names nothing but the pad,
+        // and the row keeps its own (here still empty) name.
+        check (seq->rowNameLabel (14).getText() == "TRACK 15",
+               "100/109: the target pad's row does NOT take the pad's name (item 109 decoupling)");
         auto* tabBank = dynamic_cast<PadBankComponent*> (main->tabContentComponent (1));
         check (tabBank != nullptr && tabBank->padCaption (9) == "Round3Snare",
                "100: the target pad's caption names the copied sample");

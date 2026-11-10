@@ -169,8 +169,20 @@ int main (int argc, char* argv[])
             auto* editor = inst->createEditor();
             if (editor != nullptr)
             {
-                check (editor->getWidth() == 1560 && editor->getHeight() == 900,
-                       "editor opens at the app's landscape size");
+                // The CLAMP CONTRACT (item 1's fit-the-screen law),
+                // not exact pixels: the editor asks for 1560x900 and
+                // the display's usable area caps it. The exact-pixel
+                // assertion this replaces failed on any smaller
+                // screen (GitHub's 1280x1024 xvfb) while the app was
+                // behaving exactly as designed - the zipcheck verdict,
+                // Round 6. The clamp itself is the owner's law and
+                // does not change.
+                const auto* disp = juce::Desktop::getInstance().getDisplays().getPrimaryDisplay();
+                const auto usable = disp != nullptr ? disp->userArea
+                                                    : juce::Rectangle<int> (1560, 900);
+                check (editor->getWidth()  == juce::jmin (1560, usable.getWidth())
+                    && editor->getHeight() == juce::jmin (900,  usable.getHeight()),
+                       "editor opens at 1560x900, clamped to the display's usable area");
                 if (std::getenv ("PLUGIN_TEST_NO_HOST") == nullptr)
                 {
                     editor->addToDesktop (0);

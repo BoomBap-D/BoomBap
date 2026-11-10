@@ -374,7 +374,15 @@ int main (int argc, char** argv)
             const double pOff = peakOf (a, skip), pOn = peakOf (b, skip);
             std::printf ("PASS2 LIMITER: off peak=%.4f, on peak=%.4f (ceiling -18 dB)\n", pOff, pOn);
             check (pOff > 0.14, "P2/limiter: the unlimited signal is hot enough to test against");
-            check (pOn < 0.125 && pOn < pOff * 0.8, "P2/limiter: the ceiling holds through the plugin");
+            // AMENDED by Round 6 (item 113): the absolute bound used to
+            // be 0.125, which silently encoded the vocal channel's old
+            // 0.85 default gain. Item 113 makes every fader start FLAT
+            // (1.0), so the same limiter output - the ceiling itself
+            // still holds at -18 dB in the strip - measures ~0.126 at
+            // the channel's unity output. The bound moves to 0.13; the
+            // relative cut (pOn < pOff * 0.8) is unchanged and is the
+            // behavioural law.
+            check (pOn < 0.13 && pOn < pOff * 0.8, "P2/limiter: the ceiling holds through the plugin");
         }
     }
 
