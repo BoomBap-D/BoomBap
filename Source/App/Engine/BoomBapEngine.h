@@ -163,7 +163,7 @@ public:
     BoomBapEngine()
     {
         for (auto& c : patGrid) c.store (0);
-        for (auto& g : trackGain) g.store (0.8f);
+        for (auto& g : trackGain) g.store (1.0f); // item 113: every fader starts FLAT
         for (auto& m : trackMute) m.store (false);
         for (auto& s : trackSolo) s.store (false);
         for (auto& p : trackPeak) p.store (0.0f);
@@ -180,7 +180,7 @@ public:
         for (auto& n : blkLenA) n.store (2);
         for (auto& b : kitBoundA) b.store (false);
         for (auto& b : ownBoundA) b.store (false);
-        for (auto& g : audioGainA) g.store (0.9f);
+        for (auto& g : audioGainA) g.store (1.0f); // item 113: flat
         for (auto& m : audioMuteA) m.store (false);
         for (auto& s : audioSoloA) s.store (false);
         loadDefaultPattern();
@@ -192,6 +192,7 @@ public:
         sr = sampleRate;
         kick.prepare (sr); snare.prepare (sr); hat.prepare (sr); clap.prepare (sr);
         pads.prepare (sr);
+        rowPads.prepare (sr); // Round 6 (item 109): the sequencer rows' own store
         dust.prepare (sr);
         dustR.prepare (sr);
         bus.prepare (sr);
@@ -302,6 +303,7 @@ public:
         stationDirty.store (true);
         clipRevision.fetch_add (1);
         pads.stopAll();
+        rowPads.stopAll();
         synth.stopAll();
         piano.stopAll();
         dirty.store (true);
@@ -571,7 +573,7 @@ public:
     {
         std::lock_guard<std::mutex> lock (sampleMutex);
         if (track >= Sample1 && track < Sample1 + kPads)
-            pads.clearSample (track - Sample1);
+            rowPads.clearSample (track - Sample1); // item 109: the ROW's own store
         else if (track >= kFirstOwnRow && track < kTracks)
         {
             ownData[(size_t) (track - kFirstOwnRow)].reset();
@@ -630,8 +632,17 @@ public:
     }
 
     // ---------------- transport ----------------
-    void setPlaying (bool p)      { playing.store (p); }
+    void setPlaying (bool p)      { playing.store (p); if (! p) pausedA.store (false); }
     bool isPlaying() const        { return playing.load(); }
+
+    // ---- Round 6 (item 115): PAUSE. Freezes the playhead where it
+    // stands - the transport stops advancing but stays engaged, and
+    // PLAY from pause resumes at the frozen position (the audio
+    // thread re-enters the grid there, exactly like a live seek).
+    // STOP clears it (stopAllSound); a pause requested while stopped
+    // is dropped, so the flag can never linger into the next start.
+    void setPaused (bool p)       { pausedA.store (p && playing.load()); }
+    bool isPaused() const         { return pausedA.load() && playing.load(); }
 
     // ---- Fix pass 2 item 45: STOP takes priority over EVERYTHING. ----
     // Every sounding thing - pad one-shots (run-on included), synth/piano
@@ -642,6 +653,7 @@ public:
     void stopAllSound()
     {
         playing.store (false);
+        pausedA.store (false); // Round 6 (item 115): STOP clears a pause too
         audioPlaying.store (false);
         stopAllRequested.store (true);
         // Round 2 (item 93): STOP also returns the transport park to
@@ -843,6 +855,16 @@ public:
     {
         return track == Kick || (track >= Sample1 && track < Sample1 + kPads);
     }
+    // Round 6 (item 125): the ghost roll is EARNED - a track carries
+    // it only when the lane it owns actually holds notes in the edit
+    // pattern. Owning the lane TYPE (trackHasGhostLane) is not
+    // enough; an empty lane raises no strip.
+    bool trackHasGhostContent (int track) const
+    {
+        for (int s = 0; s < kSteps; ++s)
+            if (ghostNoteValue (track, s) != 0) return true;
+        return false;
+    }
 
     // ---------------- piano roll (one monophonic melody lane) ----------------
     // Note values match ProjectSettings: 0 = off, else semitone offset + 25.
@@ -1043,13 +1065,17 @@ public:
     }
 
     // ---------------- samples (message thread) ----------------
-    // Rows 5..20 play the pad bank's pads 1..16; rows 21+ hold their own
-    // sample in the engine (item 39's added rows past the bank).
+    // Round 6 (item 109 - D's ruling): sequencer rows hold their OWN
+    // sounds and the pad bank holds its own; the two stores are
+    // separate now. Loading a row never touches a pad and loading a
+    // pad never touches a row - a pad changes only by an explicit pad
+    // action (a drag onto it, its own chooser, a kit/chop load).
+    // Rows 21+ hold their own sample too (item 39's added rows).
     void loadSample (int track, std::vector<float> data, double sourceSampleRate)
     {
         std::lock_guard<std::mutex> lock (sampleMutex);
         if (track >= Sample1 && track < Sample1 + kPads)
-            pads.loadSample (track - Sample1, std::move (data), sourceSampleRate);
+            rowPads.loadSample (track - Sample1, std::move (data), sourceSampleRate);
         else if (track >= kFirstOwnRow && track < kTracks)
         {
             ownData[(size_t) (track - kFirstOwnRow)] =
@@ -1175,7 +1201,7 @@ public:
     // is the caller's (one gesture per pass).
     bool stepWriteNote (int channel, int midiNote, float velocity)
     {
-        if (! playing.load()) return false;
+        if (! playing.load() || pausedA.load()) return false; // item 115: a frozen playhead writes nothing
         const int step = currentStep();
         if (step < 0 || step >= kSteps) return false;
         const int pat = playPattern.load();
@@ -1237,6 +1263,25 @@ public:
         return pads.getSampleData (pad);
     }
 
+    // Round 6 (item 109): the sequencer sample ROWS' own store - the
+    // row-side twins of the pad accessors above (index 0 = row
+    // Sample1). The pad bank's editor never reads these; the rows
+    // sound them through trigger(), the melody lane and the live-note
+    // funnel.
+    bool rowHasSample (int row) const
+    {
+        std::lock_guard<std::mutex> lock (sampleMutex);
+        if (row < 0 || row >= kPads) return false;
+        return rowPads.hasSample (row);
+    }
+
+    std::vector<float> getRowSampleData (int row) const
+    {
+        std::lock_guard<std::mutex> lock (sampleMutex);
+        if (row < 0 || row >= kPads) return {};
+        return rowPads.getSampleData (row);
+    }
+
     // ---------------- pad capture (Fix pass item 31) ----------------
     // While the transport plays, a live hit on pads 1-3 (the sequencer's
     // sample rows) also writes that row's step at the playhead, with the
@@ -1278,6 +1323,31 @@ public:
                 // the clip is the take's home now - the raw take loop stands
                 // down so the same audio never sounds twice
                 takeOn.store (false);
+                return i;
+            }
+        return -1;
+    }
+
+    // Round 6 (item 114): a file dropped from the waveform panel onto
+    // the multitrack becomes a clip in its own right - the data is the
+    // clip's own buffer (already resampled to the engine rate by the
+    // caller), placed on the dropped track at the dropped position.
+    // Unlike the take path there is no serial: every drop is a new clip.
+    int placeDataAsClip (std::vector<float> data, int track, long long startSamples)
+    {
+        if (data.empty()) return -1;
+        std::lock_guard<std::mutex> lock (sampleMutex);
+        for (int i = 0; i < kMaxAudioClips; ++i)
+            if (! clipsA[(size_t) i].active.load())
+            {
+                const long long len = (long long) data.size();
+                clipData[(size_t) i] = std::move (data);
+                clipsA[(size_t) i].start.store (std::max (0LL, startSamples));
+                clipsA[(size_t) i].srcStart.store (0);
+                clipsA[(size_t) i].length.store (len);
+                clipsA[(size_t) i].track.store (std::clamp (track, 0, std::max (0, numAudioTracksA.load() - 1)));
+                clipsA[(size_t) i].active.store (true);
+                clipRevision.fetch_add (1);
                 return i;
             }
         return -1;
@@ -1456,7 +1526,7 @@ public:
         for (int t = track; t < n - 1; ++t)
             trackContent[(size_t) t] = trackContent[(size_t) (t + 1)];
         trackContent[(size_t) (n - 1)].clear();
-        trackGain[(size_t) (n - 1)].store (0.8f);
+        trackGain[(size_t) (n - 1)].store (1.0f); // item 113: a fresh row starts flat too
         trackMute[(size_t) (n - 1)].store (false);
         trackSolo[(size_t) (n - 1)].store (false);
         {
@@ -1517,7 +1587,7 @@ public:
             audioMuteA[(size_t) t].store (audioMuteA[(size_t) (t + 1)].load());
             audioSoloA[(size_t) t].store (audioSoloA[(size_t) (t + 1)].load());
         }
-        audioGainA[(size_t) (n - 1)].store (0.9f);
+        audioGainA[(size_t) (n - 1)].store (1.0f); // item 113: flat
         audioMuteA[(size_t) (n - 1)].store (false);
         audioSoloA[(size_t) (n - 1)].store (false);
         {
@@ -1722,7 +1792,7 @@ public:
                 // pad is a sequencer row now (rows 5..20 = pads 1..16), so
                 // any pad whose row exists captures.
                 const int capStep = playStep.load();
-                if (v > 0 && playing.load() && padCaptureOn.load() && capStep >= 0
+                if (v > 0 && playing.load() && ! pausedA.load() && padCaptureOn.load() && capStep >= 0
                     && Sample1 + p < numTracksA.load())
                 {
                     patGrid[(size_t) gIdx (activePattern, Sample1 + p, capStep)].store ((uint8_t) v);
@@ -1738,16 +1808,26 @@ public:
             drainLiveNotes();
 
         const double samplesPerTick = sr * 60.0 / ((double) bpm.load() * kPPQN);
-        const bool isPlayingNow = playing.load();
+        // Round 6 (item 115): PAUSE holds the transport engaged but
+        // frozen - for advancement, step firing and clip playback a
+        // paused transport is not playing; the playhead (playStep and
+        // transportSamples) simply stops where it stands.
+        const bool wantPlay = playing.load();
+        const bool pausedNow = wantPlay && pausedA.load();
+        const bool isPlayingNow = wantPlay && ! pausedNow;
         if (isPlayingNow && ! wasPlaying)
         {
             // Round 2 (item 93): PLAY starts where the transport is
             // PARKED (REW / FF move the park; STOP returns it to zero).
-            placeTransportAt (transportStartPosA.load(), samplesPerTick);
+            // A RESUME from pause re-enters the grid at the frozen
+            // position instead - the park belongs to fresh starts.
+            placeTransportAt (wasPaused ? transportSamples : transportStartPosA.load(),
+                              samplesPerTick);
             panicActive = false; panicVoicesPending = false; // a fresh start is never faded
         }
-        if (! isPlayingNow && wasPlaying) playStep.store (-1);
+        if (! isPlayingNow && wasPlaying && ! pausedNow) playStep.store (-1);
         wasPlaying = isPlayingNow;
+        wasPaused = pausedNow;
 
         // Round 2 (item 93): a seek lands here - live while playing,
         // and while stopped it is how STOP's return-to-zero reaches
@@ -1776,6 +1856,7 @@ public:
         if (panicVoicesPending && samplesOk)
         {
             pads.stopAll();
+            rowPads.stopAll();
             panicVoicesPending = false;
         }
 
@@ -1977,18 +2058,20 @@ public:
 
             if (samplesOk)
             {
-                // every pad is a sequencer row while its row exists (rows
-                // 5..20); pads past the track list stay live/audition pads
+                // Round 6 (item 109): the ROW store sounds through the
+                // rows' own channels; the PAD bank is its own world -
+                // every pad voice sums onto the pad bus, and the peak
+                // tracker follows real pad sound only.
                 for (int p = 0; p < kPads; ++p)
                 {
                     const int row = Sample1 + p;
-                    if (row < activeTracks) rowSig[row] += pads.processPad (p);
-                    else
-                    {
-                        const float pv = pads.processPad (p);
-                        loosePadSig += pv;
-                        if (std::abs (pv) > padPk) { padPk = std::abs (pv); padPkIdx = p; }
-                    }
+                    if (row < activeTracks) rowSig[row] += rowPads.processPad (p);
+                }
+                for (int p = 0; p < kPads; ++p)
+                {
+                    const float pv = pads.processPad (p);
+                    loosePadSig += pv;
+                    if (std::abs (pv) > padPk) { padPk = std::abs (pv); padPkIdx = p; }
                 }
                 // rows past the pad bank carry their own sample (item 39)
                 for (int t = kFirstOwnRow; t < activeTracks; ++t)
@@ -2023,8 +2106,13 @@ public:
             }
             {
                 // the pad bus: the pad rows' group channel (its strip,
-                // its fader, its pan) - one fader for the whole pad set
-                float s = padBusMono;
+                // its fader, its pan) - one fader for the whole pad set.
+                // Round 6 fix: the LOOSE pads (item 109's detached pad
+                // store) join the bus here too - the first cut summed
+                // them straight into the beat, bypassing this strip,
+                // its fader and its peak (the pad bank's meter, item
+                // 112b, reads that peak and heard nothing).
+                float s = padBusMono + loosePadSig;
                 if (stripActiveRt[kPadBusChannel]) s = stripDsp[kPadBusChannel].process (s);
                 s *= padBusGainSm * padBusGate; // item 95: level smoothed, gate instant
                 float gl, gr; panLaw (chanPanRt[kPadBusChannel], gl, gr);
@@ -2053,8 +2141,8 @@ public:
                 chanPkR[kPianoChannel] = std::max (chanPkR[kPianoChannel], std::abs (s * gr));
                 if (analysedCh == kPianoChannel) analyserRing[(size_t) (anaW++ & (kAnalyserSize - 1))] = s;
             }
-            beatL += auditionSig + loosePadSig;
-            beatR += auditionSig + loosePadSig;
+            beatL += auditionSig;
+            beatR += auditionSig;
 
             // Dust colours the whole beat bus, as it always has - now in
             // stereo, one crusher per side, same settings.
@@ -2485,7 +2573,7 @@ private:
                     const float semitones = (float) (mv - 25);
                     const int src = patMelodySource[(size_t) hits[h].pattern].load();
                     if (src == 0) kick.triggerPitched (0.9f, semitones);
-                    else if (samplesOk) pads.triggerWithTune (src - 1, 0.9f, semitones);
+                    else if (samplesOk) rowPads.triggerWithTune (src - 1, 0.9f, semitones);
                     break;
                 }
                 for (int h = 0; h < nh; ++h)
@@ -2517,7 +2605,7 @@ private:
                 const float semitones = (float) (mv - 25);
                 const int src = patMelodySource[activePattern].load();
                 if (src == 0) kick.triggerPitched (0.9f, semitones);
-                else if (samplesOk) pads.triggerWithTune (src - 1, 0.9f, semitones);
+                else if (samplesOk) rowPads.triggerWithTune (src - 1, 0.9f, semitones);
             }
 
             const int sv = patSynth[(size_t) activePattern * kSteps + s].load();
@@ -2587,7 +2675,7 @@ private:
         for (auto& v : ownVoices) v.active = false;
         auditionVoice.active = false;
         clickSamplesLeft = 0;
-        if (samplesOk) pads.stopAll();
+        if (samplesOk) { pads.stopAll(); rowPads.stopAll(); }
         else panicVoicesPending = true; // the fade holds silence until this lands
     }
 
@@ -2615,7 +2703,7 @@ private:
                         v.active = true;
                     }
                 }
-                else if (samplesOk) { pads.trigger (track - Sample1, vel); lastPadIndex.store (track - Sample1); }
+                else if (samplesOk) { rowPads.trigger (track - Sample1, vel); }
                 break;
         }
     }
@@ -2674,6 +2762,11 @@ private:
     // sound sources
     Kick808 kick; Snare808 snare; Hat808 hat; Clap808 clap;
     MpcPads pads;
+    // Round 6 (item 109): the sequencer sample rows' OWN store - same
+    // voice design as the pad bank, fully separate contents. Rows
+    // trigger it from their steps, the melody lane and the keyboard
+    // funnel; nothing in the pad bank ever reads or writes it.
+    MpcPads rowPads;
     Synth synth;
     Piano piano;
     S950Crusher dust;
@@ -2767,10 +2860,10 @@ private:
         const int t = e.channel;
         if (isPadRow (t))
         {
-            const int pad = t - Sample1;
-            pads.triggerWithTune (pad, vel, offset);
-            lastPadIndex.store (pad);
-            padActivityPeak.store (std::max (padActivityPeak.load(), vel));
+            // item 109: a row's live note sounds the ROW's own sample
+            // (through the row voice path - its trims/envelope/tune),
+            // never the pad bank's.
+            rowPads.triggerWithTune (t - Sample1, vel, offset);
             return;
         }
         // A bound sample voice started at a pitch: tryKitVoice's
@@ -2954,6 +3047,7 @@ private:
     float vocalGainSm = 0.0f, padBusGainSm = 0.0f, masterGainSm = 1.0f;
 
     std::atomic<bool> playing { false }, dirty { true };
+    std::atomic<bool> pausedA { false }; // Round 6 (item 115): PAUSE - engaged but frozen
     std::atomic<int>  playStep { -1 };
     std::atomic<float> bpm { 90.0f }, swing { 58.0f }, masterDb { 0.0f }, glueGr { 0.0f };
 
@@ -2964,13 +3058,14 @@ private:
     std::atomic<int>  vocalMic { 2 };
     std::atomic<int>  synthWave { 0 };
     std::atomic<float> synthCutoff { 4500.0f }, synthReso { 0.25f }, synthAttack { 8.0f },
-                       synthRelease { 240.0f }, synthLevel { 0.8f },
-                       pianoBright { 0.6f }, pianoDecay { 2200.0f }, pianoLevel { 0.85f };
+                       synthRelease { 240.0f }, synthLevel { 1.0f },
+                       pianoBright { 0.6f }, pianoDecay { 2200.0f }, pianoLevel { 1.0f };
 
     // audio-thread-only state
     int tick = 0;
     double samplesToNextTick = 0.0;
     bool wasPlaying = false;
+    bool wasPaused = false; // Round 6 (item 115): the resume edge re-enters at the frozen position
     int hatTrack = ClosedHat;
 
     mutable std::mutex sampleMutex;
@@ -2981,7 +3076,7 @@ private:
         std::array<StripSettings, kNumChannels> strips;
         std::array<float, kNumChannels> pan {};
         float padBusGain = 1.0f; bool padBusMute = false;
-        float vocalGain = 0.9f; bool vocalMute = false, vocalSolo = false;
+        float vocalGain = 1.0f; bool vocalMute = false, vocalSolo = false; // item 113: flat
         bool synthMute = false, synthSolo = false, pianoMute = false, pianoSolo = false;
         bool masterLimiterOn = false; float masterLimiterCeilingDb = -1.0f;
     };
@@ -2993,7 +3088,7 @@ private:
     std::array<bool, kNumChannels> stripActiveRt {};
     std::array<float, kNumChannels> chanPanRt {};
     float padBusGainRt = 1.0f; bool padBusMuteRt = false;
-    float vocalGainRt = 0.9f; bool vocalMuteRt = false, vocalSoloRt = false;
+    float vocalGainRt = 1.0f; bool vocalMuteRt = false, vocalSoloRt = false;
     bool synthMuteRt = false, synthSoloRt = false, pianoMuteRt = false, pianoSoloRt = false;
     bool masterLimiterOnRt = false;
     // per-channel meters + the EQ analyser ring

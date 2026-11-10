@@ -17,8 +17,13 @@ boombap::ProjectData MainComponent::makeProjectData() const
     d.settings = engine.getSettings();
     for (size_t i = 0; i < samplePaths.size(); ++i)
         d.samplePaths[i] = samplePaths[i] == File() ? String() : samplePaths[i].getFullPathName();
-    for (size_t i = 3; i < padFiles.size(); ++i)
+    // Round 6 (item 109): pads and sequencer rows carry SEPARATE file
+    // references now - all sixteen pads, and the rows' own array.
+    for (size_t i = 0; i < padFiles.size(); ++i)
         d.padPaths[i] = padFiles[i] == File() ? String() : padFiles[i].getFullPathName();
+    for (size_t i = 0; i < rowPadFiles.size(); ++i)
+        d.rowPadPaths[i] = rowPadFiles[i] == File() ? String() : rowPadFiles[i].getFullPathName();
+    d.hasRowPadPaths = true;
     for (size_t t = 0; t < rowFiles.size(); ++t)
         d.rowSamplePaths[t] = rowFiles[t] == File() ? String() : rowFiles[t].getFullPathName();
     d.vocalTakePath = takePath;
@@ -202,13 +207,34 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
     engine.applySettings (d.settings);
 
     StringArray missing;
-    for (int i = 0; i < 3; ++i)
+    // Round 6 (item 109): rows and pads load as the separate stores
+    // they now are. Each side's file comes from its own array; a
+    // LEGACY file (no rowPads key) shared one store, so its rows
+    // fall back to the pad-side paths - the same files those
+    // projects always sounded.
+    auto rowPathFor = [&d] (int i) -> String
+    {
+        if (d.hasRowPadPaths) return d.rowPadPaths[(size_t) i];
+        return i < 3 ? d.samplePaths[(size_t) i] : d.padPaths[(size_t) i];
+    };
+    auto padPathFor = [&d] (int i) -> String
+    {
+        if (d.padPaths[(size_t) i].isNotEmpty()) return d.padPaths[(size_t) i];
+        // The samplePaths fallback is for LEGACY files only (no
+        // rowPads key): there, pads 1-3 lived in samplePaths. In a
+        // split-store project an empty pad path MEANS an empty pad -
+        // applying the fallback there resurrects the item 109 mirror
+        // on every project round-trip (caught by the round6 suite).
+        return (! d.hasRowPadPaths && i < 3) ? d.samplePaths[(size_t) i] : String();
+    };
+
+    for (int i = 0; i < 16; ++i)
     {
         const int track = boombap::BoomBapEngine::Sample1 + i;
-        const String path = d.samplePaths[(size_t) i];
+        const String path = rowPathFor (i);
         engine.clearSample (track);
-        samplePaths[(size_t) i] = File();
-
+        rowPadFiles[(size_t) i] = File();
+        if (i < 3) samplePaths[(size_t) i] = File();
         if (path.isEmpty())
             continue;
 
@@ -219,14 +245,15 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         }
         else
         {
-            samplePaths[(size_t) i] = f;                // keep the reference so a save doesn't lose it
+            rowPadFiles[(size_t) i] = f;                // keep the reference so a save doesn't lose it
+            if (i < 3) samplePaths[(size_t) i] = f;
             missing.add (f.getFileName());
         }
     }
 
-    for (int i = 3; i < 16; ++i)
+    for (int i = 0; i < 16; ++i)
     {
-        const String path = d.padPaths[(size_t) i];
+        const String path = padPathFor (i);
         engine.clearPad (i);
         padFiles[(size_t) i] = File();
         if (path.isEmpty())

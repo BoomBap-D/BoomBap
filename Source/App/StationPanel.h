@@ -51,8 +51,26 @@ public:
     std::function<void (const StripSettings&)> onStripEdited;
     std::function<void()> onGestureBegin, onGestureEnd;
     std::function<void (int)> onBandSelected;
+    // Round 6 (item 112c): any press on the display also clears the
+    // Station's clip outline - the EQ box is half of that outline.
+    std::function<void()> onAnyPress;
 
     EqDisplay (BoomBapEngine& eng) : engine (eng) {}
+
+    // Round 6 (item 112d): the compressor's action as a line on the
+    // display - it sits at the current gain reduction (in the
+    // display's own dB geometry) and moves as the reduction moves.
+    void setCompOverlay (bool on, float grDb)
+    {
+        if (on != compOverlayOn || std::abs (grDb - compGrDb) > 0.05f)
+        {
+            compOverlayOn = on;
+            compGrDb = grDb;
+            repaint();
+        }
+    }
+    bool compOverlayVisible() const { return compOverlayOn; }
+    float compLineY() const { return compOverlayOn ? gainToY (-compGrDb) : -1.0f; }
 
     void setStrip (const StripSettings& s)
     {
@@ -142,6 +160,19 @@ public:
             g.strokePath (p, juce::PathStrokeType (2.2f));
         }
 
+        // Round 6 (item 112d): the compressor's line - thin, under
+        // the nodes, at the depth the reduction is currently cutting.
+        if (compOverlayOn && compGrDb > 0.05f)
+        {
+            const float y = gainToY (-compGrDb);
+            g.setColour (juce::Colour (0xffe5484d).withAlpha (0.75f));
+            g.drawLine (b.getX() + 4.0f, y, b.getRight() - 4.0f, y, 1.2f);
+            g.setFont (8.5f);
+            g.setColour (juce::Colour (0xffe5484d).withAlpha (0.9f));
+            g.drawText ("GR", (int) b.getRight() - 26, (int) y - 11, 22, 9,
+                        juce::Justification::right);
+        }
+
         // band nodes
         for (int i = 0; i < strip.eqNumBands; ++i)
         {
@@ -168,6 +199,7 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        if (onAnyPress) onAnyPress(); // item 112c: a press here clears the clip outline
         const int hit = bandAt (e.position);
         if (hit >= 0)
         {
@@ -383,6 +415,8 @@ private:
     double curveSr = 0.0;
     int selectedBand = 2;
     int dragBand = -1;
+    bool compOverlayOn = false; // item 112d
+    float compGrDb = 0.0f;
     std::vector<float> spectrum;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EqDisplay)
@@ -542,6 +576,197 @@ private:
 };
 
 // ----------------------------------------------------------------------------
+// Round 6 (item 116 - D's pick, "B1"): the channel VU face. Charcoal
+// housing AND face; the scale numbers fan speedometer-style along the
+// needle's arc (-20 -10 -7 -5 -3 -2 -1 0, then red +1 +2 +3, red zone
+// past 0); CURRENT readout box bottom-left, PEAK box bottom-right;
+// the PEAK box latches a RED OUTLINE at 0 VU and an overload (OL) dot
+// glows red - both stay until the face is clicked; a thin red
+// peak-hold needle rides beside the amber signal needle; true VU
+// ballistics (fast rise, ~300 ms fall) come from the VuNeedle above.
+// Scope (D, Nov 9 ~6:50 PM): CHANNELS wear this face; the MASTER's VU
+// is held for the Pass 6 master console - VuNeedle stands there
+// untouched.
+// ----------------------------------------------------------------------------
+class VuFaceB1 : public juce::Component
+{
+public:
+    std::function<void()> onAnyPress; // item 112c: a press also clears the Station outline
+
+    VuFaceB1() {}
+
+    // Feed: peak linear level (the rail timer passes max(L, R), the
+    // same value the old long meters watched).
+    void setLevel (float linear)
+    {
+        const float db = linear > 0.0004f ? 20.0f * std::log10 (linear) : -60.0f;
+        if (db > shownDb) shownDb = db;                       // rise at once
+        else shownDb = std::max (db, shownDb - 1.1f);         // VU fall per 30 Hz tick
+        if (db > peakDb)
+        {
+            peakDb = db;
+            peakHoldDb = db;
+        }
+        if (peakDb >= 0.0f && ! latched) latched = true;
+        repaint();
+    }
+
+    bool clipLatched() const { return latched; }
+    void clearLatch()
+    {
+        latched = false;
+        peakDb = shownDb;
+        peakHoldDb = shownDb;
+        repaint();
+    }
+    float peakValueDb() const { return peakDb; }
+    float currentValueDb() const { return shownDb; }
+    juce::String currentText() const { return dbText (shownDb); }
+    juce::String peakText() const { return dbText (peakDb); }
+
+    void mouseDown (const juce::MouseEvent&) override
+    {
+        clearLatch();
+        if (onAnyPress) onAnyPress();
+    }
+
+    void paint (juce::Graphics& g) override
+    {
+        using namespace boombap::ui;
+        auto b = getLocalBounds().toFloat();
+        // the charcoal housing, then the charcoal face inside it
+        g.setColour (juce::Colour (0xff0b0c0e));
+        g.fillRoundedRectangle (b, 8.0f);
+        auto face = b.reduced (3.0f);
+        g.setColour (juce::Colour (0xff17181c));
+        g.fillRoundedRectangle (face, 6.0f);
+        g.setColour (border().withAlpha (0.55f));
+        g.drawRoundedRectangle (face, 6.0f, 1.0f);
+
+        const juce::Point<float> pivot (face.getCentreX(), face.getBottom() - 30.0f);
+        const float len = face.getHeight() * 0.72f;
+        auto angleFor = [] (float vu)
+        {
+            // the mock's speedometer fan: -20 far left, 0 right of
+            // centre, +3 at the end of the red
+            static constexpr float vals[11] = { -20.0f, -10.0f, -7.0f, -5.0f, -3.0f, -2.0f,
+                                                -1.0f, 0.0f, 1.0f, 2.0f, 3.0f };
+            static constexpr float angs[11] = { -50.0f, -38.0f, -30.0f, -23.0f, -15.0f, -9.0f,
+                                                -3.0f, 14.0f, 24.0f, 34.0f, 45.0f };
+            const float v = juce::jlimit (-22.0f, 3.5f, vu);
+            if (v <= vals[0]) return angs[0] * 0.01745329f;
+            for (int i = 1; i < 11; ++i)
+                if (v <= vals[i])
+                {
+                    const float t = (v - vals[i - 1]) / (vals[i] - vals[i - 1]);
+                    return (angs[i - 1] + t * (angs[i] - angs[i - 1])) * 0.01745329f;
+                }
+            return angs[10] * 0.01745329f;
+        };
+        auto tip = [&] (float vu, float scale)
+        {
+            const float a = angleFor (vu);
+            return juce::Point<float> (pivot.x + std::sin (a) * len * scale,
+                                       pivot.y - std::cos (a) * len * scale);
+        };
+
+        // red zone arc past 0 VU
+        {
+            juce::Path p;
+            for (int i = 0; i <= 10; ++i)
+            {
+                const auto pt = tip ((float) i / 10.0f * 3.0f, 0.97f);
+                if (i == 0) p.startNewSubPath (pt); else p.lineTo (pt);
+            }
+            g.setColour (juce::Colour (0xffe5484d).withAlpha (0.85f));
+            g.strokePath (p, juce::PathStrokeType (2.0f));
+        }
+        // the speedometer numbers + ticks
+        g.setFont (8.0f);
+        for (float vu : { -20.0f, -10.0f, -7.0f, -5.0f, -3.0f, -2.0f, -1.0f, 0.0f, 1.0f, 2.0f, 3.0f })
+        {
+            const bool red = vu > 0.0f;
+            const auto p1 = tip (vu, 0.90f), p2 = tip (vu, 0.99f);
+            g.setColour (red || vu == 0.0f ? juce::Colour (0xffe5484d) : muted());
+            g.drawLine (p1.x, p1.y, p2.x, p2.y, vu == 0.0f ? 1.6f : 1.0f);
+            const auto tp = tip (vu, 0.76f);
+            g.setColour (red ? juce::Colour (0xffe5484d) : boombap::ui::text().withAlpha (0.85f));
+            g.drawText (vu > 0.0f ? "+" + juce::String ((int) vu) : juce::String ((int) vu),
+                        (int) tp.x - 11, (int) tp.y - 5, 22, 9, juce::Justification::centred);
+        }
+        // the peak-hold needle (thin red) under the signal needle
+        if (peakHoldDb > -59.0f)
+        {
+            const auto n = tip (peakHoldDb, 0.94f);
+            g.setColour (juce::Colour (0xffe5484d));
+            g.drawLine (pivot.x, pivot.y, n.x, n.y, 1.1f);
+        }
+        // the signal needle
+        {
+            const auto n = tip (shownDb, 1.0f);
+            g.setColour (accentHi());
+            g.drawLine (pivot.x, pivot.y, n.x, n.y, 2.2f);
+            g.setColour (border());
+            g.fillEllipse (pivot.x - 3.5f, pivot.y - 3.5f, 7.0f, 7.0f);
+        }
+
+        // CURRENT (left) + PEAK (right) readout boxes
+        const float boxW = juce::jmin (52.0f, face.getWidth() * 0.32f);
+        auto box = [&] (juce::Rectangle<float> r, const juce::String& label,
+                        const juce::String& value, bool hot)
+        {
+            g.setColour (juce::Colour (0xff0b0c0e));
+            g.fillRoundedRectangle (r, 3.0f);
+            g.setColour (hot ? juce::Colour (0xffe5484d) : border().withAlpha (0.7f));
+            g.drawRoundedRectangle (r, 3.0f, hot ? 1.8f : 1.0f);
+            g.setColour (muted());
+            g.setFont (7.0f);
+            g.drawText (label, r.withHeight (8.0f).translated (2.0f, 1.0f),
+                        juce::Justification::left);
+            g.setColour (boombap::ui::text());
+            g.setFont (juce::Font (10.5f, juce::Font::bold));
+            g.drawText (value, (int) r.getX() + 2, (int) r.getBottom() - 13,
+                        (int) r.getWidth() - 4, 11, juce::Justification::right);
+        };
+        box ({ face.getX() + 5.0f, face.getBottom() - 24.0f, boxW, 19.0f },
+             "CURRENT", currentText(), false);
+        box ({ face.getRight() - 5.0f - boxW, face.getBottom() - 24.0f, boxW, 19.0f },
+             "PEAK", peakText(), latched);
+
+        // the OL dot + its letters, bottom centre
+        const auto olCentre = juce::Point<float> (face.getCentreX(), face.getBottom() - 19.0f);
+        g.setColour (latched ? juce::Colour (0xffe5484d) : juce::Colour (0xff3a1518));
+        g.fillEllipse (olCentre.x - 5.0f, olCentre.y - 5.0f, 10.0f, 10.0f);
+        if (latched)
+        {
+            g.setColour (juce::Colour (0xffe5484d).withAlpha (0.35f));
+            g.fillEllipse (olCentre.x - 8.0f, olCentre.y - 8.0f, 16.0f, 16.0f);
+        }
+        g.setColour (latched ? juce::Colour (0xffe5484d) : muted());
+        g.setFont (juce::Font (8.0f, juce::Font::bold));
+        g.drawText ("OL", (int) olCentre.x - 10, (int) olCentre.y + 6, 20, 8,
+                    juce::Justification::centred);
+        g.setColour (muted());
+        g.setFont (juce::Font (9.0f, juce::Font::bold));
+        g.drawText ("VU", (int) face.getX(), (int) pivot.y + 4, (int) face.getWidth(), 10,
+                    juce::Justification::centred);
+    }
+
+private:
+    static juce::String dbText (float db)
+    {
+        return db <= -59.5f ? juce::String ("-inf") : juce::String (db, 1);
+    }
+
+    float shownDb = -60.0f;
+    float peakDb = -60.0f;
+    float peakHoldDb = -60.0f;
+    bool latched = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VuFaceB1)
+};
+
+// ----------------------------------------------------------------------------
 // The FULL MIXING BOARD (scope item 5): every channel as a compact strip -
 // name, fader, pan knob, MUTE, SOLO, meter - in track order (item 35),
 // scrollable. Clicking a strip selects its channel; the Station binds to
@@ -669,7 +894,11 @@ private:
             // on grab - the ConsoleFader paints its own cap from its
             // own value, and the audio side ramps the gain (no zipper).
             fader.setRange (0.0, 1.2, defaultGain());
-            fader.setMeterColumns (1);
+            // Round 6 (items 112a/112e): DOUBLE meters - L and R get
+            // their own ladder columns, and the clip latch box rides
+            // on top of them.
+            fader.setMeterColumns (2);
+            fader.setClipLatchEnabled (true);
             fader.onDragStart = [this]
             {
                 select();
@@ -733,16 +962,11 @@ private:
 
         double defaultGain() const
         {
-            switch (BoomBapEngine::channelKind (channel))
-            {
-                case BoomBapEngine::KindAudio: return 0.9;
-                case BoomBapEngine::KindVocal: return 0.9;
-                case BoomBapEngine::KindSynth: return 0.8;
-                case BoomBapEngine::KindPiano: return 0.85;
-                case BoomBapEngine::KindPadBus: return 1.0;
-                case BoomBapEngine::KindMaster: return 1.0;
-                default: return 0.8;
-            }
+            // Round 6 (item 113): FLAT is flat for every kind - 1.0.
+            // (This mirror of the engine's old per-kind defaults is
+            // what made double-click "not return" some faders: they
+            // returned faithfully - to 0.8 / 0.85 / 0.9.)
+            return 1.0;
         }
 
         void pullFromEngine()
@@ -861,6 +1085,8 @@ public:
     {
         std::function<void (int)> onSelectChannel;
         std::function<void()> onPlay, onStopAll, onRewind, onFastForward;
+        // Round 6 (item 115): PAUSE joins the Station transport.
+        std::function<void()> onPause;
         // Round 2 (item 93): the full transport - TO START / TO END
         // flank the step skips; the clock format lives with the owner
         // so the Station clock and the main window's readout agree.
@@ -923,25 +1149,28 @@ public:
         boardButton.onClick = [this] { setBoardMode (! boardMode); };
         addAndMakeVisible (boardButton);
 
-        // the transport, inside the Station (item 19; item 93's full
-        // spec in Round 2): TO START, REW (step; double-press = bar),
-        // PLAY, STOP, FF (step; double-press = bar), TO END - the
-        // double-press reading lives in the owner's TransportNav.
-        toStartButton.setButtonText ("|<< START");
+        // Round 6 (item 115): the Station transport wears the same
+        // family A "Studio Console" keys as the main window, COMPACT,
+        // in D's order - TO START / REW / PAUSE / PLAY (dead centre
+        // of the seven) / STOP / FF / TO END, PAUSE new in this round.
+        // The double-press reading still lives in the owner's
+        // TransportNav; the clock beside them is framed like the
+        // main window's.
+        toStartButton.setGlyph (TransportButton::Glyph::ToStart);
         toStartButton.onClick = [this] { if (callbacks.onToStart) callbacks.onToStart(); };
-        rewButton.setButtonText ("REW");
+        rewButton.setGlyph (TransportButton::Glyph::Rewind);
         rewButton.onClick = [this] { if (callbacks.onRewind) callbacks.onRewind(); };
-        playButton.setButtonText ("PLAY");
-        playButton.setColour (juce::TextButton::buttonColourId, boombap::ui::accent());
-        playButton.setColour (juce::TextButton::textColourOffId, juce::Colour (0xff14100a));
+        pauseButton.setGlyph (TransportButton::Glyph::Pause);
+        pauseButton.onClick = [this] { if (callbacks.onPause) callbacks.onPause(); };
+        playButton.setGlyph (TransportButton::Glyph::Play);
         playButton.onClick = [this] { if (callbacks.onPlay) callbacks.onPlay(); };
-        stopButton.setButtonText ("STOP");
+        stopButton.setGlyph (TransportButton::Glyph::Stop);
         stopButton.onClick = [this] { if (callbacks.onStopAll) callbacks.onStopAll(); };
-        ffButton.setButtonText ("FF");
+        ffButton.setGlyph (TransportButton::Glyph::Forward);
         ffButton.onClick = [this] { if (callbacks.onFastForward) callbacks.onFastForward(); };
-        toEndButton.setButtonText ("END >>|");
+        toEndButton.setGlyph (TransportButton::Glyph::ToEnd);
         toEndButton.onClick = [this] { if (callbacks.onToEnd) callbacks.onToEnd(); };
-        for (auto* b : { &toStartButton, &rewButton, &playButton, &stopButton, &ffButton, &toEndButton })
+        for (auto* b : { &toStartButton, &rewButton, &pauseButton, &playButton, &stopButton, &ffButton, &toEndButton })
             addAndMakeVisible (b);
 
         // Round 2 (item 93): the BIG time clock - click cycles
@@ -1026,6 +1255,7 @@ public:
         eqDisplay.onGestureBegin = [this] { gestureBegin(); };
         eqDisplay.onGestureEnd = [this] { gestureEnd(); };
         eqDisplay.onBandSelected = [this] (int) { updateBandBar(); };
+        eqDisplay.onAnyPress = [this] { clearStationClipOutline(); }; // item 112c
         addAndMakeVisible (eqDisplay);
 
         bandLabel.setColour (juce::Label::textColourId, boombap::ui::text());
@@ -1089,6 +1319,21 @@ public:
             gestureEnd();
         };
         addAndMakeVisible (bandDelButton);
+        // Round 6 (item 117): RESET, beside DELETE - one press flattens
+        // the whole graphic EQ back to the line (every band's gain to
+        // 0 dB, "line level") as ONE undoable gesture. Bands, types,
+        // frequencies and on-states stay; only the gains move.
+        bandResetButton.setButtonText ("RESET");
+        bandResetButton.onClick = [this]
+        {
+            if (cur.eqNumBands <= 0) return;
+            gestureBegin();
+            for (int i = 0; i < cur.eqNumBands; ++i) cur.eq[(size_t) i].gainDb = 0.0f;
+            pushStrip();
+            updateBandBar();
+            gestureEnd();
+        };
+        addAndMakeVisible (bandResetButton);
 
         // Round 2 (item 94): the EQ's master name-toggle + the
         // selected band's CORRESPONDING KNOBS. Pressing GRAPHIC EQ
@@ -1133,11 +1378,16 @@ public:
         // the rail: meters, fader, pan, mute/solo
         addAndMakeVisible (vuMeter);
         addAndMakeVisible (vuNeedle); // item 96c: the master's VU (visibility follows the channel)
+        // Round 6 (item 116): the B1 face is the CHANNELS' VU now (the
+        // master keeps the needle - its own face is Pass 6's).
+        vuFace.onAnyPress = [this] { clearStationClipOutline(); }; // item 112c
+        addAndMakeVisible (vuFace);
         // Round 2 (items 95/96): the rail fader is the same approved
         // console long fader as the board's - dB scale left, segmented
         // LED ladder right, cap that cannot vanish.
         railFader.setRange (0.0, 1.2, 1.0);
         railFader.setMeterColumns (2);
+        railFader.setClipLatchEnabled (true); // item 112a: the rail fader latches too
         railFader.onDragStart = [this] { gestureBegin(); };
         railFader.onDragEnd = [this] { gestureEnd(); };
         railFader.onValueChange = [this] (double v)
@@ -1202,6 +1452,7 @@ public:
     void bindToChannel (int ch)
     {
         channel = juce::jlimit (0, BoomBapEngine::kMasterChannel, ch);
+        clipOutlineLatched = false; // item 112c: a new channel starts with a clean box
         abValid = false;
         abShowingStored = false;
         updateABButton();
@@ -1236,6 +1487,19 @@ public:
     void loadPresetFile (const juce::File& f) { applyPresetFile (f); }
     MixingBoard& boardComponent() { return board; }
     EqDisplay& eqDisplayComponent() { return eqDisplay; }
+    // Round 6 doors: the preset SAVE button (item 108's crash path),
+    // the EQ RESET (item 117), the B1 face (item 116) and the compact
+    // transport keys (item 115) - the same objects the mouse drives.
+    juce::TextButton& presetSaveButtonForTest() { return presetSaveButton; }
+    juce::TextButton& bandResetButtonForTest() { return bandResetButton; }
+    VuFaceB1& vuFaceComponent() { return vuFace; }
+    TransportButton* stationTransportButtonForTest (int i)
+    {
+        TransportButton* all[] = { &toStartButton, &rewButton, &pauseButton, &playButton,
+                                   &stopButton, &ffButton, &toEndButton };
+        return (i >= 0 && i < 7) ? all[i] : nullptr;
+    }
+    bool stationClipOutlineLatched() const { return clipOutlineLatched; }
     TimeClock& clockComponent() { return timeClock; }
     juce::ComboBox& channelDropdown() { return channelBox; }
     ConsoleFader& railFaderComponent() { return railFader; }
@@ -1325,6 +1589,13 @@ private:
         juce::Label label;
     };
 
+    // Round 6 (item 112c): clear the Station clip outline (a press on
+    // the EQ display or the VU face lands here; rebinding clears too).
+    void clearStationClipOutline()
+    {
+        if (clipOutlineLatched) { clipOutlineLatched = false; repaint(); }
+    }
+
     void gestureBegin()
     {
         ++gestureDepth;
@@ -1385,18 +1656,9 @@ private:
         eqDisplay.setStrip (cur);
     }
 
-    static double defaultGainFor (int ch)
+    static double defaultGainFor (int)
     {
-        switch (BoomBapEngine::channelKind (ch))
-        {
-            case BoomBapEngine::KindAudio: return 0.9;
-            case BoomBapEngine::KindVocal: return 0.9;
-            case BoomBapEngine::KindSynth: return 0.8;
-            case BoomBapEngine::KindPiano: return 0.85;
-            case BoomBapEngine::KindPadBus: return 1.0;
-            case BoomBapEngine::KindMaster: return 1.0;
-            default: return 0.8;
-        }
+        return 1.0; // item 113: every channel's flat is unity
     }
 
     void updateFaderLabel()
@@ -1478,6 +1740,7 @@ private:
         bandOnToggle.setVisible (chan);
         bandAddButton.setVisible (chan);
         bandDelButton.setVisible (chan);
+        bandResetButton.setVisible (chan);
         eqToggle.setVisible (chan);
         for (auto* k : { &eqGainKnob, &eqFreqKnob, &eqQKnob })
         { k->slider.setVisible (chan); k->label.setVisible (chan); }
@@ -1510,7 +1773,12 @@ private:
         masterNote.setVisible (masterFace);
 
         const bool rail = ! boardMode;
-        vuMeter.setVisible (rail);
+        // Round 6 (item 116): the long L/R bar meter leaves the rail -
+        // channels read on the B1 VU face, the master keeps its needle
+        // (item 96c stands for the master; its own face is Pass 6's).
+        // The VuMeter class stays compiled for the older suites.
+        vuMeter.setVisible (false);
+        vuFace.setVisible (rail && ! master);
         vuNeedle.setVisible (rail && master); // item 96c: the VU is the master's
         railFader.setVisible (rail);
         faderLabel.setVisible (rail);
@@ -1615,9 +1883,20 @@ private:
     void savePreset()
     {
         if (channel == BoomBapEngine::kMasterChannel) return;
-        auto w = std::make_shared<juce::AlertWindow> ("Save strip preset",
-                                                      "Name this strip setting - it lands in Documents\\BoomBap\\Presets.",
-                                                      juce::AlertWindow::NoIcon);
+        // Round 6 (item 108 - THE CRASH, root-caused): this window used
+        // to be held TWICE - a std::shared_ptr captured by the modal
+        // callback AND deleteWhenDismissed=true. On dismissal JUCE runs
+        // the callback, then deletes the window itself; destroying the
+        // callback afterwards dropped the shared_ptr's last reference
+        // and deleted the window a SECOND time - a deterministic
+        // double-delete on every Save AND every Cancel, in Station and
+        // board modes alike (the button lives in the shared header).
+        // Single ownership now: JUCE owns the window; the callback
+        // captures the raw pointer, which is safe because JUCE deletes
+        // a deleteWhenDismissed window only AFTER its callbacks run.
+        auto* w = new juce::AlertWindow ("Save strip preset",
+                                         "Name this strip setting - it lands in Documents\\BoomBap\\Presets.",
+                                         juce::AlertWindow::NoIcon);
         w->addTextEditor ("name", juce::String (engine.channelDisplayName (channel)) + " strip");
         w->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
         w->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
@@ -1837,6 +2116,15 @@ private:
                 panelRect (masterLimRect, juce::Colour (0xff18201c));
             }
             panelRect (railRect, panel());
+            // Round 6 (item 112c): a latched clip draws a RED OUTLINE
+            // around the whole EQ/meter box - the EQ display and the
+            // rail as one - until a press on either clears it.
+            if (clipOutlineLatched && channel != BoomBapEngine::kMasterChannel)
+            {
+                const auto outline = eqDisplay.getBounds().getUnion (railRect).expanded (3, 3);
+                g.setColour (juce::Colour (0xffe5484d));
+                g.drawRoundedRectangle (outline.toFloat(), 10.0f, 2.0f);
+            }
         }
     }
 
@@ -1851,16 +2139,29 @@ private:
         presetSaveButton.setBounds (b.getWidth() - 368, 12, 110, 30);
         abButton.setBounds (b.getWidth() - 440, 12, 62, 30);
 
-        toStartButton.setBounds (14, 56, 82, 30);
-        rewButton.setBounds (102, 56, 64, 30);
-        playButton.setBounds (172, 56, 84, 30);
-        stopButton.setBounds (262, 56, 84, 30);
-        ffButton.setBounds (352, 56, 64, 30);
-        toEndButton.setBounds (422, 56, 82, 30);
-        undoButton.setBounds (516, 56, 64, 30);
-        redoButton.setBounds (586, 56, 64, 30);
-        timeClock.setBounds (662, 54, 160, 34);
-        grLabel.setBounds (830, 56, juce::jmax (40, b.getWidth() - 840), 30);
+        // Round 6 (item 115): the compact family-A cluster - the
+        // framed clock sits between PAUSE and PLAY, and PLAY is the
+        // middle key of the seven.
+        {
+            int tx = 14;
+            auto place = [&] (TransportButton& btn, int w)
+            {
+                btn.setBounds (tx, 56, w, 30);
+                tx += w + 4;
+            };
+            place (toStartButton, 44);
+            place (rewButton, 38);
+            place (pauseButton, 38);
+            timeClock.setBounds (tx, 54, 120, 34);
+            tx += 124;
+            place (playButton, 48);
+            place (stopButton, 44);
+            place (ffButton, 38);
+            place (toEndButton, 44);
+            undoButton.setBounds (tx + 8, 56, 52, 30);
+            redoButton.setBounds (tx + 64, 56, 52, 30);
+            grLabel.setBounds (tx + 124, 56, juce::jmax (40, b.getWidth() - (tx + 134)), 30);
+        }
 
         const int contentY = 96;
         const int contentH = b.getHeight() - contentY - 10;
@@ -1884,9 +2185,20 @@ private:
             bandLabel.setBounds (126, bandY, 320, 30);
             int bx = 454;
             for (auto& btn : bandTypeButtons) { btn.setBounds (bx, bandY + 2, 40, 26); bx += 44; }
-            bandOnToggle.setBounds (bx + 4, bandY + 2, 52, 26);
-            bandAddButton.setBounds (bx + 62, bandY + 2, 74, 26);
-            bandDelButton.setBounds (bx + 142, bandY + 2, 74, 26);
+            // Round 6 (item 117): the band's action buttons - ON,
+            // + BAND, DELETE and the new RESET beside DELETE - sit
+            // CENTRED under the EQ display as a group, no longer
+            // trailing off the type buttons into dead space on the
+            // right. (The type buttons stay with the band label: they
+            // describe the SELECTED band, the centred four act on it.)
+            {
+                const int groupW = 52 + 6 + 74 + 6 + 74 + 6 + 74;
+                int gx = 10 + juce::jmax (0, (mainW - groupW) / 2);
+                bandOnToggle.setBounds (gx, bandY + 2, 52, 26); gx += 58;
+                bandAddButton.setBounds (gx, bandY + 2, 74, 26); gx += 80;
+                bandDelButton.setBounds (gx, bandY + 2, 74, 26); gx += 80;
+                bandResetButton.setBounds (gx, bandY + 2, 74, 26);
+            }
             // the band knobs row: name above, knob + value below
             const int knobY = bandY + 38;
             int kx = 14;
@@ -1957,6 +2269,7 @@ private:
         const bool masterRail = channel == BoomBapEngine::kMasterChannel;
         vuMeter.setBounds (rx + 14, contentY + 10, railRect.getWidth() - 28,
                            masterRail ? juce::jmax (60, meterH - 88) : meterH);
+        vuFace.setBounds (vuMeter.getBounds()); // item 116: the B1 face takes the meter's home on channels
         vuNeedle.setBounds (rx + 14, contentY + 10 + meterH - 80, railRect.getWidth() - 28, 72);
         const int faderY = contentY + meterH + 18;
         railFader.setBounds (rx + 30, faderY, 116, 146);
@@ -1975,6 +2288,10 @@ private:
         if (engine.getNumTracks() != lastBoxTracks || engine.getNumAudioTracks() != lastBoxAudio)
             refreshChannelBox();
 
+        // Round 6 (item 115): the keys light with the transport state.
+        playButton.setLit (engine.isPlaying() && ! engine.isPaused());
+        pauseButton.setLit (engine.isPaused());
+
         vuMeter.setLevels (engine.peekChannelPeak (channel, false),
                            engine.peekChannelPeak (channel, true));
         railFader.setMeterLevels (engine.peekChannelPeak (channel, false),
@@ -1984,6 +2301,20 @@ private:
                                          engine.peekChannelPeak (channel, true)));
         if (channel != BoomBapEngine::kMasterChannel)
         {
+            // Round 6 (item 116): the B1 face reads the channel.
+            vuFace.setLevel (std::max (engine.peekChannelPeak (channel, false),
+                                       engine.peekChannelPeak (channel, true)));
+            // Round 6 (item 112c): a full-scale peak lights the red
+            // outline around the EQ/meter box until it is clicked off.
+            if (! clipOutlineLatched
+                && (engine.peekChannelPeak (channel, false) >= 0.99f
+                    || engine.peekChannelPeak (channel, true) >= 0.99f))
+            {
+                clipOutlineLatched = true;
+                repaint();
+            }
+            // Round 6 (item 112d): the compressor's line on the EQ.
+            eqDisplay.setCompOverlay (cur.compOn, -engine.getChannelCompGrDb (channel));
             compGr.setReduction (-engine.getChannelCompGrDb (channel));
             limiterGrLabel.setText ("GR " + juce::String (engine.getChannelLimGrDb (channel), 1) + " dB",
                                     juce::dontSendNotification);
@@ -2025,7 +2356,9 @@ private:
     juce::ComboBox channelBox;
     juce::TextButton editButton;
     juce::TextButton abButton, presetSaveButton, presetLoadButton, boardButton;
-    juce::TextButton toStartButton, rewButton, playButton, stopButton, ffButton, toEndButton;
+    // Round 6 (item 115): family-A console keys replace the labelled
+    // text buttons - same callbacks, same order, PAUSE added.
+    TransportButton toStartButton, rewButton, pauseButton, playButton, stopButton, ffButton, toEndButton;
     juce::TextButton undoButton, redoButton;
     TimeClock timeClock;
     int localClockFormat = 0;
@@ -2040,7 +2373,8 @@ private:
     GrMeter glueGr;
 
     EqDisplay eqDisplay;
-    juce::TextButton bandTypeButtons[5], bandOnToggle, bandAddButton, bandDelButton;
+    juce::TextButton bandTypeButtons[5], bandOnToggle, bandAddButton, bandDelButton, bandResetButton;
+    bool clipOutlineLatched = false; // item 112c
     juce::TextButton eqToggle;
     Knob eqGainKnob, eqFreqKnob, eqQKnob;
     bool eqBypassed = false, eqStoredValid = false;
@@ -2048,6 +2382,7 @@ private:
 
     VuMeter vuMeter;
     VuNeedle vuNeedle;
+    VuFaceB1 vuFace; // item 116: the channels' VU face (the master keeps the needle)
     ConsoleFader railFader;
     Knob panKnob;
     juce::TextButton muteButton, soloButton;

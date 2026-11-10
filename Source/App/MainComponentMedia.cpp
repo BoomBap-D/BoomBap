@@ -194,8 +194,11 @@ bool MainComponent::decodeSampleFile (const File& file, std::vector<float>& mono
 // One loader for every row kind (fix pass 2):
 // - kit rows 0-4 (item 40): the file BINDS to the row - the row plays the
 //   sample with its steps until Reset brings the built-in drum back.
-// - sample rows 5-7: the classic path (waveform panel + pad 1-3).
-// - pad rows 8-20: the row IS pad (track - 4) - same sample store.
+// - sample rows 5-7: the classic path (waveform panel + the row's own
+//   store) - Round 6 item 109: NOT the pad bank any more.
+// - rows 8-20: the row's own sample slot in the engine's row store
+//   (item 109 - the row is no longer the pad; rows and pads hold
+//   separate sounds and load through separate doors).
 // - added rows 21+: the row's own sample slot (item 39).
 void MainComponent::loadSampleFile (int track, const File& file)
 {
@@ -216,21 +219,19 @@ void MainComponent::loadSampleFile (int track, const File& file)
     }
     else if (track < boombap::BoomBapEngine::kFirstOwnRow)
     {
-        const int pad = track - boombap::BoomBapEngine::Sample1; // rows 5..20 -> pads 1..16
-        if (pad < 3)
+        const int row = track - boombap::BoomBapEngine::Sample1; // rows 5..20
+        // Round 6 (item 109): the row's file reference is its OWN -
+        // the pad bank is never touched from the row side, in either
+        // direction. Pads change only by explicit pad action.
+        rowPadFiles[(size_t) row] = file;
+        if (row < 3)
         {
-            waveData[(size_t) pad] = mono;
-            waveRates[(size_t) pad] = fileSr;
-            samplePaths[(size_t) pad] = file;
-            showWaveform (pad);
-        }
-        else
-        {
-            padFiles[(size_t) pad] = file;
+            waveData[(size_t) row] = mono;
+            waveRates[(size_t) row] = fileSr;
+            samplePaths[(size_t) row] = file;
+            showWaveform (row);
         }
         engine.loadSample (track, std::move (mono), fileSr);
-        if (padBank != nullptr) padBank->refreshPad (pad);
-        if (mpcPanel != nullptr) mpcPanel->refreshPad (pad);
     }
     else
     {
@@ -253,12 +254,6 @@ void MainComponent::fireMediaChanged()
 
 void MainComponent::loadPadFile (int pad, const File& file)
 {
-    if (pad < 3)
-    {
-        loadSampleFile (boombap::BoomBapEngine::Sample1 + pad, file);
-        return;
-    }
-
     std::vector<float> mono;
     double fileSr = 44100.0;
     if (! decodeSampleFile (file, mono, fileSr))
@@ -269,11 +264,31 @@ void MainComponent::loadPadFile (int pad, const File& file)
     }
 
     beginUndoGesture(); // Pass 2 item 38
+    // Round 6 (item 109): a pad load touches the PAD only, all sixteen
+    // of them the same way - it never writes a sequencer row, the
+    // waveform panel's record, or a track name.
     engine.loadPadSample (pad, std::move (mono), fileSr);
     padFiles[(size_t) pad] = file;
     if (padBank != nullptr) padBank->refreshPad (pad);
     if (mpcPanel != nullptr) mpcPanel->refreshPad (pad);
-    syncTrackName (boombap::BoomBapEngine::Sample1 + pad); // item 88: name in column one
+    fireMediaChanged();
+    endUndoGesture();
+}
+
+// Round 6 (item 110): right-click a pad -> CLEAR PAD. One undoable
+// gesture: the pad's sample and file reference go; its settings
+// survive (this clears a SOUND, not a configuration - the same law
+// as a row's clear). Only this pad: the sequencer row with the same
+// number is a separate store now (item 109) and keeps its sound.
+void MainComponent::clearPad (int pad)
+{
+    if (pad < 0 || pad >= 16) return;
+    if (! engine.padHasSample (pad) && padFiles[(size_t) pad] == File()) return;
+    beginUndoGesture();
+    engine.clearPad (pad);
+    padFiles[(size_t) pad] = File();
+    if (padBank != nullptr) padBank->refreshPad (pad);
+    if (mpcPanel != nullptr) mpcPanel->refreshPad (pad);
     fireMediaChanged();
     endUndoGesture();
 }
@@ -292,7 +307,7 @@ void MainComponent::openPadChooser (int pad)
 
 String MainComponent::padDisplayName (int pad) const
 {
-    const File f = pad < 3 ? samplePaths[(size_t) pad] : padFiles[(size_t) pad];
+    const File f = padFiles[(size_t) pad]; // item 109: every pad has its own file
     return f == File() ? String() : f.getFileName();
 }
 
@@ -310,10 +325,7 @@ void MainComponent::syncTrackName (int track)
     File f;
     if (track <= E::Clap) f = rowFiles[(size_t) track];
     else if (track < E::kFirstOwnRow)
-    {
-        const int pad = track - E::Sample1;
-        f = pad < 3 ? samplePaths[(size_t) pad] : padFiles[(size_t) pad];
-    }
+        f = rowPadFiles[(size_t) (track - E::Sample1)]; // item 109: the ROW's file, never the pad's
     else f = rowFiles[(size_t) track];
     engine.setTrackContentName (track, f == File() ? std::string()
                                                   : f.getFileNameWithoutExtension().toStdString());
@@ -337,7 +349,7 @@ void MainComponent::copyPadToPad (int fromPad, int toPad)
 {
     using E = boombap::BoomBapEngine;
     if (fromPad == toPad || fromPad < 0 || fromPad >= 16 || toPad < 0 || toPad >= 16) return;
-    const File file = fromPad < 3 ? samplePaths[(size_t) fromPad] : padFiles[(size_t) fromPad];
+    const File file = padFiles[(size_t) fromPad]; // item 109: every pad has its own file
     if (file == File() || ! file.existsAsFile()) return;
     if (! engine.padHasSample (fromPad)) return;
 
@@ -348,21 +360,11 @@ void MainComponent::copyPadToPad (int fromPad, int toPad)
     if (! decodeSampleFile (file, mono, fileSr)) return;
 
     beginUndoGesture();
-    if (toPad < 3)
-    {
-        waveData[(size_t) toPad] = mono;
-        waveRates[(size_t) toPad] = fileSr;
-        samplePaths[(size_t) toPad] = file;
-        engine.loadSample (E::Sample1 + toPad, std::move (mono), fileSr);
-        if (toPad == waveTrack) showWaveform (toPad);
-    }
-    else
-    {
-        engine.loadPadSample (toPad, std::move (mono), fileSr);
-        padFiles[(size_t) toPad] = file;
-    }
+    // Round 6 (item 109): the copy lands on the pad only - no row,
+    // waveform record or track name is written from the pad side.
+    engine.loadPadSample (toPad, std::move (mono), fileSr);
+    padFiles[(size_t) toPad] = file;
     engine.setPadParams (toPad, snapshot);
-    syncTrackName (E::Sample1 + toPad);
     if (padBank != nullptr) padBank->refreshPad (toPad);
     if (mpcPanel != nullptr) mpcPanel->refreshPad (toPad);
     fireMediaChanged();
@@ -395,6 +397,64 @@ void MainComponent::moveWaveDrag (juce::Point<int> screenPos)
     waveDragPadAt (screenPos);
 }
 
+// Round 6 (item 114): the waveform drag's other landing places - a
+// sequencer row (that track takes the file) and the multitrack (the
+// file becomes a clip at the drop point). The pad hit test above
+// runs first in the drag-end handler; these ask the panels directly,
+// in LOCAL coordinates converted from the screen point.
+int MainComponent::waveDragRowAt (juce::Point<int> screenPos)
+{
+    if (sequencerPanel == nullptr || ! sequencerPanel->isShowing()) return -1;
+    return sequencerPanel->trackAtScreenPosition (screenPos);
+}
+
+bool MainComponent::waveDragMultitrackAt (juce::Point<int> screenPos, int& trackOut, long long& startOut)
+{
+    if (multitrack == nullptr || ! multitrack->isShowing()) return false;
+    return multitrack->dropPoint (screenPos, trackOut, startOut);
+}
+
+void MainComponent::dropWaveformFileOnRow (int track)
+{
+    const File f = samplePaths[(size_t) waveTrack];
+    if (f == File() || ! f.existsAsFile()) return;
+    loadSampleFile (track, f); // the row's own load path (item 109 keeps it off the pads)
+}
+
+void MainComponent::dropWaveformFileOnMultitrack (int track, long long startSamples)
+{
+    const File f = samplePaths[(size_t) waveTrack];
+    if (f == File() || ! f.existsAsFile()) return;
+    std::vector<float> mono;
+    double fileSr = 44100.0;
+    if (! decodeSampleFile (f, mono, fileSr)) return;
+    // Clips render at the engine's rate - resample on the way in
+    // (linear; the clip is a placement, not a mastering pass).
+    const double sr = engine.getSampleRate();
+    if (sr > 0.0 && std::abs (fileSr - sr) > 0.5)
+    {
+        const double ratio = sr / fileSr;
+        std::vector<float> rs ((size_t) std::max (1.0, (double) mono.size() * ratio));
+        for (size_t i = 0; i < rs.size(); ++i)
+        {
+            const double pos = (double) i / ratio;
+            const size_t i0 = std::min ((size_t) pos, mono.size() - 1);
+            const float frac = (float) (pos - (double) i0);
+            const float a = mono[i0];
+            const float b = mono[std::min (i0 + 1, mono.size() - 1)];
+            rs[i] = a + (b - a) * frac;
+        }
+        mono = std::move (rs);
+    }
+    beginUndoGesture();
+    if (engine.placeDataAsClip (std::move (mono), track, startSamples) >= 0)
+    {
+        if (multitrack != nullptr) multitrack->refreshFromEngine();
+        fireMediaChanged();
+    }
+    endUndoGesture();
+}
+
 void MainComponent::openPadBank()
 {
     if (padWindow == nullptr)
@@ -409,10 +469,11 @@ void MainComponent::openPadBank()
         padBank->onAfterChange = [this] { endUndoGesture(); };
         padBank->onSelectPad = [this] (int ch) { selectChannel (ch); };
         padBank->onPadCopyRequest = [this] (int from, int to) { copyPadToPad (from, to); };
+        padBank->onPadClearRequest = [this] (int pad) { clearPad (pad); }; // item 110
         padWindow = std::make_unique<PadWindow> ("BoomBap Pad Bank", boombap::ui::bg());
         padWindow->setLookAndFeel (&lookAndFeel);
         padWindow->setContentNonOwned (padBank.get(), false); // the unique_ptr owns it - the window must not delete it too
-        padWindow->centreWithSize (860, 500);
+        padWindow->centreWithSize (980, 560); // item 111b: the rebalanced editor opens with room to be one
     }
     padBank->refreshAll();
     padWindow->setVisible (true);

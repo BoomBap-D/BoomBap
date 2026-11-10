@@ -220,7 +220,7 @@ struct ProjectSettings
     static constexpr int kMaxAudioClips = 16;
     int numAudioTracks = 1;
     AudioClip audioClips[kMaxAudioClips];
-    float audioGain[kAudioTracks] = { 0.9f };
+    float audioGain[kAudioTracks] = { 1.0f }; // item 113: flat
     bool  audioMute[kAudioTracks] = { false };
     bool  audioSolo[kAudioTracks] = { false };
 
@@ -271,7 +271,7 @@ struct ProjectSettings
     bool  synthMute = false, synthSolo = false, pianoMute = false, pianoSolo = false;
     float padBusGain = 1.0f, padBusPan = 0.0f;  // item 7: one fader for the pad set
     bool  padBusMute = false;
-    float vocalGain = 0.9f, vocalPan = 0.0f;    // the vocal channel's fader/pan
+    float vocalGain = 1.0f, vocalPan = 0.0f;    // the vocal channel's fader/pan (item 113: flat)
     bool  vocalMute = false, vocalSolo = false;
     bool  masterLimiterOn = false;              // the master bus's final stage
     float masterLimiterCeilingDb = -1.0f;
@@ -279,8 +279,8 @@ struct ProjectSettings
     // Instrument sounds are global, like the drum sounds.
     int   synthWave = 0;              // 0 saw, 1 square, 2 triangle, 3 sine
     float synthCutoffHz = 4500.0f, synthReso = 0.25f,
-          synthAttackMs = 8.0f, synthReleaseMs = 240.0f, synthLevel = 0.8f;
-    float pianoBright = 0.6f, pianoDecayMs = 2200.0f, pianoLevel = 0.85f;
+          synthAttackMs = 8.0f, synthReleaseMs = 240.0f, synthLevel = 1.0f;
+    float pianoBright = 0.6f, pianoDecayMs = 2200.0f, pianoLevel = 1.0f;
 
     // The default is the classic boom-bap starter pattern.
     ProjectSettings()
@@ -294,11 +294,11 @@ struct ProjectSettings
         }
         for (int t = 0; t < kTracks; ++t)
         {
-            trackGain[t] = 0.8f;
+            trackGain[t] = 1.0f; // item 113: every fader starts FLAT (unity)
             trackMute[t] = false;
             trackSolo[t] = false;
         }
-        for (int i = 0; i < kAudioTracks; ++i) audioGain[i] = 0.9f;
+        for (int i = 0; i < kAudioTracks; ++i) audioGain[i] = 1.0f; // item 113: flat
         for (int p = 0; p < kPads; ++p)
         {
             padStart[p] = 0.0f; padEnd[p] = 1.0f; padTune[p] = 0.0f;

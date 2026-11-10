@@ -189,6 +189,9 @@ class PadButton : public juce::Component
 {
 public:
     std::function<void (int)> onPress;
+    // Round 6 (item 110): a right-click asks for the pad's menu (LOAD /
+    // CLEAR PAD) instead of playing the pad.
+    std::function<void (int)> onContextMenu;
     // Round 3 (item 100): drag hooks - (pad, screen position). The
     // press itself still plays the pad (that is how you pick a sound
     // UP); a drag only begins once the pointer has travelled, so
@@ -226,14 +229,24 @@ public:
         if (flash > 0.0f) { flash = std::max (0.0f, flash - 0.09f); repaint(); }
     }
 
-    void mouseDown (const juce::MouseEvent&) override
+    bool dragHasStarted() const { return dragStarted; } // item 110: the threshold, testable
+
+    void mouseDown (const juce::MouseEvent& e) override
     {
+        if (e.mods.isPopupMenu())
+        {
+            if (onContextMenu) onContextMenu (padIndex);
+            return;
+        }
         if (onPress) onPress (padIndex);
     }
 
     void mouseDrag (const juce::MouseEvent& e) override
     {
-        if (! dragStarted && e.getDistanceFromDragStart() > 8)
+        // Round 6 (item 110): the travel threshold is 16 px now, not 8 -
+        // at 8 an ordinary emphatic click wobbled into a copy and pads
+        // filled with duplicates. A deliberate drag travels further.
+        if (! dragStarted && e.getDistanceFromDragStart() > 16)
         {
             dragStarted = true;
             if (onDragBegin) onDragBegin (padIndex, localPointToGlobal (e.position).roundToInt());
@@ -569,7 +582,8 @@ private:
 
 // The pad bank: a 4x4 pad grid plus an editor for the selected pad
 // (load, chop start/end, tune, gain, velocity sensitivity, reverse, mute group).
-// Pads 1-3 are the step sequencer's sample rows; pads 4-16 are live pads.
+// Round 6 (item 109): the pads are their own store - no pad IS a
+// sequencer row any more; rows hold their own sounds in the engine.
 class PadBankComponent : public juce::Component, private juce::Timer
 {
 public:
@@ -582,6 +596,8 @@ public:
         for (int i = 0; i < 16; ++i)
         {
             pads[i].onPress = [this] (int p) { selectPad (p, true); };
+            // Round 6 (item 110): right-click a pad -> its menu.
+            pads[i].onContextMenu = [this] (int p) { showPadMenu (p); };
             // item 100: pad -> pad drags run through the bank (the
             // ghost, the hover light, and the copy request live here)
             pads[i].onDragBegin = [this] (int p, juce::Point<int> pos) { beginPadDrag (p, pos); };
@@ -589,6 +605,10 @@ public:
             pads[i].onDragEnd   = [this] (int, juce::Point<int> pos)   { endPadDrag (pos); };
             addAndMakeVisible (pads[i]);
         }
+
+        // Round 6 (item 112b): the bank's own segmented meter, running
+        // the whole right side of the bank.
+        addAndMakeVisible (bankMeter);
 
         // Item 88: the visual-mix strip over the bank - the multitrack
         // strip's pad twin (names across the top, activity + selection
@@ -604,11 +624,12 @@ public:
         title.setFont (juce::Font (15.0f, juce::Font::bold));
         addAndMakeVisible (title);
 
-        // Item 71: the ONE readable info strip for the selected pad,
-        // under the effects/gain controls.
-        infoStrip.setFont (juce::Font (13.5f, juce::Font::bold));
-        infoStrip.setColour (juce::Label::textColourId, boombap::ui::text());
-        addAndMakeVisible (infoStrip);
+        // Round 6 (item 111): the old info strip is GONE - it repeated
+        // the header's "PAD n - file" line at the bottom of the editor,
+        // which is the duplicated caption the item calls out. The
+        // header at the top is the ONE letterbox now; the guidance
+        // paragraph below the knobs stays (it teaches the gestures,
+        // it does not repeat the caption).
 
         // item 44: the selected pad's waveform, trimmable in place
         waveView.onTrim = [this] (float s, float e)
@@ -667,11 +688,9 @@ public:
         addAndMakeVisible (muteGroupBox);
 
         // Item 100: the wording that used to sit UNDER THE PADS (where
-        // it cost the pads their size, item 71) moves into the info
-        // panel under the knobs - same words, readable home. The info
-        // strip above it carries the selected pad's identity (the pad
-        // header names the pad too - the two are one panel, read
-        // together, not a duplication).
+        // it cost the pads their size, item 71) lives under the knobs
+        // now. (Round 6 item 111 rewrote the words for the decoupled
+        // pads and dropped the identity strip that shared this block.)
         // A read-only TextEditor, not a Label: a Label clips this
         // paragraph to one line instead of wrapping it (seen in the
         // Round 3 screenshots). The editor wraps at any column width;
@@ -746,6 +765,31 @@ public:
     // the copy (it owns the pads' files): the target pad receives the
     // source's sample plus an independent snapshot of its settings.
     std::function<void (int, int)> onPadCopyRequest;
+    // Round 6 (item 110): the pad menu's CLEAR PAD - the owner empties
+    // the pad as one undoable gesture.
+    std::function<void (int)> onPadClearRequest;
+
+    // Round 6 (item 110): the pad's right-click menu.
+    void showPadMenu (int pad)
+    {
+        selectPad (pad, false);
+        juce::PopupMenu m;
+        m.addItem (1, "Load sample...");
+        m.addItem (2, "Clear pad", engine.padHasSample (pad));
+        m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&pads[pad]),
+                         [this, pad] (int choice)
+                         {
+                             if (choice == 1 && onLoad) onLoad (pad);
+                             else if (choice == 2 && onPadClearRequest) onPadClearRequest (pad);
+                         });
+    }
+
+    // Round 6 (item 111a): the DOCKED bank (the main window's MPC tab)
+    // spends its height on the pads themselves - a squarer aspect
+    // makes them bigger than the pop-out's letterbox-friendly grid.
+    void setDockedMode (bool d) { if (dockedMode != d) { dockedMode = d; resized(); repaint(); } }
+    bool isDockedMode() const { return dockedMode; }
+    SegmentedLevelMeter& bankMeterComponent() { return bankMeter; }
 
     // ---- Round 3: drag + inspection doors (the same objects the mouse
     // drives; the waveform panel's drag and the regression tests both
@@ -786,8 +830,10 @@ public:
         const auto lay = layout();
         // Round 3: the name strip spans the top (it is its own
         // component, painted above this); the two panels sit below it.
+        // Round 6: the editor panel stops short of the bank meter's
+        // strip on the right edge.
         panel (8, 44, lay.gridRight + 8, getHeight() - 52);                    // pad grid
-        panel (lay.editorX - 12, 44, getWidth() - lay.editorX + 4, getHeight() - 52); // editor
+        panel (lay.editorX - 12, 44, getWidth() - lay.editorX - 10, getHeight() - 52); // editor
     }
 
     void resized() override
@@ -798,8 +844,12 @@ public:
         const auto lay = layout();
         const int W = getWidth(), H = getHeight();
 
-        // Item 88: the visual-mix strip spans the whole top.
-        nameStrip.setBounds (16, 10, W - 32, 26);
+        // Item 88: the visual-mix strip spans the whole top (stopping
+        // short of the bank meter's strip on the right).
+        nameStrip.setBounds (16, 10, W - 62, 24);
+
+        // Item 112b: the bank meter runs the whole right side.
+        bankMeter.setBounds (W - 24, 44, 16, H - 52);
 
         const int gridY = 50;
         for (int i = 0; i < 16; ++i)
@@ -807,19 +857,22 @@ public:
                                lay.padW, lay.padH);
 
         const int ex = lay.editorX;
-        const int colW = juce::jmax (200, W - ex - 16);
+        const int colW = juce::jmax (200, W - ex - 16 - 30); // the meter's strip is not the editor's
         title.setBounds (ex, 48, colW, 20);
 
         // The editor stack, top to bottom: waveform / ENVELOPE (item
-        // 101) / Start-End SLIDERS (item 80) / knobs / footer / INFO
-        // PANEL (item 100). The waveform takes what is left; when the
-        // column runs short the knobs give up size before the wave
-        // starves, and when the editor is WIDE the footer folds into
-        // the knob row instead of taking a row of its own.
-        const bool wideEditor = colW >= 640;
-        const int envH = juce::jlimit (40, 104, (H - 96) / 5);
+        // 101) / Start-End SLIDERS (item 80) / knobs / footer /
+        // guidance (item 100). The waveform takes what is left; when
+        // the column runs short the knobs give up size before the
+        // wave starves.
+        // Round 6 (item 111b): the envelope's share grows, the knobs
+        // shrink to a supporting size, and Reverse / Mute Group /
+        // None ALWAYS get a footer row of their own - the wide-editor
+        // fold that stacked them into the knob row's spare cells (the
+        // corner pile in D's photo) is gone.
+        const int envH = juce::jlimit (56, 130, (H - 96) / 4);
         const int sliderRowH = 40;
-        const int footerH = wideEditor ? 0 : 24;
+        const int footerH = 24;
         // Item 100: the guidance editor WRAPS - measure the paragraph
         // at this column width so the info block is exactly as tall as
         // the wrapped words need (the waveform absorbs the difference
@@ -834,9 +887,9 @@ public:
             tl.createLayout (measured, (float) juce::jmax (120, colW - 8));
             guidanceH = juce::jlimit (28, 120, (int) std::ceil (tl.getHeight()) + 6);
         }
-        const int infoH = H >= 400 ? 17 + guidanceH : 18;
+        const int infoH = H >= 400 ? guidanceH : 0; // item 111: guidance only - the duplicate strip is gone
         guidance.setVisible (H >= 400);
-        int knobSize = juce::jlimit (44, 88, (wideEditor ? colW / 5 : colW / 3) - 30);
+        int knobSize = juce::jlimit (44, 72, colW / 3 - 30);
         auto stackFor = [&] (int ks)
         {
             return 70 + envH + sliderRowH + (16 + ks + 18) + footerH + infoH + 4 * 7 + 10;
@@ -863,8 +916,7 @@ public:
 
         const int knobY = sliderY + sliderRowH + 7;
         Row* knobs[] = { &tuneRow, &gainRow, &velRow };
-        const int knobCells = wideEditor ? 5 : 3;
-        const int cellW = colW / knobCells;
+        const int cellW = colW / 3;
         for (int i = 0; i < 3; ++i)
         {
             const int cellX = ex + i * cellW;
@@ -873,26 +925,18 @@ public:
                                         knobSize, knobSize + 16);
         }
         const int knobRowH = 16 + knobSize + 18;
-        if (wideEditor)
-        {
-            reverseToggle.setBounds (ex + 3 * cellW + 6, knobY + 30, 130, 26);
-            muteLabel.setBounds (ex + 4 * cellW + 6, knobY + 16, 110, 14);
-            muteGroupBox.setBounds (ex + 4 * cellW + 6, knobY + 32, 110, 24);
-        }
 
+        // Item 111b: the footer row - Reverse, Mute Group and its
+        // None-first box, side by side in the open, at every width.
         const int footY = knobY + knobRowH + 4;
-        if (! wideEditor)
-        {
-            reverseToggle.setBounds (ex, footY, 130, 24);
-            muteLabel.setBounds (ex + 142, footY + 2, 84, 20);
-            muteGroupBox.setBounds (ex + 230, footY, 110, 24);
-        }
+        reverseToggle.setBounds (ex, footY, 130, 24);
+        muteLabel.setBounds (ex + 142, footY + 2, 84, 20);
+        muteGroupBox.setBounds (ex + 230, footY, 110, 24);
 
-        // Item 100: the info panel UNDER THE KNOBS - the selected pad's
-        // line, then the guidance that used to live under the pads.
+        // Item 100's guidance, under the footer (the duplicate info
+        // strip that shared this block is gone - item 111).
         const int infoY = footY + footerH + 4;
-        infoStrip.setBounds (ex, infoY, colW, 16);
-        guidance.setBounds (ex, infoY + 17, colW, juce::jmax (0, infoH - 17));
+        guidance.setBounds (ex, infoY, colW, juce::jmax (0, infoH));
     }
 
 private:
@@ -916,11 +960,18 @@ private:
         // touch squarer (1.25), closer to the hardware they evoke.
         // Both moves make the pads BIGGER at every window size the
         // bank opens at (item 100: "a tiny bit bigger still").
-        const int availW = juce::jmax (320, (getWidth() * 55) / 100 - 24);
+        // Round 6: 30 px on the right belongs to the bank meter
+        // (item 112b) in both homes of the bank; the grid's share
+        // rises 55 -> 56 so the pads keep the size item 100 won them
+        // (the meter's strip comes out of the editor's side instead).
+        const int availW = juce::jmax (320, ((getWidth() - 30) * 56) / 100 - 24);
         const int availH = juce::jmax (160, getHeight() - 60);
         const int cellW = (availW - 24) / 4, cellH = (availH - 24) / 4;
-        lay.padW = juce::jmin (cellW, (int) (cellH * 1.25f));
-        lay.padH = (int) (lay.padW / 1.25f);
+        // Item 111a: docked pads run squarer (1.12) - bigger in the
+        // tab's fixed height; the pop-out keeps its 1.25 letterbox.
+        const float aspect = dockedMode ? 1.12f : 1.25f;
+        lay.padW = juce::jmin (cellW, (int) (cellH * aspect));
+        lay.padH = (int) (lay.padW / aspect);
         lay.gridRight = 16 + 4 * lay.padW + 3 * 8;
         lay.editorX = lay.gridRight + 28;
         return lay;
@@ -988,16 +1039,11 @@ private:
         muteGroupBox.setSelectedId (pp.muteGroup + 1, juce::dontSendNotification);
         const juce::String n = nameFor ? nameFor (selected) : juce::String();
         const juce::String fileName = n.isEmpty() ? juce::String() : juce::File (n).getFileName();
-        // Items 71/74: the compact header label and the ONE info strip
-        // carry the selected pad's identity - the pads themselves don't.
+        // Items 71/74 + Round 6 (item 111): the compact header label is
+        // the ONE place the selected pad's identity is written.
         title.setText ("PAD " + juce::String (selected + 1)
                        + (fileName.isEmpty() ? juce::String (" - no sample") : " - " + fileName),
                        juce::dontSendNotification);
-        infoStrip.setText ("PAD " + juce::String (selected + 1) + " - "
-                           + (fileName.isEmpty()
-                                ? juce::String ("empty - click the waveform above to load a sample")
-                                : fileName + " - loaded, ready to play"),
-                           juce::dontSendNotification);
         // item 44: the waveform follows the selected pad
         waveView.setData (engine.getPadSampleData (selected), pp.startFrac, pp.endFrac);
         // item 101: and the envelope lane shows the pad's points (or
@@ -1062,6 +1108,10 @@ private:
         for (auto& p : pads) p.decayFlash();
         nameStrip.decayFlashes();
         waveView.setActive (pads[selected].isFlashing());
+        // Item 112b: the bank meter watches the pad bus - after item
+        // 109 that bus carries pad sound only, so the meter is honest.
+        bankMeter.setLevel (juce::jmax (engine.peekChannelPeak (boombap::BoomBapEngine::kPadBusChannel, false),
+                                        engine.peekChannelPeak (boombap::BoomBapEngine::kPadBusChannel, true)));
     }
 
     boombap::BoomBapEngine& engine;
@@ -1072,15 +1122,18 @@ private:
     int selected = 0;
 
     PadNameStrip nameStrip;
-    juce::Label title, infoStrip, muteLabel;
+    SegmentedLevelMeter bankMeter; // item 112b
+    bool dockedMode = false;       // item 111a
+    juce::Label title, muteLabel;
     juce::TextEditor guidance;
     // The item-100 guidance paragraph (measured in resized() to size
     // its wrapping editor; the same words the constructor sets).
     inline static const juce::String guidanceText =
-        "Click a pad to play it. Pads 1-3 are the sequencer's sample rows - same samples, "
-        "same settings; while the beat plays, hitting one also writes its step into the "
-        "pattern. Pads 4-16 are live pads, played by clicking. Drag a pad onto another "
-        "pad - or drag from the sample waveform - to copy a sample across.";
+        "Click a pad to play it. The pads hold their OWN sounds - the sequencer's rows "
+        "hold theirs (Round 6, item 109); load a pad here and it changes nothing else. "
+        "While the beat plays, hitting a pad also writes its step into the pattern. "
+        "Drag a pad onto another pad - or drag from the sample waveform - to copy a "
+        "sample across. Right-click a pad to clear it.";
     PadWaveView waveView;
     PadEnvelopeView envView;
     Row startRow, endRow, tuneRow, gainRow, velRow;

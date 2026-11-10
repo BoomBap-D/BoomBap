@@ -20,6 +20,10 @@ public:
     {
         std::function<void (int)> onLoadSample; // a row's Load... button
         std::function<void (int)> onRoll;       // a row's ROLL button
+        // Round 6 (item 125 rider): the ghost strip is a DOOR - a
+        // click anywhere on it asks for that track's piano roll,
+        // the same summon the row's ROLL button makes.
+        std::function<void (int)> onGhostRoll;
         std::function<void (int)> onNameMenu;   // a row's name was RIGHT-clicked (items 40/69; the menu moved off the left click, item 86)
         std::function<void (int)> onDeleteRow;  // a user row's visible X (item 87; the action is item 69's)
         std::function<void()> onPatternChanged; // pattern A-H switched (the roll follows)
@@ -29,6 +33,12 @@ public:
         std::function<void()> onBeforeChange;
         std::function<void()> onAfterChange;
         std::function<void (int)> onSelectRow;
+        // Round 6 (item 124): the NAME click-to-select gesture (left
+        // button only) also asks for an audition of the track's
+        // sound. Separate from onSelectRow on purpose: that callback
+        // fires for LOAD / ROLL / MUTE / SOLO clicks too, and those
+        // gestures must stay silent - only the name tap auditions.
+        std::function<void (int)> onSelectAudition;
         // Round 5 (item 107): a rename committed in the inline editor
         // (already trimmed; empty = clear the override).
         std::function<void (int, const juce::String&)> onRenameTrack;
@@ -81,6 +91,13 @@ public:
         };
         addAndMakeVisible (ghostToggle);
         gridContent.addAndMakeVisible (ghostStrip);
+        // Item 125 rider: clicking the strip summons the roll of the
+        // track it belongs to (the strip's track is the selected row).
+        ghostStrip.onClicked = [this]
+        {
+            if (callbacks.onGhostRoll && ghostStrip.trackForTest() >= 0)
+                callbacks.onGhostRoll (ghostStrip.trackForTest());
+        };
 
         viewport.setViewedComponent (&gridContent, false);
         viewport.setScrollBarsShown (true, false);
@@ -213,6 +230,11 @@ public:
             for (int s = 0; s < kSteps; ++s)
                 rows[t].steps[s].setVelocity (engine.getStep (t, s));
         ghostStrip.repaint();
+        // Round 6 (item 125): lane CONTENT is the strip's on/off law,
+        // and content changes outside selection changes too (roll
+        // edits, pattern switches, undo) - re-run the layout so the
+        // band appears/retires with the lane it belongs to.
+        layoutRows();
     }
 
     // Round 4 (item 99a): the ghost strip's switch, settable from the
@@ -226,6 +248,8 @@ public:
     bool isGhostEnabled() const { return ghostEnabled; }
     bool ghostStripShowing() const { return ghostStrip.isVisible(); }
     juce::Component& ghostStripForTest() { return ghostStrip; }
+    const Callbacks& callbacksForTest() const { return callbacks; }
+    juce::Component& rowNameComponent (int t) { return rows[juce::jlimit (0, kTracks - 1, t)].name; }
 
     void refreshPatternUi()
     {
@@ -269,6 +293,19 @@ public:
     void refreshAllRowNames()
     {
         for (int t = 0; t < kTracks; ++t) refreshRowName (t);
+    }
+
+    // Round 6 (item 114): which track's row a SCREEN point falls in -
+    // the waveform panel's drag asks on drop. Rows are children of the
+    // grid content, so the point is read in that space; anything
+    // outside the grid is -1.
+    int trackAtScreenPosition (juce::Point<int> screenPos) const
+    {
+        const auto p = gridContent.getLocalPoint (nullptr, screenPos);
+        if (! gridContent.getLocalBounds().contains (p)) return -1;
+        for (int t = 0; t < kTracks; ++t)
+            if (p.getY() >= rowTopY (t) && p.getY() < rowTopY (t) + lastRowH) return t;
+        return -1;
     }
 
     // Round 1 (item 86): the selected row's NAME lights - solid accent
@@ -372,6 +409,12 @@ public:
             if (e.eventComponent == &rows[t].name)
             {
                 if (callbacks.onSelectRow) callbacks.onSelectRow (t);
+                // Round 6 (item 124): a LEFT-button tap on the name
+                // auditions the track's sound - the click-to-select
+                // gesture only. The right-click's job is the menu;
+                // it selects (above) but stays silent.
+                if (! e.mods.isRightButtonDown() && callbacks.onSelectAudition)
+                    callbacks.onSelectAudition (t);
                 // Round 5 (item 107): EVERY row's right-click opens
                 // its menu now - the pad rows (5..20) had none, and
                 // rename belongs on all of them.
@@ -495,11 +538,14 @@ private:
         const int n = engine.getNumTracks();
         const int rowH = juce::jmax (28, juce::roundToInt (35.0f * scaleY));
         lastRowH = rowH;
-        // Round 4 (item 99a): the ghost band exists only while the
-        // selected row owns a pitched lane - an empty strip under a
-        // lane-less row would be furniture, not information.
+        // Round 4 (item 99a) as ruled by Round 6 (item 125): the
+        // ghost roll is a property of a TRACK, earned by content -
+        // the band exists only while the selected row's OWN lane
+        // holds notes. Selecting a track that never used the
+        // keyboard/piano roll never raises it, however the switch
+        // sits; the switch remains the owner's master off.
         const bool ghostActive = ghostEnabled && selectedRow >= 0
-                              && engine.trackHasGhostLane (selectedRow);
+                              && engine.trackHasGhostContent (selectedRow);
         layoutGhostH = ghostActive ? 20 : 0;
         gridContent.setSize (juce::jmax (200, viewport.getWidth()),
                              juce::jmax (viewport.getHeight(), n * rowH + layoutGhostH));
@@ -563,6 +609,12 @@ private:
     public:
         explicit GhostStrip (boombap::BoomBapEngine& eng) : engine (eng) {}
         void setTrack (int t) { track = t; repaint(); }
+        int trackForTest() const { return track; }
+        // Item 125 rider: the strip is clickable end to end; the
+        // panel routes the click to its onGhostRoll callback.
+        std::function<void()> onClicked;
+        void mouseDown (const juce::MouseEvent&) override { if (onClicked) onClicked(); }
+        void mouseEnter (const juce::MouseEvent&) override { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
 
         void paint (juce::Graphics& g) override
         {

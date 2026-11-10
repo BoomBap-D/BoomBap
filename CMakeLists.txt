@@ -426,6 +426,30 @@ if(BOOMBAP_BUILD_TESTS)
     endif()
     add_test(NAME round5 COMMAND Round5Test)
 
+    # round-6 test (Breakdown #1 items 108-118: the preset-save crash
+    # fix, the pad/row decoupling, CLEAR PAD + the drag guard, the pad
+    # bank layout, the meter laws incl. the B1 VU face, flat faders,
+    # waveform drag targets, the family-A transport + PAUSE, the
+    # centred EQ buttons + RESET, and the UNDO/REDO face + chain)
+    add_executable(Round6Test
+        Tests/Round6Test.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp)
+    target_link_libraries(Round6Test PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+    target_compile_definitions(Round6Test PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(Round6Test PRIVATE X11)
+    endif()
+    add_test(NAME round6 COMMAND Round6Test)
+
     # recent-projects list test (storage logic, no UI)
     add_executable(RecentProjectsTest Tests/RecentProjectsTest.cpp)
     target_link_libraries(RecentProjectsTest PRIVATE juce::juce_gui_extra juce::juce_gui_basics)

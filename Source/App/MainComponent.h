@@ -107,6 +107,25 @@ public:
     // function a drag landing calls.
     void driveCopyPadToPad (int fromPad, int toPad) { copyPadToPad (fromPad, toPad); }
 
+    // Round 6 doors - the same objects and functions the UI drives:
+    // the row store's truth (item 109), CLEAR PAD (item 110), the
+    // waveform view + multitrack for the drag targets (item 114), the
+    // transport keys (item 115) and the UNDO/REDO pair (item 118).
+    bool rowHasSampleForTest (int row) const { return engine.rowHasSample (row); }
+    bool padHasSampleForTest (int pad) const { return engine.padHasSample (pad); }
+    void driveClearPad (int pad) { clearPad (pad); }
+    WaveformView* waveViewComponent() { return &waveView; }
+    MultitrackComponent* multitrackComponent() { return multitrack.get(); }
+    PadBankComponent* mpcPanelComponent() { return mpcPanel.get(); }
+    TransportButton* transportButtonForTest (int i)
+    {
+        TransportButton* all[] = { &toStartButton, &rewButton, &pauseButton, &playButton,
+                                   &stopButton, &ffButton, &toEndButton };
+        return (i >= 0 && i < 7) ? all[i] : nullptr;
+    }
+    juce::TextButton& undoButtonForTest() { return undoButton; }
+    juce::TextButton& redoButtonForTest() { return redoButton; }
+
     // Fix Pass 3 (item 75): the pad-load regression test drives the exact
     // decode + pad-file load paths the pad bank's Load button uses -
     // same private functions, no test-only back doors.
@@ -120,6 +139,7 @@ public:
     // ---- Pass 2: the Station + global undo (items 19/38) ----
     void openStation();
     void selectChannel (int ch);
+    void auditionTrack (int track); // item 124: one play of a track's sound (name-tap gesture only)
     int selectedChannelId() const { return selectedChannel; }
     void beginUndoGesture();
     void endUndoGesture();
@@ -172,6 +192,7 @@ private:
     void updateMinimiseCoupling (bool minimised);
     void togglePlay();
     void startTransport();
+    void pauseTransport(); // Round 6 (item 115): PAUSE - freeze, don't park
     void stopTransport();
     void seekBySteps (int steps); // Round 2 (item 93): REW/FF land here
     void startAudioOnlyPlayback();              // item 47: the audio view's own PLAY
@@ -204,6 +225,7 @@ private:
     void showWaveform (int index);
     void openPadChooser (int pad);
     void loadPadFile (int pad, const juce::File& file);
+    void clearPad (int pad); // Round 6 (item 110): the pad menu's CLEAR PAD
     // Round 3 (item 88): track names derive from the file bound to the
     // row - these keep the engine's content names (and the sequencer's
     // first column) in step with the file arrays.
@@ -214,6 +236,12 @@ private:
     // Round 3 (item 100): the waveform panel's drag onto a pad.
     void moveWaveDrag (juce::Point<int> screenPos);
     int waveDragPadAt (juce::Point<int> screenPos);
+    // Round 6 (item 114): the same drag's other two landings - a
+    // sequencer row (loads that track) and the multitrack (a clip).
+    int waveDragRowAt (juce::Point<int> screenPos);
+    bool waveDragMultitrackAt (juce::Point<int> screenPos, int& trackOut, long long& startOut);
+    void dropWaveformFileOnRow (int track);
+    void dropWaveformFileOnMultitrack (int track, long long startSamples);
     bool decodeSampleFile (const juce::File& file, std::vector<float>& monoOut, double& sampleRateOut);
     void openPadBank();
     juce::String padDisplayName (int pad) const;
@@ -272,14 +300,21 @@ private:
     int dirtyTick = 0;
 
     // transport and master
-    // Round 2 (item 93): TO START / REW / PLAY / STOP / FF / TO END -
-    // one TransportNav reads the double-presses for both this row and
-    // the Station's transport.
-    juce::TextButton toStartButton { "|<< START" }, rewButton { "REW" },
-                     playButton { "PLAY" },
-                     stopButton { "STOP" },
-                     ffButton { "FF" }, toEndButton { "END >>|" },
-                     clearButton { "Clear" }, resetButton { "Reset" };
+    // Round 2 (item 93): one TransportNav reads the double-presses for
+    // both this row and the Station's transport.
+    // Round 6 (item 115): the row itself is family A "Studio Console"
+    // keys now (chunky charcoal, amber glyphs, amber ring on PLAY) in
+    // D's order - TO START / REW / PAUSE / PLAY / STOP / FF / TO END -
+    // PLAY dead centre of the seven, the framed clock in the middle
+    // of the row. PAUSE is new: it freezes the playhead where it
+    // stands, and PLAY from pause resumes there.
+    TransportButton toStartButton, rewButton, pauseButton, playButton,
+                    stopButton, ffButton, toEndButton;
+    juce::TextButton clearButton { "Clear" }, resetButton { "Reset" };
+    // Round 6 (item 118): the main window's own UNDO / REDO buttons -
+    // the snapshot history has run since Pass 2 (the Station has had
+    // its pair all along); this is its face on the main screen.
+    juce::TextButton undoButton { "UNDO" }, redoButton { "REDO" };
     boombap::TransportNav transportNav;
     TimeClock mainClock;
     int clockFormat = 0;
@@ -354,6 +389,10 @@ private:
 
     juce::TextButton padBankButton { "Pad Bank" };
     std::array<juce::File, 16> padFiles;
+    // Round 6 (item 109): the sequencer sample ROWS' own file
+    // references - rows and pads are separate stores now, each with
+    // its own array (index 0 = row Sample1).
+    std::array<juce::File, 16> rowPadFiles;
     std::unique_ptr<PadBankComponent> padBank;
     std::unique_ptr<PadWindow> padWindow;
 

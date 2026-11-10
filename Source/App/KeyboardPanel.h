@@ -343,6 +343,14 @@ public:
     // keys first, and a hidden tab's panel is never focused.
     bool keyPressed (const juce::KeyPress& key) override
     {
+        // Round 6 (item 118): a modified key is never a note. Ctrl+Z /
+        // Ctrl+Y / Ctrl+S and their kin belong to the main window's
+        // shortcuts - if this panel ate them as QWERTY notes, undo
+        // would die whenever the keyboard tab held focus. Returning
+        // false lets the event climb to MainComponent::keyPressed.
+        if (key.getModifiers().isCommandDown() || key.getModifiers().isCtrlDown()
+            || key.getModifiers().isAltDown())
+            return false;
         // octave arrows (item 27's VMK grammar) under the same focus rule
         if (key.getKeyCode() == juce::KeyPress::leftKey)  { setOctaveShift (octaveShift - 1); return true; }
         if (key.getKeyCode() == juce::KeyPress::rightKey) { setOctaveShift (octaveShift + 1); return true; }
@@ -401,10 +409,27 @@ public:
             auto r = keyRect (n);
             const bool held = isNoteHeld (n);
             const bool centre = n == lowestNote() + 12; // the Q row's C (C4 at shift 0)
-            g.setColour (held ? accent() : (centre ? panelAlt().brighter (0.25f) : panelAlt()));
-            g.fillRoundedRectangle (r.reduced (0.75f), 4.0f);
+            // Round 6 (item 123): a white key reads as a KEY, not a
+            // slice of one charcoal block - a real seam (the panel
+            // behind shows through the gap), a per-key vertical
+            // gradient (lit at the top, settling darker at the
+            // bottom), and a lit top edge. Same dark family, same
+            // geometry: keyRect is untouched, only the paint moves.
+            auto kr = r.reduced (1.5f, 0.5f);
+            const auto topCol = held ? accentHi()
+                                     : panelAlt().brighter (centre ? 0.60f : 0.40f);
+            const auto botCol = held ? accent()
+                                     : panelAlt().darker (0.30f);
+            g.setGradientFill (juce::ColourGradient (topCol, kr.getX(), kr.getY(),
+                                                     botCol, kr.getX(), kr.getBottom(), false));
+            g.fillRoundedRectangle (kr, 4.0f);
+            g.setColour (held ? juce::Colour (0xff14100a).withAlpha (0.55f)
+                              : text().withAlpha (0.30f));
+            g.drawLine (kr.getX() + 4.0f, kr.getY() + 1.0f, kr.getRight() - 4.0f, kr.getY() + 1.0f, 1.2f);
+            g.setColour (juce::Colours::black.withAlpha (0.35f));
+            g.drawLine (kr.getX() + 4.0f, kr.getBottom() - 1.0f, kr.getRight() - 4.0f, kr.getBottom() - 1.0f, 1.2f);
             g.setColour (border().withAlpha (0.8f));
-            g.drawRoundedRectangle (r.reduced (0.75f), 4.0f, 1.0f);
+            g.drawRoundedRectangle (kr, 4.0f, 1.0f);
             // the QWERTY letter (top) and the note name (bottom, C keys
             // + every white in the Q row's octave for orientation)
             const auto letter = boombap::qwertyCharForNote (n, octaveShift);
@@ -430,10 +455,24 @@ public:
             if (! isBlackKey (n)) continue;
             auto r = keyRect (n);
             const bool held = isNoteHeld (n);
-            g.setColour (held ? accentHi() : juce::Colour (0xff101014));
-            g.fillRoundedRectangle (r.reduced (0.75f), 3.0f);
+            // Round 6 (item 123): the black keys get the same
+            // treatment - their own near-black gradient, a lit top
+            // edge, and a faintly lit front (bottom) edge, the way a
+            // real black key catches light on its face.
+            auto kr = r.reduced (1.25f, 0.5f);
+            const auto topCol = held ? accentHi() : juce::Colour (0xff26262e);
+            const auto botCol = held ? accent()   : juce::Colour (0xff070708);
+            g.setGradientFill (juce::ColourGradient (topCol, kr.getX(), kr.getY(),
+                                                     botCol, kr.getX(), kr.getBottom(), false));
+            g.fillRoundedRectangle (kr, 3.0f);
+            g.setColour (held ? juce::Colour (0xff14100a).withAlpha (0.55f)
+                              : text().withAlpha (0.22f));
+            g.drawLine (kr.getX() + 3.0f, kr.getY() + 1.0f, kr.getRight() - 3.0f, kr.getY() + 1.0f, 1.1f);
+            g.setColour (held ? juce::Colour (0xff14100a).withAlpha (0.4f)
+                              : juce::Colour (0xff34343e));
+            g.drawLine (kr.getX() + 3.0f, kr.getBottom() - 1.0f, kr.getRight() - 3.0f, kr.getBottom() - 1.0f, 1.1f);
             g.setColour (border().withAlpha (0.9f));
-            g.drawRoundedRectangle (r.reduced (0.75f), 3.0f, 1.0f);
+            g.drawRoundedRectangle (kr, 3.0f, 1.0f);
             const auto letter = boombap::qwertyCharForNote (n, octaveShift);
             if (letter != 0)
             {

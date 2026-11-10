@@ -193,6 +193,21 @@ public:
         repaint();
     }
 
+    // Round 6 (item 114): a waveform drag asks where it would land -
+    // the audio lane under the point and the timeline position there,
+    // in the component's own mapping (the same xToSamples the ruler's
+    // seek uses). False when the point is not over a live lane.
+    bool dropPoint (juce::Point<int> screenPos, int& trackOut, long long& startOut) const
+    {
+        const auto p = getLocalPoint (nullptr, screenPos);
+        if (! getLocalBounds().contains (p)) return false;
+        const int t = laneAtY ((float) p.getY());
+        if (t < 0) return false;
+        trackOut = t;
+        startOut = juce::jmax (0LL, xToSamples ((float) p.getX()));
+        return true;
+    }
+
     // Fix Pass 3 (item 69): delete an added audio lane whole - the lane,
     // every clip on it, its mixer settings and its Station channel - as
     // one undoable action.

@@ -127,30 +127,42 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     addAndMakeVisible (stationButton);
     stationButton.onClick = [this] { openStation(); };
 
-    // ---- transport (Pass 1 item 2: big labelled MPC-style buttons;
-    // Round 2 item 93 completes the row: TO START / REW / PLAY / STOP /
-    // FF / TO END, with REW/FF stepping one step, or one bar on a
-    // double press) ----
+    // ---- transport (Pass 1 item 2: big MPC-style keys; Round 2 item
+    // 93 completed the navigation; Round 6 item 115 re-faces the row
+    // as family A "Studio Console" keys and adds PAUSE) ----
     {
         auto props = boombap::appPropertiesFile();
         clockFormat = juce::jlimit (0, 2, props->getIntValue ("clockFormat", 0));
     }
-    addAndMakeVisible (toStartButton);
-    addAndMakeVisible (rewButton);
-    addAndMakeVisible (playButton);
-    addAndMakeVisible (stopButton);
-    addAndMakeVisible (ffButton);
-    addAndMakeVisible (toEndButton);
+    toStartButton.setGlyph (TransportButton::Glyph::ToStart);
+    rewButton.setGlyph (TransportButton::Glyph::Rewind);
+    pauseButton.setGlyph (TransportButton::Glyph::Pause);
+    playButton.setGlyph (TransportButton::Glyph::Play);
+    stopButton.setGlyph (TransportButton::Glyph::Stop);
+    ffButton.setGlyph (TransportButton::Glyph::Forward);
+    toEndButton.setGlyph (TransportButton::Glyph::ToEnd);
+    for (auto* b : { &toStartButton, &rewButton, &pauseButton, &playButton,
+                     &stopButton, &ffButton, &toEndButton })
+        addAndMakeVisible (b);
     addAndMakeVisible (clearButton);
     addAndMakeVisible (resetButton);
-    playButton.setColour (TextButton::buttonColourId, boombap::ui::accent());
-    playButton.setColour (TextButton::textColourOffId, Colour (0xff14100a));
     toStartButton.onClick = [this] { navToStart(); };
     rewButton.onClick     = [this] { navRewind(); };
+    pauseButton.onClick   = [this] { pauseTransport(); };
     playButton.onClick    = [this] { startTransport(); };
     stopButton.onClick    = [this] { stopTransport(); };
     ffButton.onClick      = [this] { navForward(); };
     toEndButton.onClick   = [this] { navToEnd(); };
+    // Round 6 (item 118): UNDO / REDO on the main screen - the face
+    // for the Pass 2 snapshot history, beside the transport cluster.
+    boombap::ui::applyActionTrace (undoButton);
+    boombap::ui::applyActionTrace (redoButton);
+    addAndMakeVisible (undoButton);
+    addAndMakeVisible (redoButton);
+    undoButton.onClick = [this] { undoProject(); };
+    redoButton.onClick = [this] { redoProject(); };
+    undoButton.setEnabled (false);
+    redoButton.setEnabled (false);
     // the project bar's compact clock - the Station's big clock's twin
     mainClock.onCycleFormat = [this] { setClockFormat ((clockFormat + 1) % 3); };
     addAndMakeVisible (mainClock);
@@ -247,7 +259,16 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         if (padBank != nullptr) padBank->setDragHighlightPad (-1);
         if (mpcPanel != nullptr) mpcPanel->setDragHighlightPad (-1);
         const File f = samplePaths[(size_t) waveTrack];
-        if (pad >= 0 && f != File()) loadPadFile (pad, f);
+        if (f == File()) return;
+        if (pad >= 0) { loadPadFile (pad, f); return; }
+        // Round 6 (item 114): a sequencer row takes the file as its
+        // own sound; the multitrack takes it as a clip at the drop.
+        const int row = waveDragRowAt (pos);
+        if (row >= 0) { dropWaveformFileOnRow (row); return; }
+        int mtTrack = -1;
+        long long mtStart = 0;
+        if (waveDragMultitrackAt (pos, mtTrack, mtStart))
+            dropWaveformFileOnMultitrack (mtTrack, mtStart);
     };
     showWaveform (0);
 
@@ -297,6 +318,8 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         SequencerPanel::Callbacks scb;
         scb.onLoadSample = [this] (int t) { openSampleChooser (t); };
         scb.onRoll = [this] (int t) { openPianoRollFor (t); };
+        // Item 125 rider: the ghost strip is a door to the same roll.
+        scb.onGhostRoll = [this] (int t) { openPianoRollFor (t); };
         scb.onNameMenu = [this] (int t)
         {
             // kit rows get the item 40 menu; user-added rows get the
@@ -318,6 +341,10 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         scb.onBeforeChange = [this] { beginUndoGesture(); };
         scb.onAfterChange = [this] { endUndoGesture(); };
         scb.onSelectRow = [this] (int t) { selectChannel (t); };
+        // Round 6 (item 124): the sequencer name tap also auditions
+        // the track - wired ONLY here, so no programmatic selection
+        // (loads, undo applies, playback, other views) ever sounds.
+        scb.onSelectAudition = [this] (int t) { auditionTrack (t); };
         // Round 4 (item 99a): the ghost strip's switch persists in the
         // app settings, like the clock format.
         scb.onGhostToggled = [] (bool on)
@@ -347,6 +374,8 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     mpcPanel->onAfterChange = [this] { endUndoGesture(); };
     mpcPanel->onSelectPad = [this] (int ch) { selectChannel (ch); };
     mpcPanel->onPadCopyRequest = [this] (int from, int to) { copyPadToPad (from, to); };
+    mpcPanel->onPadClearRequest = [this] (int pad) { clearPad (pad); }; // item 110
+    mpcPanel->setDockedMode (true); // item 111a: the docked bank's pads run bigger
     // Item 59: hidden tabs are added as CHILD components, never via
     // addAndMakeVisible (which un-hides them) - updateTabChrome below is
     // the single authority on which production view is visible, so the
@@ -873,11 +902,16 @@ void MainComponent::placeTakeAsClip()
 
 void MainComponent::togglePlay()
 {
+    // Round 6 (item 115): from pause, the toggle RESUMES.
+    if (engine.isPaused()) { engine.setPaused (false); return; }
     engine.setPlaying (! engine.isPlaying());
 }
 
 void MainComponent::startTransport()
 {
+    // Round 6 (item 115): PLAY from pause RESUMES where the playhead
+    // froze - it is not a restart.
+    if (engine.isPaused()) { engine.setPaused (false); return; }
     // MPC-style: pressing Play while already playing restarts from the
     // top (Pass 1 item 2) - now a live seek to zero, which lands
     // exactly instead of racing the playing flag. From a stop, PLAY
@@ -887,6 +921,14 @@ void MainComponent::startTransport()
         engine.seekTransport (0);
     else
         engine.setPlaying (true);
+}
+
+// Round 6 (item 115): PAUSE - the playhead freezes where it stands
+// and PLAY resumes there. STOP remains a different animal entirely:
+// all sound off, back to the park (item 45).
+void MainComponent::pauseTransport()
+{
+    if (engine.isPlaying()) engine.setPaused (! engine.isPaused());
 }
 
 void MainComponent::setClockFormat (int fmt)
@@ -977,6 +1019,7 @@ void MainComponent::openStation()
         cb.onSelectChannel = [this] (int ch) { selectChannel (ch); };
         cb.onPlay = [this] { startTransport(); };
         cb.onStopAll = [this] { stopTransport(); }; // item 45's stop, same button by another face
+        cb.onPause = [this] { pauseTransport(); }; // item 115: the Station's PAUSE key
         cb.onRewind = [this] { rewindTransport(); };
         cb.onFastForward = [this] { fastForwardTransport(); };
         cb.onToStart = [this] { navToStart(); };
@@ -1001,6 +1044,24 @@ void MainComponent::openStation()
     station->bindToChannel (selectedChannel);
     stationWindow->setVisible (true);
     stationWindow->toFront (true);
+}
+
+// Round 6 (item 124): selecting a track by tapping its name in the
+// step sequencer ALSO auditions its sound - one play, at the track's
+// own settings, through the live-note funnel (the pad voice path for
+// sample rows, the track's own voice for kit/synth/piano - the same
+// voices a step fires, trims/envelopes/channel and all). It is a
+// one-shot: never a take (item 56), never a step-write (that door is
+// the keyboard's WRITE mode alone), and stop silences it like any
+// voice (item 45). Called ONLY from the panel's name-tap callback -
+// programmatic selection changes never reach it.
+void MainComponent::auditionTrack (int track)
+{
+    using E = boombap::BoomBapEngine;
+    if (track >= E::Sample1 && track < E::Sample1 + 16
+        && ! engine.rowHasSample (track - E::Sample1))
+        return; // an empty sample row has nothing to audition
+    engine.liveNoteOn (track, 60, 1.0f); // C4: the sound at rest
 }
 
 void MainComponent::selectChannel (int ch)
@@ -1225,13 +1286,14 @@ void MainComponent::timerCallback()
         }
     }
 
-    const bool playingNow = engine.isPlaying();
-    if (playingNow != lastPlayingState)
-    {
-        lastPlayingState = playingNow;
-        playButton.setColour (TextButton::buttonColourId,
-                              playingNow ? boombap::ui::accentHi() : boombap::ui::accent());
-    }
+    // Round 6 (item 115): the transport keys light with the state -
+    // PLAY lit while playing, PAUSE lit while paused.
+    playButton.setLit (engine.isPlaying() && ! engine.isPaused());
+    pauseButton.setLit (engine.isPaused());
+    lastPlayingState = engine.isPlaying();
+    // Round 6 (item 118): the UNDO/REDO pair follows the history.
+    undoButton.setEnabled (canUndoProject());
+    redoButton.setEnabled (canRedoProject());
 
     // Round 4 (item 99b): undo, redo and project loads can flip the
     // mode behind the buttons' backs - the buttons follow the engine.
@@ -1514,25 +1576,31 @@ void MainComponent::resized()
     saveAsButton.setBounds (RB (230, 6, 90, 28));
     recentButton.setBounds (RB (326, 6, 76, 28));
     audioButton.setBounds (RB (408, 6, 80, 28));
-    projectName.setBounds (RB (500, 6, 428, 28));
-    mainClock.setBounds (RB (936, 7, 108, 26)); // item 93: the compact clock
+    projectName.setBounds (RB (500, 6, 540, 28)); // Round 6: the clock moved to the transport row (item 115) - the name takes its old room
     stationButton.setBounds (RB (1058, 6, 86, 28));
     pianoButton.setBounds (RB (1150, 6, 96, 28));
     playlistButton.setBounds (RB (1254, 6, 88, 28));
     padBankButton.setBounds (RB (1350, 6, 100, 28));
 
-    // transport row A (item 93): the full navigation, big play/stop,
-    // pattern edit helpers, tempo, swing, master, pad activity
-    toStartButton.setBounds (RB (20, 54, 64, 50));
-    rewButton.setBounds (RB (88, 54, 56, 50));
-    playButton.setBounds (RB (148, 54, 130, 50));
-    stopButton.setBounds (RB (282, 54, 130, 50));
-    ffButton.setBounds (RB (416, 54, 56, 50));
-    toEndButton.setBounds (RB (476, 54, 64, 50));
-    clearButton.setBounds (RB (544, 54, 64, 50));
-    resetButton.setBounds (RB (612, 54, 64, 50));
-    bpm.slider.setBounds (RB (742, 54, 180, 50));
-    swing.slider.setBounds (RB (988, 54, 160, 50));
+    // transport row A (item 93's navigation, Round 6 item 115's
+    // family-A keys): the seven keys in D's order with the FRAMED
+    // clock in the middle of the row, PLAY the middle key; then the
+    // pattern helpers, the UNDO/REDO pair (item 118), tempo, swing,
+    // master, pad activity.
+    toStartButton.setBounds (RB (20, 54, 48, 50));
+    rewButton.setBounds (RB (73, 54, 42, 50));
+    pauseButton.setBounds (RB (120, 54, 42, 50));
+    mainClock.setBounds (RB (167, 54, 150, 50)); // item 115: centred, large, framed
+    playButton.setBounds (RB (322, 54, 56, 50));
+    stopButton.setBounds (RB (383, 54, 48, 50));
+    ffButton.setBounds (RB (436, 54, 42, 50));
+    toEndButton.setBounds (RB (483, 54, 48, 50));
+    clearButton.setBounds (RB (537, 54, 48, 50));
+    resetButton.setBounds (RB (590, 54, 48, 50));
+    undoButton.setBounds (RB (644, 54, 60, 50));
+    redoButton.setBounds (RB (709, 54, 60, 50));
+    bpm.slider.setBounds (RB (790, 54, 180, 50));
+    swing.slider.setBounds (RB (1004, 54, 160, 50));
     master.slider.setBounds (RB (1214, 54, 150, 50));
     padLight.setBounds (RB (1376, 61, 32, 32));
     padMeter.setBounds (RB (1416, 65, 124, 28));

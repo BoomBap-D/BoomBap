@@ -16,8 +16,17 @@ struct ProjectData
 {
     ProjectSettings settings;
     std::array<juce::String, 3> samplePaths;  // absolute path per sample track; empty = unused
-    std::array<juce::String, 16> padPaths;    // sample files for pads 4-16 (indices 3-15);
-                                              // pads 1-3 are the sample tracks above
+    std::array<juce::String, 16> padPaths;    // sample files for the pads (all 16 since
+                                              // Round 6 item 109; older files carry pads
+                                              // 4-16 here and pads 1-3 in samplePaths)
+    // Round 6 (item 109): the sequencer sample ROWS' own files (row
+    // index 0 = track Sample1). Rows and pads are separate stores now,
+    // so each carries its own path. Files written before the split
+    // have no "rowPads" key at all (hasRowPadPaths stays false) and
+    // their rows fall back to the pad files - which is exactly what
+    // those projects sounded like, one shared store.
+    std::array<juce::String, 16> rowPadPaths;
+    bool hasRowPadPaths = false;
     // Fix pass 2: files bound directly to a row - the kit rows' replacement
     // samples (item 40, tracks 0-4) and the own-buffer rows past the pad
     // bank (item 39, tracks 21+). Indexed by track; empty = unbound.

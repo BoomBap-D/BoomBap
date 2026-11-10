@@ -125,8 +125,11 @@ String projectToJson (const ProjectData& d, const File& projectFile)
             }
             o->setProperty ("env", var (env));
         }
-        if (i >= 3 && d.padPaths[(size_t) i].isNotEmpty())
+        if (d.padPaths[(size_t) i].isNotEmpty())
         {
+            // Round 6 (item 109): every pad carries its own path now -
+            // pads 1-3 are no longer implied by the sample tracks.
+            // (Older readers ignore a path on pads 0-2; harmless.)
             const File f (d.padPaths[(size_t) i]);
             const String rel = projectFile == File() ? f.getFullPathName()
                                                      : f.getRelativePathFrom (projectFile.getParentDirectory());
@@ -134,6 +137,23 @@ String projectToJson (const ProjectData& d, const File& projectFile)
             if (! File::isAbsolutePath (rel)) o->setProperty ("relativePath", rel);
         }
         padArr.add (var (o));
+    }
+
+    // Round 6 (item 109): the sequencer sample rows' own files. The
+    // key is ALWAYS written (even when empty) - its presence is how a
+    // reader tells a split-store file from a legacy shared-store one.
+    Array<var> rowPadArr;
+    for (int i = 0; i < ProjectSettings::kPads; ++i)
+    {
+        if (d.rowPadPaths[(size_t) i].isEmpty()) continue;
+        const File f (d.rowPadPaths[(size_t) i]);
+        const String rel = projectFile == File() ? f.getFullPathName()
+                                                 : f.getRelativePathFrom (projectFile.getParentDirectory());
+        auto* o = new DynamicObject();
+        o->setProperty ("row", i);
+        o->setProperty ("path", f.getFullPathName());
+        if (! File::isAbsolutePath (rel)) o->setProperty ("relativePath", rel);
+        rowPadArr.add (var (o));
     }
 
     // Fix pass item 35: the audio track (mixer state in track order, after
@@ -247,6 +267,7 @@ String projectToJson (const ProjectData& d, const File& projectFile)
         { "station", stationObj },
         { "samples", var (samples) },
         { "pads", var (padArr) },
+        { "rowPads", var (rowPadArr) },
         { "audioTracks", var (audioTracksArr) },
         { "audioClips", var (audioClipsArr) },
         { "export", object ({ { "bars", d.exportBars }, { "normalize", d.exportNormalize } }) }
@@ -462,7 +483,7 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
         for (const var& item : *padArrIn)
         {
             const int idx = getI (item, "pad", -1);
-            if (idx < 3 || idx >= ProjectSettings::kPads) continue;
+            if (idx < 0 || idx >= ProjectSettings::kPads) continue; // item 109: pads 0-2 carry paths too now
             const String rel = item.getProperty ("relativePath", var()).toString();
             const String abs = item.getProperty ("path", var()).toString();
             if (rel.isEmpty() && abs.isEmpty()) continue;
@@ -476,6 +497,33 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
             if (resolved == File() && abs.isNotEmpty())
                 resolved = File (abs);
             d.padPaths[(size_t) idx] = resolved.getFullPathName();
+        }
+    }
+
+    // Round 6 (item 109): the rows' own files; key presence (not
+    // content) marks a split-store file.
+    if (root.hasProperty ("rowPads"))
+    {
+        d.hasRowPadPaths = true;
+        if (auto* rp = root.getProperty ("rowPads", var()).getArray())
+        {
+            for (const var& item : *rp)
+            {
+                const int idx = getI (item, "row", -1);
+                if (idx < 0 || idx >= ProjectSettings::kPads) continue;
+                const String rel = item.getProperty ("relativePath", var()).toString();
+                const String abs = item.getProperty ("path", var()).toString();
+                if (rel.isEmpty() && abs.isEmpty()) continue;
+                File resolved;
+                if (rel.isNotEmpty())
+                {
+                    const File viaRelative = projectFile.getParentDirectory().getChildFile (rel);
+                    if (viaRelative.existsAsFile()) resolved = viaRelative;
+                }
+                if (resolved == File() && abs.isNotEmpty())
+                    resolved = File (abs);
+                d.rowPadPaths[(size_t) idx] = resolved.getFullPathName();
+            }
         }
     }
 

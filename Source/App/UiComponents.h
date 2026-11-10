@@ -40,13 +40,19 @@ private:
 };
 
 // Slim horizontal peak meter for one track row.
+// Round 6 (item 112a): EVERY meter carries a clip latch - a peak at
+// full scale lights it red and it STAYS lit until clicked off.
 class LevelMeter : public juce::Component
 {
 public:
     void setLevel (float newLevel)
     {
+        if (newLevel >= 0.99f && ! clipLatched) { clipLatched = true; repaint(); }
         if (std::abs (newLevel - level) > 0.002f) { level = newLevel; repaint(); }
     }
+
+    bool clipIsLatched() const { return clipLatched; }
+    void clearClipLatch() { if (clipLatched) { clipLatched = false; repaint(); } }
 
     void paint (juce::Graphics& g) override
     {
@@ -59,10 +65,20 @@ public:
             g.setColour (level > 0.95f ? juce::Colour (0xffe5484d) : boombap::ui::accent());
             g.fillRoundedRectangle (b.withWidth (std::max (6.0f, b.getWidth() * frac)), 3.0f);
         }
+        if (clipLatched)
+        {
+            g.setColour (juce::Colour (0xffe5484d));
+            g.drawRoundedRectangle (b, 3.0f, 1.5f);
+            g.fillRect (b.getRight() - 7.0f, b.getY() + 2.0f, 5.0f,
+                        std::max (2.0f, b.getHeight() - 4.0f));
+        }
     }
+
+    void mouseDown (const juce::MouseEvent&) override { clearClipLatch(); }
 
 private:
     float level = 0.0f;
+    bool clipLatched = false;
 };
 
 // Round activity lamp for the pad set: glows while any pad is sounding
@@ -144,9 +160,16 @@ class GrMeter : public juce::Component
 public:
     void setReduction (float db)
     {
+        // Item 112a's latch, in this meter's own terms: a compressor
+        // "clips" at full-scale reduction - the needle pinned at the
+        // end of its 15 dB scale latches the red outline until clicked.
+        if (db >= 14.9f && ! latched) { latched = true; repaint(); }
         if (std::abs (db - reduction) > 0.05f) { reduction = db; repaint(); }
     }
     float getReduction() const { return reduction; }
+
+    bool clipIsLatched() const { return latched; }
+    void clearClipLatch() { if (latched) { latched = false; repaint(); } }
 
     void paint (juce::Graphics& g) override
     {
@@ -155,10 +178,18 @@ public:
         g.fillRoundedRectangle (b, 3.0f);
         const float frac = std::clamp (reduction / 15.0f, 0.0f, 1.0f);
         boombap::ui::drawSegmentedMeter (g, b.reduced (1.5f), frac, false);
+        if (latched)
+        {
+            g.setColour (juce::Colour (0xffe5484d));
+            g.drawRoundedRectangle (b, 3.0f, 1.5f);
+        }
     }
+
+    void mouseDown (const juce::MouseEvent&) override { clearClipLatch(); }
 
 private:
     float reduction = 0.0f;
+    bool latched = false;
 };
 
 // ============================================================================
@@ -204,12 +235,35 @@ public:
 
     // Peak feed for the LED ladder (called on the owner's timer; the
     // ladder holds and decays here so every view reads the same).
+    // Round 6 (item 112e): the two sides are held SEPARATELY - a
+    // stereo ladder paints L and R honestly instead of max twice.
     void setMeterLevels (float l, float r)
     {
-        meterShown = std::max (std::max (l, r), meterShown * 0.88f);
+        meterL = std::max (l, meterL * 0.88f);
+        meterR = std::max (r, meterR * 0.88f);
+        meterShown = std::max (meterL, meterR);
+        if (clipEnabled && (l >= 0.99f || r >= 0.99f) && ! clipLatchedState)
+            clipLatchedState = true;
         repaint();
     }
     float meterLevel() const { return meterShown; }
+    float meterLevelL() const { return meterL; }
+    float meterLevelR() const { return meterR; }
+
+    // Round 6 (item 112a): the clip latch box above the ladder - red,
+    // lit at full scale, stays until clicked off (the click is spent
+    // on the latch; it never moves the fader).
+    void setClipLatchEnabled (bool on) { clipEnabled = on; repaint(); }
+    bool clipLatchEnabled() const { return clipEnabled; }
+    bool clipLatched() const { return clipLatchedState; }
+    void clearClipLatch() { if (clipLatchedState) { clipLatchedState = false; repaint(); } }
+    juce::Rectangle<float> clipBoxBounds() const
+    {
+        if (! clipEnabled) return {};
+        const auto geo = geometry();
+        const float ledW = meterCols > 0 ? (float) meterCols * 7.0f + 3.0f : 10.0f;
+        return { geo.ledX - 2.0f, 1.0f, ledW, 14.0f };
+    }
 
     // The cap's centre in local coordinates (the drag tests aim here,
     // and the paint below uses the same numbers).
@@ -249,15 +303,27 @@ public:
         g.setColour (border().withAlpha (0.6f));
         g.drawRoundedRectangle (geo.trackCx - 2.5f, top - 4.0f, 5.0f, travel + 8.0f, 2.5f, 0.8f);
 
-        // the segmented LED ladder on the right
+        // the segmented LED ladder on the right (item 112e: with two
+        // columns, column 0 is L and column 1 is R - separately true)
         if (meterCols > 0)
         {
-            const float frac = std::sqrt (std::clamp (meterShown, 0.0f, 1.0f));
             for (int c = 0; c < meterCols; ++c)
             {
+                const float lv = meterCols == 1 ? meterShown : (c == 0 ? meterL : meterR);
+                const float frac = std::sqrt (std::clamp (lv, 0.0f, 1.0f));
                 const float x = geo.ledX + (float) c * 7.0f;
                 drawSegmentedMeter (g, { x, top - 4.0f, 5.0f, travel + 8.0f }, frac, true);
             }
+        }
+
+        // the clip latch box above the ladder (item 112a)
+        if (clipEnabled)
+        {
+            const auto box = clipBoxBounds();
+            g.setColour (clipLatchedState ? juce::Colour (0xffe5484d) : juce::Colour (0xff3a1518));
+            g.fillRoundedRectangle (box, 2.0f);
+            g.setColour (clipLatchedState ? juce::Colour (0xffff8a8d) : border().withAlpha (0.7f));
+            g.drawRoundedRectangle (box, 2.0f, 1.0f);
         }
 
         // the cap: coloured body, white centre line (the pick)
@@ -277,6 +343,13 @@ public:
 
     void mouseDown (const juce::MouseEvent& e) override
     {
+        // Item 112a: a press on the clip box clears the latch and is
+        // spent - it must never also grab the fader.
+        if (clipEnabled && clipBoxBounds().contains (e.position))
+        {
+            clearClipLatch();
+            return;
+        }
         if (e.getNumberOfClicks() > 1)
         {
             setValue (defV, true); // item 6: double-click resets, faders too
@@ -331,8 +404,8 @@ private:
         geo.trackCx = mid;
         geo.ledX = (float) getWidth() - ledW + 2.0f;
         geo.trackRight = (float) getWidth() - ledW;
-        geo.top = 8.0f;
-        geo.travel = std::max (30.0f, (float) getHeight() - 16.0f);
+        geo.top = clipEnabled ? 22.0f : 8.0f; // room for the clip box (item 112a)
+        geo.travel = std::max (30.0f, (float) getHeight() - geo.top - 8.0f);
         return geo;
     }
 
@@ -361,6 +434,8 @@ private:
     bool scaleVisible = true;
     int meterCols = 2;
     float meterShown = 0.0f;
+    float meterL = 0.0f, meterR = 0.0f; // item 112e: the sides, held separately
+    bool clipEnabled = false, clipLatchedState = false; // item 112a
     bool dragging = false;
     float dragStartY = 0.0f, dragStartPos = 0.0f;
 
@@ -600,8 +675,8 @@ public:
         // Round 1 (item 89): the wave itself is the audition now - the
         // caption says so (the LOAD button does the loading). Round 3
         // (item 100): it is also the drag source for the pads.
-        g.drawText ("click to play - LOAD loads another - drag onto a pad to copy it there",
-                    10, (int) b.getBottom() - 16, 430, 12, juce::Justification::left);
+        g.drawText ("click to play - LOAD loads another - drag onto a pad, a row, or the multitrack",
+                    10, (int) b.getBottom() - 16, 470, 12, juce::Justification::left);
 
         const float mid = b.getCentreY();
         const float h = b.getHeight() * 0.44f;
@@ -629,4 +704,126 @@ public:
 private:
     std::vector<float> data;
     bool dragging = false;
+};
+
+// ============================================================================
+// Round 6 (item 112b): the pad bank's own meter - one segmented ladder
+// running the height of the bank, with the item 112a clip latch box
+// on top (red, lit at full scale, stays until clicked off).
+// ============================================================================
+class SegmentedLevelMeter : public juce::Component
+{
+public:
+    void setLevel (float newLevel)
+    {
+        shown = std::max (newLevel, shown * 0.90f);
+        if (newLevel >= 0.99f && ! latched) latched = true;
+        repaint();
+    }
+    float level() const { return shown; }
+    bool clipIsLatched() const { return latched; }
+    void clearClipLatch() { if (latched) { latched = false; repaint(); } }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat();
+        auto box = b.removeFromTop (12.0f).reduced (0.5f, 0.5f);
+        g.setColour (latched ? juce::Colour (0xffe5484d) : juce::Colour (0xff3a1518));
+        g.fillRoundedRectangle (box, 2.0f);
+        g.setColour (latched ? juce::Colour (0xffff8a8d) : boombap::ui::border().withAlpha (0.6f));
+        g.drawRoundedRectangle (box, 2.0f, 1.0f);
+        b.removeFromTop (3.0f);
+        boombap::ui::drawSegmentedMeter (g, b, std::sqrt (std::clamp (shown, 0.0f, 1.0f)), true);
+    }
+
+    void mouseDown (const juce::MouseEvent&) override { clearClipLatch(); }
+
+private:
+    float shown = 0.0f;
+    bool latched = false;
+};
+
+// ============================================================================
+// Round 6 (item 115): the transport keys - family A "Studio Console"
+// (D's pick): chunky charcoal keys, amber glyphs, an amber ring on
+// PLAY. One component, seven glyphs; the owner wires onClick and
+// polls the lit state on its timer (PLAY lit while playing, PAUSE
+// lit while paused).
+// ============================================================================
+class TransportButton : public juce::Component
+{
+public:
+    enum class Glyph { ToStart, Rewind, Pause, Play, Stop, Forward, ToEnd };
+    std::function<void()> onClick;
+
+    TransportButton() = default; // the leak-detector macro's deleted copy ctor suppresses the implicit one
+
+    void setGlyph (Glyph g) { glyph = g; repaint(); }
+    Glyph getGlyph() const { return glyph; }
+    void setLit (bool l) { if (lit != l) { lit = l; repaint(); } }
+    bool isLit() const { return lit; }
+
+    void paint (juce::Graphics& g) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (0.5f);
+        juce::ColourGradient grad (juce::Colour (0xff2a2b30), b.getX(), b.getY(),
+                                   juce::Colour (0xff17181b), b.getX(), b.getBottom(), false);
+        g.setGradientFill (grad);
+        g.fillRoundedRectangle (b, 5.0f);
+        g.setColour (boombap::ui::border().withAlpha (0.9f));
+        g.drawRoundedRectangle (b, 5.0f, 1.0f);
+        if (glyph == Glyph::Play)
+        {
+            g.setColour (boombap::ui::accent());
+            g.drawRoundedRectangle (b.reduced (2.0f), 4.0f, lit ? 2.2f : 1.2f);
+        }
+        else if (lit)
+        {
+            g.setColour (boombap::ui::accent().withAlpha (0.30f));
+            g.fillRoundedRectangle (b.reduced (2.0f), 4.0f);
+        }
+        drawGlyph (g, b);
+    }
+
+    void mouseDown (const juce::MouseEvent&) override { if (onClick) onClick(); }
+
+private:
+    void drawGlyph (juce::Graphics& g, juce::Rectangle<float> b)
+    {
+        const float cx = b.getCentreX(), cy = b.getCentreY();
+        const float s = std::min (b.getWidth(), b.getHeight()) * 0.20f; // glyph half-size
+        g.setColour (boombap::ui::accent());
+        auto tri = [&] (float x0, bool left)
+        {
+            juce::Path p;
+            if (left) { p.startNewSubPath (x0 + s, cy - s); p.lineTo (x0 + s, cy + s); p.lineTo (x0 - s, cy); }
+            else      { p.startNewSubPath (x0 - s, cy - s); p.lineTo (x0 - s, cy + s); p.lineTo (x0 + s, cy); }
+            p.closeSubPath();
+            g.fillPath (p);
+        };
+        switch (glyph)
+        {
+            case Glyph::Play:    tri (cx, false); break;
+            case Glyph::Stop:    g.fillRect (cx - s * 0.8f, cy - s * 0.8f, s * 1.6f, s * 1.6f); break;
+            case Glyph::Pause:
+                g.fillRect (cx - s * 0.85f, cy - s, s * 0.62f, s * 2.0f);
+                g.fillRect (cx + s * 0.23f, cy - s, s * 0.62f, s * 2.0f);
+                break;
+            case Glyph::Rewind:  tri (cx - s * 0.55f, true);  tri (cx + s * 0.55f, true);  break;
+            case Glyph::Forward: tri (cx - s * 0.55f, false); tri (cx + s * 0.55f, false); break;
+            case Glyph::ToStart:
+                g.fillRect (cx - s * 1.05f, cy - s, s * 0.34f, s * 2.0f);
+                tri (cx + s * 0.25f, true);
+                break;
+            case Glyph::ToEnd:
+                tri (cx - s * 0.25f, false);
+                g.fillRect (cx + s * 0.71f, cy - s, s * 0.34f, s * 2.0f);
+                break;
+        }
+    }
+
+    Glyph glyph = Glyph::Play;
+    bool lit = false;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (TransportButton)
 };
