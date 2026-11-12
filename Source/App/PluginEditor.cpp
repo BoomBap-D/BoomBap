@@ -4,6 +4,9 @@ BoomBapEditor::BoomBapEditor (BoomBapProcessor& p)
     : AudioProcessorEditor (p), proc (p), main (p.engine, false)
 {
     main.onMediaChanged = [this] (const boombap::ProjectData& d) { proc.setMediaData (d); };
+    // MIDI build (item 25): the editor drives the processor's MIDI
+    // service (targets + window live here; routing lives there).
+    main.setExternalMidiService (&proc.midiService);
     proc.onStateRestored = [this] (const boombap::ProjectData& d) { main.loadProjectData (d, false, true); };
     addAndMakeVisible (main);
 

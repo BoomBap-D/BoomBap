@@ -1491,6 +1491,10 @@ public:
     // the EQ RESET (item 117), the B1 face (item 116) and the compact
     // transport keys (item 115) - the same objects the mouse drives.
     juce::TextButton& presetSaveButtonForTest() { return presetSaveButton; }
+    // MIDI build (item 25): the rail's MUTE/SOLO keys, for the Learn
+    // overlay - the same objects the mouse drives.
+    juce::TextButton& railMuteButtonForTest() { return muteButton; }
+    juce::TextButton& railSoloButtonForTest() { return soloButton; }
     juce::TextButton& bandResetButtonForTest() { return bandResetButton; }
     VuFaceB1& vuFaceComponent() { return vuFace; }
     TransportButton* stationTransportButtonForTest (int i)

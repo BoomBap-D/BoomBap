@@ -27,6 +27,10 @@ boombap::ProjectData MainComponent::makeProjectData() const
     for (size_t t = 0; t < rowFiles.size(); ++t)
         d.rowSamplePaths[t] = rowFiles[t] == File() ? String() : rowFiles[t].getFullPathName();
     d.vocalTakePath = takePath;
+    // MIDI build (item 25): the project's own Learn layer rides the
+    // file (empty when the project carries no bindings of its own).
+    if (midi != nullptr)
+        d.midiLearnJson = midi->projectLayerJson();
     d.exportBars = exportBars.getSelectedId();
     d.exportNormalize = normalizeToggle.getToggleState();
     return d;
@@ -89,6 +93,8 @@ void MainComponent::applyProjectToUi (const boombap::ProjectData& d)
     if (playlist != nullptr) playlist->refreshFromEngine();
     if (multitrack != nullptr) multitrack->refreshFromEngine();
     if (station != nullptr) station->refreshFromEngine(); // Pass 2: strips + board follow the project
+    // MIDI build (item 25): the loaded project's Learn layer takes over.
+    if (midi != nullptr) midi->setProjectLayerJson (d.midiLearnJson);
     refreshGrid();
 }
 

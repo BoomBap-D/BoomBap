@@ -335,6 +335,13 @@ public:
     juce::Label& rowNameLabel (int track)       { return rows[track].name; }
     juce::TextButton& rowDeleteButton (int track) { return rows[track].del; }
     juce::TextButton& rowLoadButton (int track)   { return rows[track].load; }
+    // MIDI build (item 25): the pattern keys and the row mix controls,
+    // for the Learn overlay + the MIDI regression suite - the same
+    // objects the mouse drives.
+    juce::TextButton& patternButtonForTest (int i) { return patternButtons[(size_t) juce::jlimit (0, 7, i)]; }
+    juce::Slider& rowLevelSlider (int track)       { return rows[track].level; }
+    juce::TextButton& rowMuteButton (int track)    { return rows[track].mute; }
+    juce::TextButton& rowSoloButton (int track)    { return rows[track].solo; }
 
     // Called by the owner's 30 Hz timer: playhead column + row meters.
     void tick()

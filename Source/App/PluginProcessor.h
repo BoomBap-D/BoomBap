@@ -3,6 +3,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Engine/BoomBapEngine.h"
 #include "ProjectFile.h"
+#include "Midi/MidiService.h"
 #include <functional>
 #include <mutex>
 
@@ -41,6 +42,11 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     boombap::BoomBapEngine engine;
+
+    // MIDI build (item 25): the host delivers MIDI; this service
+    // routes it (pads / melodic / record / Learn). It owns no devices
+    // (manageDevices = false, set in the constructor).
+    boombap::MidiService midiService { engine };
 
     // The editor reports media changes here so state saves can include them.
     void setMediaData (const boombap::ProjectData& d);

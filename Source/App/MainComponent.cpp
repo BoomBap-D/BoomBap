@@ -45,6 +45,37 @@ private:
     std::function<void()> closeCallback;
 };
 
+// The MIDI setup window (MIDI build, item 25): same one-line frame
+// rule as the audio window - own dark frame, floats over main, no
+// taskbar slot of its own. Closing it saves the MIDI state.
+class MidiSettingsWindow : public juce::DocumentWindow
+{
+public:
+    MidiSettingsWindow (const String& name, std::function<void()> onClose)
+        : DocumentWindow (name, boombap::ui::bg(), juce::DocumentWindow::closeButton),
+          closeCallback (std::move (onClose))
+    {
+        boombap::ui::applyAppWindowFrame (*this, true); // items 77/78
+        setResizable (true, true);
+        setResizeLimits (500, 460, 1100, 1100);
+    }
+
+    int getDesktopWindowStyleFlags() const override
+    {
+        return juce::DocumentWindow::getDesktopWindowStyleFlags()
+                 & ~juce::ComponentPeer::windowAppearsOnTaskbar;
+    }
+
+    void closeButtonPressed() override
+    {
+        if (closeCallback) closeCallback();
+        setVisible (false);
+    }
+
+private:
+    std::function<void()> closeCallback;
+};
+
 // A Production Area view popped out into its own window (items 37/42):
 // closing the window docks the view back onto its tab.
 class PopOutWindow : public juce::DocumentWindow
@@ -113,6 +144,11 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     addAndMakeVisible (audioButton);
     audioButton.setVisible (ownAudioDevice); // in a plugin the host owns the device
     audioButton.onClick = [this] { showAudioSettings(); };
+    // MIDI build (item 25): the MIDI window - devices standalone,
+    // monitor + Learn map in both shells.
+    boombap::ui::applyActionTrace (midiButton);
+    addAndMakeVisible (midiButton);
+    midiButton.onClick = [this] { showMidiSettings(); };
     addAndMakeVisible (projectName);
     projectName.setColour (Label::textColourId, Colours::white);
     projectName.setFont (juce::Font (15.0f));
@@ -556,6 +592,25 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         auto state = loadDeviceStateXml(); // Pass 1 item 8: restore the device setup from last time
         setAudioChannels (0, 2, state.get());
     }
+    // MIDI build (item 25): the standalone owns its service (and the
+    // physical devices); the plugin's editor lends the processor's
+    // via setExternalMidiService after construction.
+    buildMidiTargets();
+    if (ownAudioDevice)
+    {
+        ownedMidi = std::make_unique<boombap::MidiService> (engine);
+        midi = ownedMidi.get();
+        midi->registry = &midiTargets;
+        midi->loadState();
+    }
+    // The LEARN overlay lives on top of everything in this window,
+    // hidden until Learn is armed in the MIDI window.
+    learnOverlay = std::make_unique<boombap::LearnGlowOverlay>();
+    learnOverlay->onPick = [this] (const String& targetId)
+    {
+        if (midi != nullptr) midi->setPendingTarget (targetId);
+    };
+    addChildComponent (learnOverlay.get());
     startTimerHz (30);
 }
 
@@ -563,6 +618,18 @@ MainComponent::~MainComponent()
 {
     setLookAndFeel (nullptr);
     stopTimer();
+    // MIDI build (item 25): the window + panel die before the
+    // service, and the service's state is saved (device choice,
+    // global map, preset, arm).
+    midiWindow.reset();
+    midiPanel = nullptr;
+    learnOverlay.reset();
+    if (midi != nullptr)
+    {
+        midi->registry = nullptr;
+        midi->saveState();
+    }
+    ownedMidi.reset();
     saveDeviceState();
     clearRecovery(); // a clean exit means the recovery file has done its job
     shutdownAudio();
@@ -1299,6 +1366,32 @@ void MainComponent::timerCallback()
     // mode behind the buttons' backs - the buttons follow the engine.
     if (engine.isSongMode() != lastSongModeShown) refreshModeButtons();
 
+    // MIDI build (item 25): land queued Learn binds and drive bound
+    // controls; the router's melodic target follows the selection
+    // (rows play their ghost lanes, synth/piano their lanes); the
+    // LEARN overlay mirrors the arm state.
+    if (midi != nullptr)
+    {
+        if (midi->drainActions()) onMidiMapChanged();
+        const int sel = selectedChannel;
+        if (sel == boombap::BoomBapEngine::kSynthChannel
+            || sel == boombap::BoomBapEngine::kPianoChannel
+            || (sel >= 0 && sel < engine.getNumTracks()))
+            lastMidiMelodic = sel;
+        midi->router.melodicChannel.store (lastMidiMelodic);
+        const bool wantOverlay = midi->learnArmed.load();
+        if (wantOverlay != learnOverlayOn)
+        {
+            learnOverlayOn = wantOverlay;
+            if (learnOverlay != nullptr)
+            {
+                learnOverlay->setVisible (wantOverlay);
+                if (wantOverlay) learnOverlay->toFront (false);
+            }
+        }
+        if (learnOverlayOn) refreshLearnOverlay();
+    }
+
     if (++dirtyTick >= 8) { dirtyTick = 0; updateProjectLabel(); }
 
     // (Round 1, item 89: the waveform panel's button used to flip
@@ -1363,6 +1456,13 @@ void MainComponent::prepareToPlay (int samplesPerBlockExpected, double sampleRat
 
 void MainComponent::getNextAudioBlock (const AudioSourceChannelInfo& info)
 {
+    // MIDI build (item 25): hand this block's device events to the
+    // router first, stamped with offsets inside the block - the
+    // router times records by the engine clock + these offsets.
+    if (midi != nullptr && ownAudioDevice)
+        midi->pollDeviceEvents (info.numSamples, engine.getSampleRate(),
+                                (double) juce::Time::getHighResolutionTicks());
+
     auto* buffer = info.buffer;
     const int outChannels = buffer->getNumChannels();
     const bool useInput = haveInput.load();
@@ -1434,6 +1534,483 @@ std::unique_ptr<XmlElement> MainComponent::loadDeviceStateXml()
 {
     auto props = boombap::appPropertiesFile();
     return props->getXmlValue ("audioDeviceState");
+}
+
+//==============================================================================
+// MIDI build (item 25): the MIDI window, the Learn target table and
+// the LEARN overlay. Routing/recording live in MidiRouter; the
+// binding model in MidiLearn; this section is only the wiring
+// between them and the app's real controls.
+void MainComponent::showMidiSettings()
+{
+    if (midi == nullptr)
+        return;
+
+    if (midiWindow == nullptr)
+    {
+        auto* panel = new boombap::MidiPanel (*midi, ! ownAudioDevice);
+        midiPanel = panel;
+        panel->onChanged = [this] { onMidiMapChanged(); };
+        midiWindow = std::make_unique<MidiSettingsWindow> (
+            "MIDI Setup", [this] { if (midi != nullptr) midi->saveState(); });
+        midiWindow->setLookAndFeel (&lookAndFeel);
+        midiWindow->setContentOwned (panel, true);
+        midiWindow->centreWithSize (608, 700);
+        // Pass 1 window rule: never outside the display's usable area.
+        const auto usable = juce::Desktop::getInstance().getDisplays()
+                                .getDisplayForRect (midiWindow->getBounds())->userArea;
+        auto b = midiWindow->getBounds();
+        if (b.getHeight() > usable.getHeight())
+            midiWindow->setSize (b.getWidth(), usable.getHeight());
+        midiWindow->setBounds (midiWindow->getBounds().constrainedWithin (usable));
+    }
+    midiWindow->setVisible (true);
+    midiWindow->toFront (true);
+}
+
+void MainComponent::setExternalMidiService (boombap::MidiService* svc)
+{
+    midi = svc;
+    if (midi != nullptr)
+        midi->registry = &midiTargets;
+}
+
+void MainComponent::onMidiMapChanged()
+{
+    if (midi != nullptr)
+        midi->saveState();
+    fireMediaChanged(); // the project layer rides ProjectData (plugin state + dirty checks)
+}
+
+// The Learn target table: every control Learn can bind, named the
+// way the mapping list shows it. Continuous targets work in their
+// own units; the map normalises. Where a control has a UI face (a
+// slider, a toggle), driving the target drives the FACE, so the app
+// and the controller never disagree about where a value sits.
+void MainComponent::buildMidiTargets()
+{
+    using namespace boombap;
+    auto& reg = midiTargets;
+    auto cont = [&reg] (const String& id, const String& name, const String& group,
+                        double mn, double mx,
+                        std::function<double()> get, std::function<void (double)> set)
+    {
+        MidiTarget t;
+        t.id = id; t.name = name; t.group = group; t.kind = MidiTarget::Continuous;
+        t.get01 = [get, mn, mx] { return (float) juce::jlimit (0.0, 1.0, (get() - mn) / (mx - mn)); };
+        t.set01 = [set, mn, mx] (float v) { set (mn + (mx - mn) * (double) v); };
+        reg.add (std::move (t));
+    };
+    auto tog = [&reg] (const String& id, const String& name, const String& group,
+                       std::function<bool()> get, std::function<void (bool)> set)
+    {
+        MidiTarget t;
+        t.id = id; t.name = name; t.group = group; t.kind = MidiTarget::Toggle;
+        t.get01 = [get] { return get() ? 1.0f : 0.0f; };
+        t.set01 = [set] (float v) { set (v >= 0.5f); };
+        reg.add (std::move (t));
+    };
+    auto act = [&reg] (const String& id, const String& name, const String& group,
+                       std::function<void()> fn)
+    {
+        MidiTarget t;
+        t.id = id; t.name = name; t.group = group; t.kind = MidiTarget::Action;
+        t.trigger = std::move (fn);
+        reg.add (std::move (t));
+    };
+    // A MainComponent slider as a target (drives the face).
+    auto sliderT = [this, &cont] (LabeledSlider& s, const String& id, const String& name,
+                                  const String& group)
+    {
+        cont (id, name, group, s.slider.getMinimum(), s.slider.getMaximum(),
+              [&s] { return s.slider.getValue(); },
+              [&s] (double v) { s.slider.setValue (v, sendNotification); });
+    };
+    // A toggle button as a target (drives the face).
+    auto buttonT = [this, &tog] (juce::Button& b, const String& id, const String& name,
+                                 const String& group, std::function<void (bool)> also)
+    {
+        tog (id, name, group,
+             [&b] { return b.getToggleState(); },
+             [&b, also] (bool on)
+             {
+                 b.setToggleState (on, dontSendNotification);
+                 if (also) also (on);
+             });
+    };
+
+    // ---- transport + session actions --------------------------------
+    act ("actPlay", "Play", "Transport", [this] { if (playButton.onClick) playButton.onClick(); });
+    act ("actStop", "Stop", "Transport", [this] { if (stopButton.onClick) stopButton.onClick(); });
+    act ("actPause", "Pause", "Transport", [this] { if (pauseButton.onClick) pauseButton.onClick(); });
+    act ("actToStart", "To Start", "Transport", [this] { if (toStartButton.onClick) toStartButton.onClick(); });
+    act ("actToEnd", "To End", "Transport", [this] { if (toEndButton.onClick) toEndButton.onClick(); });
+    act ("actRew", "Rewind (bar)", "Transport", [this] { if (rewButton.onClick) rewButton.onClick(); });
+    act ("actFF", "Fast-Forward (bar)", "Transport", [this] { if (ffButton.onClick) ffButton.onClick(); });
+    act ("actRec", "Record (vocal take)", "Transport", [this] { recordButton.triggerClick(); });
+    act ("actUndo", "Undo", "Session", [this] { undoButton.triggerClick(); });
+    act ("actRedo", "Redo", "Session", [this] { redoButton.triggerClick(); });
+    act ("actFlipStation", "Open / Close the Station", "Session",
+         [this]
+         {
+             if (stationWindow != nullptr && stationWindow->isVisible())
+                 stationWindow->setVisible (false);
+             else
+                 openStation();
+         });
+    for (int i = 0; i < 8; ++i)
+        act ("actPattern:" + String (i), "Pattern " + String::charToString ((juce_wchar) ('A' + i)),
+             "Patterns",
+             [this, i] { if (sequencerPanel != nullptr) sequencerPanel->patternButtonForTest (i).triggerClick(); });
+    act ("actPatternPrev", "Pattern -", "Patterns",
+         [this]
+         {
+             const int p = (engine.getEditPattern() + 7) % 8;
+             if (sequencerPanel != nullptr) sequencerPanel->patternButtonForTest (p).triggerClick();
+         });
+    act ("actPatternNext", "Pattern +", "Patterns",
+         [this]
+         {
+             const int p = (engine.getEditPattern() + 1) % 8;
+             if (sequencerPanel != nullptr) sequencerPanel->patternButtonForTest (p).triggerClick();
+         });
+
+    // ---- global controls ---------------------------------------------
+    sliderT (bpm, "bpm", "Tempo", "Global");
+    sliderT (swing, "swing", "Swing", "Global");
+    sliderT (metroVol, "metroLevel", "Metronome Level", "Global");
+    buttonT (metroButton, "metroOn", "Metronome", "Global",
+             [this] (bool on) { engine.setMetronomeOn (on); });
+    sliderT (dustRate, "dustRate", "Dust Rate (S950)", "Master FX");
+    buttonT (dustToggle, "dustOn", "Dust On", "Master FX",
+             [this] (bool on) { engine.setDustEnabled (on); });
+    sliderT (glueThreshold, "glueThresh", "Glue Threshold", "Master FX");
+    buttonT (glueToggle, "glueOn", "Glue On", "Master FX",
+             [this] (bool on) { engine.setGlueEnabled (on); });
+    tog ("songMode", "Song Mode", "Transport",
+         [this] { return engine.isSongMode(); },
+         [this] (bool on)
+         {
+             if (on != engine.isSongMode())
+                 (on ? songModeButton : patternModeButton).triggerClick();
+         });
+    tog ("recArmMidi", "REC INPUT Arm", "MIDI",
+         [this] { return midi != nullptr && midi->router.recArm.load(); },
+         [this] (bool on) { if (midi != nullptr) midi->router.recArm.store (on); });
+    tog ("stepRecMidi", "STEP-RECORD Mode", "MIDI",
+         [this] { return midi != nullptr && midi->router.stepRecord.load(); },
+         [this] (bool on) { if (midi != nullptr) midi->router.stepRecord.store (on); });
+
+    // ---- drums + instruments + vocal (slider faces) ------------------
+    sliderT (kickTune, "kickTune", "Kick Tune", "Drums");
+    sliderT (kickDecay, "kickDecay", "Kick Decay", "Drums");
+    sliderT (snareSnappy, "snareSnappy", "Snare Snap", "Drums");
+    sliderT (openHatDecay, "openHatDecay", "Open Hat Decay", "Drums");
+    sliderT (clapTail, "clapTail", "Clap Tail", "Drums");
+    sliderT (synthCutoff, "synthCutoff", "Synth Cutoff", "Synth");
+    sliderT (synthReso, "synthReso", "Synth Resonance", "Synth");
+    sliderT (synthAttack, "synthAttack", "Synth Attack", "Synth");
+    sliderT (synthRelease, "synthRelease", "Synth Release", "Synth");
+    sliderT (synthLevel, "synthLevel", "Synth Level", "Synth");
+    sliderT (pianoBright, "pianoBright", "Piano Brightness", "Piano");
+    sliderT (pianoDecay, "pianoDecay", "Piano Decay", "Piano");
+    sliderT (pianoLevel, "pianoLevel", "Piano Level", "Piano");
+    sliderT (vocalInput, "vocalInput", "Vocal Input Gain", "Vocal");
+    sliderT (vocalDistance, "vocalDistance", "Vocal Distance", "Vocal");
+    buttonT (vocalToggle, "vocalMonitor", "Vocal Monitor", "Vocal",
+             [this] (bool on) { engine.setVocalEnabled (on); });
+    buttonT (takeToggle, "takeLoop", "Loop Take", "Vocal", {});
+
+    // ---- every channel: gain / pan / mute / solo ----------------------
+    for (int ch = 0; ch <= 44; ++ch)
+    {
+        const String nm (engine.channelDisplayName (ch));
+        const String pfx = "chan";
+        cont (pfx + "Gain:" + String (ch), nm + " Level", "Mixer", 0.0, 1.2,
+              [this, ch] { return (double) engine.getChannelGain (ch); },
+              [this, ch] (double v) { engine.setChannelGain (ch, (float) v); });
+        cont (pfx + "Pan:" + String (ch), nm + " Pan", "Mixer", -1.0, 1.0,
+              [this, ch] { return (double) engine.getChannelPan (ch); },
+              [this, ch] (double v) { engine.setChannelPan (ch, (float) v); });
+        tog (pfx + "Mute:" + String (ch), nm + " Mute", "Mixer",
+             [this, ch] { return engine.getChannelMute (ch); },
+             [this, ch] (bool on) { engine.setChannelMute (ch, on); });
+        tog (pfx + "Solo:" + String (ch), nm + " Solo", "Mixer",
+             [this, ch] { return engine.getChannelSolo (ch); },
+             [this, ch] (bool on) { engine.setChannelSolo (ch, on); });
+    }
+
+    // ---- the selected channel (Station-bound, else the selection) ----
+    auto selCh = [this] { return station != nullptr ? station->boundChannel() : selectedChannel; };
+    auto stripGet = [this, selCh] { return engine.getStripSettings (selCh()); };
+    auto stripSet = [this, selCh] (const boombap::StripSettings& s) { engine.setStripSettings (selCh(), s); };
+    cont ("selGain", "Selected Channel Level", "Selected", 0.0, 1.2,
+          [this, selCh] { return (double) engine.getChannelGain (selCh()); },
+          [this, selCh] (double v) { engine.setChannelGain (selCh(), (float) v); });
+    cont ("selPan", "Selected Channel Pan", "Selected", -1.0, 1.0,
+          [this, selCh] { return (double) engine.getChannelPan (selCh()); },
+          [this, selCh] (double v) { engine.setChannelPan (selCh(), (float) v); });
+    tog ("selMute", "Selected Channel Mute", "Selected",
+         [this, selCh] { return engine.getChannelMute (selCh()); },
+         [this, selCh] (bool on) { engine.setChannelMute (selCh(), on); });
+    tog ("selSolo", "Selected Channel Solo", "Selected",
+         [this, selCh] { return engine.getChannelSolo (selCh()); },
+         [this, selCh] (bool on) { engine.setChannelSolo (selCh(), on); });
+    auto stripCont = [this, &cont, stripGet, stripSet] (const String& id, const String& name,
+                                                        double mn, double mx,
+                                                        std::function<float (const StripSettings&)> get,
+                                                        std::function<void (StripSettings&, float)> set)
+    {
+        cont (id, name, "Station (selected)", mn, mx,
+              [get, stripGet] { return (double) get (stripGet()); },
+              [set, stripGet, stripSet] (double v)
+              {
+                  auto s = stripGet();
+                  set (s, (float) v);
+                  stripSet (s);
+              });
+    };
+    auto stripTog = [this, &tog, stripGet, stripSet] (const String& id, const String& name,
+                                                      std::function<bool (const StripSettings&)> get,
+                                                      std::function<void (StripSettings&, bool)> set)
+    {
+        tog (id, name, "Station (selected)",
+             [get, stripGet] { return get (stripGet()); },
+             [set, stripGet, stripSet] (bool on)
+             {
+                 auto s = stripGet();
+                 set (s, on);
+                 stripSet (s);
+             });
+    };
+    stripCont ("selPreampDb", "Preamp Gain", -24.0, 24.0,
+               [] (const boombap::StripSettings& s) { return s.preampDb; },
+               [] (StripSettings& s, float v) { s.preampDb = v; s.preampOn = true; });
+    stripCont ("selHpfHz", "High-Pass Freq", 20.0, 1000.0,
+               [] (const boombap::StripSettings& s) { return s.hpfHz; },
+               [] (StripSettings& s, float v) { s.hpfHz = v; s.hpfOn = true; });
+    stripTog ("selHpfOn", "High-Pass On",
+              [] (const boombap::StripSettings& s) { return s.hpfOn; },
+              [] (StripSettings& s, bool on) { s.hpfOn = on; });
+    stripCont ("selDeess", "De-Esser Amount", 0.0, 1.0,
+               [] (const boombap::StripSettings& s) { return s.deessAmount; },
+               [] (StripSettings& s, float v) { s.deessAmount = v; s.deessOn = true; });
+    stripTog ("selDeessOn", "De-Esser On",
+              [] (const boombap::StripSettings& s) { return s.deessOn; },
+              [] (StripSettings& s, bool on) { s.deessOn = on; });
+    stripCont ("selCompThresh", "Compressor Threshold", -40.0, 0.0,
+               [] (const boombap::StripSettings& s) { return s.compThresholdDb; },
+               [] (StripSettings& s, float v) { s.compThresholdDb = v; s.compOn = true; });
+    stripCont ("selCompRatio", "Compressor Ratio", 1.0, 20.0,
+               [] (const boombap::StripSettings& s) { return s.compRatio; },
+               [] (StripSettings& s, float v) { s.compRatio = v; s.compOn = true; });
+    stripCont ("selCompAttack", "Compressor Attack", 1.0, 100.0,
+               [] (const boombap::StripSettings& s) { return s.compAttackMs; },
+               [] (StripSettings& s, float v) { s.compAttackMs = v; s.compOn = true; });
+    stripCont ("selCompRelease", "Compressor Release", 10.0, 1000.0,
+               [] (const boombap::StripSettings& s) { return s.compReleaseMs; },
+               [] (StripSettings& s, float v) { s.compReleaseMs = v; s.compOn = true; });
+    stripTog ("selCompOn", "Compressor On",
+              [] (const boombap::StripSettings& s) { return s.compOn; },
+              [] (StripSettings& s, bool on) { s.compOn = on; });
+    stripCont ("selSatDrive", "Saturation Drive", 0.0, 1.0,
+               [] (const boombap::StripSettings& s) { return s.satDrive; },
+               [] (StripSettings& s, float v) { s.satDrive = v; s.satOn = true; });
+    stripTog ("selSatOn", "Saturation On",
+              [] (const boombap::StripSettings& s) { return s.satOn; },
+              [] (StripSettings& s, bool on) { s.satOn = on; });
+    stripTog ("selLimiterOn", "Limiter On",
+              [] (const boombap::StripSettings& s) { return s.limiterOn; },
+              [] (StripSettings& s, bool on) { s.limiterOn = on; });
+    act ("actCompRatioCycle", "Compressor Ratio Cycle (2/4/10)", "Station (selected)",
+         [stripGet, stripSet]
+         {
+             auto s = stripGet();
+             s.compRatio = s.compRatio < 3.0f ? 4.0f : s.compRatio < 7.0f ? 10.0f : 2.0f;
+             s.compOn = true;
+             stripSet (s);
+         });
+
+    // ---- the Station EQ: per-band + the display's active band --------
+    for (int b = 0; b < StripSettings::kEqBands; ++b)
+    {
+        const String bn = "EQ Band " + String (b + 1);
+        stripCont ("selEqFreq:" + String (b), bn + " Freq", 20.0, 20000.0,
+                   [b] (const boombap::StripSettings& s) { return s.eq[b].freqHz; },
+                   [b] (StripSettings& s, float v) { s.eq[b].freqHz = v; });
+        stripCont ("selEqGain:" + String (b), bn + " Gain", -15.0, 15.0,
+                   [b] (const boombap::StripSettings& s) { return s.eq[b].gainDb; },
+                   [b] (StripSettings& s, float v) { s.eq[b].gainDb = v; });
+        stripCont ("selEqQ:" + String (b), bn + " Q", 0.3, 8.0,
+                   [b] (const boombap::StripSettings& s) { return s.eq[b].q; },
+                   [b] (StripSettings& s, float v) { s.eq[b].q = v; });
+        stripTog ("selEqOn:" + String (b), bn + " On",
+                  [b] (const boombap::StripSettings& s) { return s.eq[b].on; },
+                  [b] (StripSettings& s, bool on) { s.eq[b].on = on; });
+        act ("actEqBand:" + String (b), "Select " + bn, "Station (selected)",
+             [this, b] { if (station != nullptr) station->eqDisplayComponent().selectBand (b); });
+    }
+    auto activeBand = [this] { return station != nullptr
+                                          ? station->eqDisplayComponent().getSelectedBand() : 0; };
+    cont ("selEqActiveFreq", "EQ Active Band Freq", "Station (selected)", 20.0, 20000.0,
+          [stripGet, activeBand] { return (double) stripGet().eq[activeBand()].freqHz; },
+          [stripGet, stripSet, activeBand] (double v)
+          {
+              auto s = stripGet();
+              s.eq[activeBand()].freqHz = (float) v;
+              stripSet (s);
+          });
+    cont ("selEqActiveGain", "EQ Active Band Gain", "Station (selected)", -15.0, 15.0,
+          [stripGet, activeBand] { return (double) stripGet().eq[activeBand()].gainDb; },
+          [stripGet, stripSet, activeBand] (double v)
+          {
+              auto s = stripGet();
+              s.eq[activeBand()].gainDb = (float) v;
+              stripSet (s);
+          });
+    cont ("selEqActiveQ", "EQ Active Band Q", "Station (selected)", 0.3, 8.0,
+          [stripGet, activeBand] { return (double) stripGet().eq[activeBand()].q; },
+          [stripGet, stripSet, activeBand] (double v)
+          {
+              auto s = stripGet();
+              s.eq[activeBand()].q = (float) v;
+              stripSet (s);
+          });
+    tog ("selEqActiveOn", "EQ Active Band On", "Station (selected)",
+         [stripGet, activeBand] { return stripGet().eq[activeBand()].on; },
+         [stripGet, stripSet, activeBand] (bool on)
+         {
+             auto s = stripGet();
+             s.eq[activeBand()].on = on;
+             stripSet (s);
+         });
+    act ("actEqBandNext", "Select Next EQ Band", "Station (selected)",
+         [this, activeBand]
+         {
+             if (station != nullptr)
+                 station->eqDisplayComponent().selectBand ((activeBand() + 1) % StripSettings::kEqBands);
+         });
+
+    // ---- the selected pad (MPC editor values) --------------------------
+    auto selPad = [this]
+    {
+        if (padBank != nullptr) return padBank->selectedPadIndex();
+        if (mpcPanel != nullptr) return mpcPanel->selectedPadIndex();
+        return 0;
+    };
+    auto padCont = [this, &cont, selPad] (const String& id, const String& name, double mn, double mx,
+                                          std::function<float (const MpcPads::PadParams&)> get,
+                                          std::function<void (MpcPads::PadParams&, float)> set)
+    {
+        cont (id, name, "Selected Pad", mn, mx,
+              [this, get, selPad] { return (double) get (engine.getPadParams (selPad())); },
+              [this, set, selPad] (double v)
+              {
+                  auto p = engine.getPadParams (selPad());
+                  set (p, (float) v);
+                  engine.setPadParams (selPad(), p);
+              });
+    };
+    padCont ("selPadGain", "Selected Pad Gain", 0.0, 1.5,
+             [] (const MpcPads::PadParams& p) { return p.gain; },
+             [] (MpcPads::PadParams& p, float v) { p.gain = v; });
+    padCont ("selPadStart", "Selected Pad Trim Start", 0.0, 1.0,
+             [] (const MpcPads::PadParams& p) { return p.startFrac; },
+             [] (MpcPads::PadParams& p, float v) { p.startFrac = v; });
+    padCont ("selPadEnd", "Selected Pad Trim End", 0.0, 1.0,
+             [] (const MpcPads::PadParams& p) { return p.endFrac; },
+             [] (MpcPads::PadParams& p, float v) { p.endFrac = v; });
+    padCont ("selPadTune", "Selected Pad Tune", -12.0, 12.0,
+             [] (const MpcPads::PadParams& p) { return p.tuneSemitones; },
+             [] (MpcPads::PadParams& p, float v) { p.tuneSemitones = v; });
+}
+
+// While LEARN is armed, rebuild the overlay's spot list from the
+// controls actually on screen. Called on the timer, so a view that
+// opens or a row that appears joins the list on its own.
+void MainComponent::refreshLearnOverlay()
+{
+    if (learnOverlay == nullptr || midi == nullptr)
+        return;
+    std::vector<boombap::LearnGlowOverlay::Spot> spots;
+    auto add = [this, &spots] (juce::Component* comp, const String& targetId)
+    {
+        if (comp == nullptr || ! comp->isVisible()) return;
+        if (const auto* t = midiTargets.find (targetId))
+            spots.push_back ({ comp, targetId, t->name });
+    };
+    auto addSlider = [&add] (LabeledSlider& s, const String& id) { add (&s.slider, id); };
+
+    // transport + project bar
+    add (&playButton, "actPlay");
+    add (&stopButton, "actStop");
+    add (&pauseButton, "actPause");
+    add (&toStartButton, "actToStart");
+    add (&toEndButton, "actToEnd");
+    add (&rewButton, "actRew");
+    add (&ffButton, "actFF");
+    add (&recordButton, "actRec");
+    add (&undoButton, "actUndo");
+    add (&redoButton, "actRedo");
+    add (&stationButton, "actFlipStation");
+    add (&patternModeButton, "songMode");
+    add (&songModeButton, "songMode");
+    add (&metroButton, "metroOn");
+    addSlider (metroVol, "metroLevel");
+    addSlider (bpm, "bpm");
+    addSlider (swing, "swing");
+    addSlider (dustRate, "dustRate");
+    add (&dustToggle, "dustOn");
+    addSlider (glueThreshold, "glueThresh");
+    add (&glueToggle, "glueOn");
+    add (&takeToggle, "takeLoop");
+
+    // drums / instruments / vocal faces
+    addSlider (kickTune, "kickTune");
+    addSlider (kickDecay, "kickDecay");
+    addSlider (snareSnappy, "snareSnappy");
+    addSlider (openHatDecay, "openHatDecay");
+    addSlider (clapTail, "clapTail");
+    addSlider (synthCutoff, "synthCutoff");
+    addSlider (synthReso, "synthReso");
+    addSlider (synthAttack, "synthAttack");
+    addSlider (synthRelease, "synthRelease");
+    addSlider (synthLevel, "synthLevel");
+    addSlider (pianoBright, "pianoBright");
+    addSlider (pianoDecay, "pianoDecay");
+    addSlider (pianoLevel, "pianoLevel");
+    addSlider (vocalInput, "vocalInput");
+    addSlider (vocalDistance, "vocalDistance");
+    add (&vocalToggle, "vocalMonitor");
+
+    // sequencer: pattern keys + the visible rows' mix controls
+    if (sequencerPanel != nullptr && sequencerPanel->isVisible())
+    {
+        for (int i = 0; i < 8; ++i)
+            add (&sequencerPanel->patternButtonForTest (i), "actPattern:" + String (i));
+        const int rows = engine.getNumTracks();
+        for (int t = 0; t < rows && t < kTracks; ++t)
+        {
+            add (&sequencerPanel->rowLevelSlider (t), "chanGain:" + String (t));
+            add (&sequencerPanel->rowMuteButton (t), "chanMute:" + String (t));
+            add (&sequencerPanel->rowSoloButton (t), "chanSolo:" + String (t));
+        }
+    }
+    // the Station (when open): the bound channel's rail + board strips
+    if (station != nullptr)
+    {
+        const int ch = station->boundChannel();
+        add (&station->railFaderComponent(), "chanGain:" + String (ch));
+        add (&station->railMuteButtonForTest(), "chanMute:" + String (ch));
+        add (&station->railSoloButtonForTest(), "chanSolo:" + String (ch));
+        for (int c = 0; c <= 44; ++c)
+        {
+            if (auto* f = station->boardComponent().stripFader (c))
+                add (f, "chanGain:" + String (c));
+        }
+    }
+    learnOverlay->spots = std::move (spots);
+    learnOverlay->repaint();
 }
 
 //==============================================================================
@@ -1576,6 +2153,8 @@ void MainComponent::resized()
     saveAsButton.setBounds (RB (230, 6, 90, 28));
     recentButton.setBounds (RB (326, 6, 76, 28));
     audioButton.setBounds (RB (408, 6, 80, 28));
+    midiButton.setBounds (RB (1458, 6, 92, 28));   // MIDI build (item 25): the project bar's right end
+    if (learnOverlay != nullptr) learnOverlay->setBounds (getLocalBounds());
     projectName.setBounds (RB (500, 6, 540, 28)); // Round 6: the clock moved to the transport row (item 115) - the name takes its old room
     stationButton.setBounds (RB (1058, 6, 86, 28));
     pianoButton.setBounds (RB (1150, 6, 96, 28));

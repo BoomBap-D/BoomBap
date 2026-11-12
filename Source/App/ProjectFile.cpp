@@ -273,6 +273,10 @@ String projectToJson (const ProjectData& d, const File& projectFile)
         { "export", object ({ { "bars", d.exportBars }, { "normalize", d.exportNormalize } }) }
     });
 
+    // MIDI build (item 25): the project Learn layer, additive key.
+    if (d.midiLearnJson.isNotEmpty())
+        root.getDynamicObject()->setProperty ("midiLearn", d.midiLearnJson);
+
     if (d.vocalTakePath.isNotEmpty())
     {
         const File f (d.vocalTakePath);
@@ -565,6 +569,9 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
             d.vocalTakePath = resolved.getFullPathName();
         }
     }
+
+    // MIDI build (item 25): additive key; absent = empty layer.
+    d.midiLearnJson = root.getProperty ("midiLearn", var()).toString();
 
     if (auto* at = root.getProperty ("audioTracks", var()).getArray())
         for (int i = 0; i < ProjectSettings::kAudioTracks && i < at->size(); ++i)

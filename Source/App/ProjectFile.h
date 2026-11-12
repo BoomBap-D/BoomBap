@@ -34,6 +34,12 @@ struct ProjectData
     int  exportBars = 4;
     bool exportNormalize = true;
     juce::String vocalTakePath;   // the recorded vocal take's WAV file; empty = no take
+
+    // MIDI build (item 25): the project's own MIDI Learn layer, as
+    // JSON text; empty = no project bindings. An additive "midiLearn"
+    // key in the file - readers that predate it ignore the key, and
+    // files without it load with an empty project layer.
+    juce::String midiLearnJson;
 };
 
 // projectFile is where the JSON will live (used to write relative sample paths).

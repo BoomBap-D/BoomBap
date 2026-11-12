@@ -681,6 +681,35 @@ public:
     // Bit i is set while clip slot i is sounding (item 54: find it by eye).
     unsigned int soundingClipMask() const { return soundingClipMaskA.load(); }
     int  currentStep() const      { return playStep.load(); }  // -1 when stopped
+
+    // ---- MIDI build (item 25): the sequencer clock, published for
+    // the MIDI record path. `step` is the step SOUNDING at the start
+    // of the last process() block, `intoStepSamples` how far into it
+    // the block begins, `nextStepInSamples` how many samples from the
+    // block start until the next step fires. The MIDI router resolves
+    // an event's step from this + the event's MidiBuffer timestamp -
+    // never from when a device callback happened to run.
+    struct MidiClock
+    {
+        bool playing = false, paused = false;
+        int step = -1;              // sounding step at block start
+        int intoStepSamples = 0;    // samples into that step
+        int nextStepInSamples = 0;  // samples from block start to next step
+        double samplesPerStep = 0.0;
+        int pattern = 0;            // the pattern sounding (playPattern)
+    };
+    MidiClock getMidiClock() const
+    {
+        MidiClock c;
+        c.playing = playing.load();
+        c.paused = pausedA.load();
+        c.step = midiClockStepA.load();
+        c.intoStepSamples = midiClockIntoStepA.load();
+        c.nextStepInSamples = midiClockNextStepInA.load();
+        c.samplesPerStep = stepSamples();
+        c.pattern = playPattern.load();
+        return c;
+    }
     void setBpm (float v)         { bpm.store (std::clamp (v, 40.0f, 220.0f)); }
     void setSwing (float percent) { swing.store (std::clamp (percent, 50.0f, 75.0f)); }
 
@@ -1204,7 +1233,48 @@ public:
         if (! playing.load() || pausedA.load()) return false; // item 115: a frozen playhead writes nothing
         const int step = currentStep();
         if (step < 0 || step >= kSteps) return false;
-        const int pat = playPattern.load();
+        return writeNoteToPattern (playPattern.load(), channel, midiNote, velocity, step);
+    }
+
+    // MIDI build (item 25): the same lane write with the step given -
+    // the router resolves it from the engine clock plus the event's
+    // MidiBuffer timestamp, never from callback arrival time.
+    bool recordNoteAtStep (int channel, int midiNote, float velocity, int step)
+    {
+        return writeNoteToPattern (playPattern.load(), channel, midiNote, velocity, step);
+    }
+    // Step-record: transport stopped, the write lands in the EDITED
+    // pattern at the router's cursor step.
+    bool stepRecordNoteAt (int channel, int midiNote, float velocity, int step)
+    {
+        return writeNoteToPattern (editPattern.load(), channel, midiNote, velocity, step);
+    }
+
+    // MIDI build (item 25): a recorded pad hit - the row the pad
+    // names (rows 5..20 = pads 1..16 by item 109's split stores; the
+    // step sounds the ROW's sample, the hit itself is the pad's).
+    void recordPadStep (int pad, int step, int velocity127)
+    {
+        writePadStep (playPattern.load(), pad, step, velocity127);
+    }
+    void stepRecordPadStep (int pad, int step, int velocity127)
+    {
+        writePadStep (editPattern.load(), pad, step, velocity127);
+    }
+    void writePadStep (int pat, int pad, int step, int velocity127)
+    {
+        if (pad < 0 || pad >= kPads || step < 0 || step >= kSteps) return;
+        if (Sample1 + pad >= numTracksA.load()) return;
+        patGrid[(size_t) gIdx (pat, Sample1 + pad, step)].store (
+            (uint8_t) std::clamp (velocity127, 0, 127));
+        dirty.store (true);
+    }
+
+    // The lane write itself (the Round 4 lane model), shared by the
+    // playhead write above and the two MIDI doors.
+    bool writeNoteToPattern (int pat, int channel, int midiNote, float velocity, int step)
+    {
+        if (step < 0 || step >= kSteps) return false;
         const auto laneValue = [] (int offset)
         {
             return std::clamp (offset + 25, 1, 49);
@@ -1826,6 +1896,8 @@ public:
             panicActive = false; panicVoicesPending = false; // a fresh start is never faded
         }
         if (! isPlayingNow && wasPlaying && ! pausedNow) playStep.store (-1);
+        if (! isPlayingNow && wasPlaying) lastStepFiredRt = -1;         // MIDI clock: stopped
+        if (isPlayingNow && ! wasPlaying) { lastStepFiredRt = -1; samplesSinceStepFireRt = 0; }
         wasPlaying = isPlayingNow;
         wasPaused = pausedNow;
 
@@ -1929,6 +2001,30 @@ public:
         float chanPkL[kNumChannels] = {}, chanPkR[kNumChannels] = {};
         float masterPkL = 0.0f, masterPkR = 0.0f;
         const bool useClips = samplesOk && audioClipCount() > 0;
+
+        // MIDI build (item 25): publish the sequencer clock for this
+        // block (see getMidiClock) BEFORE the sample loop advances it.
+        {
+            const int curStep = lastStepFiredRt >= 0 ? lastStepFiredRt
+                                                     : playStep.load();
+            midiClockStepA.store (curStep);
+            midiClockIntoStepA.store (samplesSinceStepFireRt);
+            int nextIn = 1 << 29;
+            if (isPlayingNow && curStep >= 0)
+            {
+                const int nextStep = (curStep + 1) % kSteps;
+                const int nextBase = nextStep * kTicksPer16th;
+                const int fireAt = nextBase + swingOffsetTicks (
+                                       nextBase, kTicksPer16th, swingNow);
+                const int cycle = kSteps * kTicksPer16th;
+                int dticks = (fireAt - tick) % cycle;
+                if (dticks < 0) dticks += cycle;
+                nextIn = (int) std::llround (samplesToNextTick
+                                             + dticks * samplesPerTick);
+                if (nextIn < 0) nextIn = 0;
+            }
+            midiClockNextStepInA.store (nextIn);
+        }
         unsigned int clipMask = 0; // clips sounding this block (item 54)
         // Item 36: the take records the CLEAN input - input-gain staging only.
         // The mic emulation is a playback treatment (see takeVocal below).
@@ -2012,6 +2108,7 @@ public:
                         takeStartPosA.store (transportSamples);
                     }
                     fireTick (tick, swingNow, samplesOk, samplesPerTick);
+                    if (stepFiredRt) { samplesSinceStepFireRt = 0; stepFiredRt = false; }
                     ++tick;
                     if (songMode.load() && songTotalBarsA.load() > 0)
                     {
@@ -2030,6 +2127,7 @@ public:
                 }
                 samplesToNextTick -= 1.0;
             }
+            if (isPlayingNow) ++samplesSinceStepFireRt;
 
             // ---- sources, one per channel (Pass 2 routing) ----
             // Drums: a row bound to a sample (item 40) sounds its one-shot
@@ -2543,6 +2641,10 @@ private:
             const int base = s * kTicksPer16th;
             if (base + swingOffsetTicks (base, kTicksPer16th, swingPercent) != t)
                 continue;
+            // MIDI build (item 25): this step starts sounding NOW -
+            // the clock the MIDI record path reads.
+            lastStepFiredRt = s;
+            stepFiredRt = true;
             if (metronomeOn.load() && (s % 4) == 0) // beat step: fire the click
             {
                 clickFreq = (s == 0) ? 2000.0 : 1500.0;
@@ -3049,6 +3151,11 @@ private:
     std::atomic<bool> playing { false }, dirty { true };
     std::atomic<bool> pausedA { false }; // Round 6 (item 115): PAUSE - engaged but frozen
     std::atomic<int>  playStep { -1 };
+    // MIDI build (item 25): the published sequencer clock (see
+    // getMidiClock) - written once per process() block from the audio
+    // thread's fire state, read by the MIDI router.
+    std::atomic<int>  midiClockStepA { -1 }, midiClockIntoStepA { 0 },
+                      midiClockNextStepInA { 0 };
     std::atomic<float> bpm { 90.0f }, swing { 58.0f }, masterDb { 0.0f }, glueGr { 0.0f };
 
     std::atomic<float> kickTune { 50.0f }, kickDecay { 600.0f }, snareSnappy { 0.6f },
@@ -3063,6 +3170,10 @@ private:
 
     // audio-thread-only state
     int tick = 0;
+    // MIDI build (item 25): audio-thread fire state behind the
+    // published MidiClock (see process()).
+    int lastStepFiredRt = -1, samplesSinceStepFireRt = 0;
+    bool stepFiredRt = false;
     double samplesToNextTick = 0.0;
     bool wasPlaying = false;
     bool wasPaused = false; // Round 6 (item 115): the resume edge re-enters at the frozen position

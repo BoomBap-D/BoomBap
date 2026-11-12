@@ -8,6 +8,10 @@ BoomBapProcessor::BoomBapProcessor()
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
     formatManager.registerBasicFormats();
+    // MIDI build (item 25): the host owns the devices; the service
+    // only routes what the host delivers. Load the saved Learn map.
+    midiService.manageDevices = false;
+    midiService.loadState();
 }
 
 void BoomBapProcessor::prepareToPlay (double sampleRate, int)
@@ -25,9 +29,14 @@ bool BoomBapProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
         || in == juce::AudioChannelSet::disabled();
 }
 
-void BoomBapProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void BoomBapProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
+
+    // MIDI build (item 25): route the host's MIDI before the block
+    // renders - the buffer's timestamps are block offsets, and the
+    // engine clock the router reads is the one published last block.
+    midiService.processHostBuffer (midiMessages);
 
     // The sequencer follows the host transport: play/stop and tempo.
     bool hostPlaying = false;

@@ -13,6 +13,8 @@
 #include "UndoHistory.h"
 #include "StationPanel.h"
 #include "KeyboardPanel.h"
+#include "Midi/MidiService.h"
+#include "Midi/MidiPanel.h"
 
 class PadBankComponent;
 class PadWindow;
@@ -89,6 +91,18 @@ public:
     void driveOpenPianoRoll()     { openPianoRoll(); }
     void driveOpenPlaylist()      { openPlaylist(); }
     void driveShowAudioSettings() { showAudioSettings(); }
+
+    // MIDI build (item 25): the MIDI window + service, reached through
+    // the same doors the "MIDI..." button uses. The plugin editor
+    // hands the component the PROCESSOR's service (the host owns the
+    // devices; the component owns only the targets + window).
+    void showMidiSettings();
+    void setExternalMidiService (boombap::MidiService* svc);
+    juce::DocumentWindow* midiWindowComponent() { return midiWindow.get(); }
+    void driveShowMidiSettings() { showMidiSettings(); }
+    boombap::MidiService* midiService() { return midi; }
+    boombap::MidiPanel* midiPanelComponent() { return midiPanel; }
+    boombap::MidiTargetRegistry& midiTargetRegistry() { return midiTargets; }
 
     // Round 1: the selection / delete / waveform tests reach the real
     // sequencer panel and the real minimise-coupling step - the same
@@ -214,6 +228,11 @@ private:
     juce::Component* tabContent (int index);
     // audio device setup (Pass 1 item 8) + autosave / recovery (item 7)
     void showAudioSettings();
+    // MIDI build (item 25): build the Learn target table, keep the
+    // learn overlay's spots honest, and persist map changes.
+    void buildMidiTargets();
+    void refreshLearnOverlay();
+    void onMidiMapChanged();
     void saveDeviceState();
     std::unique_ptr<juce::XmlElement> loadDeviceStateXml();
     void writeRecovery();
@@ -327,6 +346,7 @@ private:
     bool lastSongModeShown = false;
     void refreshModeButtons();
     juce::TextButton audioButton { "Audio..." };
+    juce::TextButton midiButton { "MIDI..." };   // MIDI build (item 25)
     juce::TextButton metroButton { "METRO" };
     LabeledSlider metroVol;
     PadActivityLight padLight;
@@ -335,6 +355,18 @@ private:
     bool lastPlayingState = false;
     int autosaveTicks = 0;
     std::unique_ptr<juce::DocumentWindow> audioWindow;
+    // MIDI build (item 25): the service (owned standalone, borrowed
+    // from the processor in the plugin), the Learn target table, the
+    // MIDI window, and the LEARN overlay that outlines every bindable
+    // control in the main window while Learn is armed.
+    std::unique_ptr<boombap::MidiService> ownedMidi;
+    boombap::MidiService* midi = nullptr;
+    boombap::MidiTargetRegistry midiTargets;
+    std::unique_ptr<juce::DocumentWindow> midiWindow;
+    boombap::MidiPanel* midiPanel = nullptr;   // owned by midiWindow
+    std::unique_ptr<boombap::LearnGlowOverlay> learnOverlay;
+    bool learnOverlayOn = false;
+    int lastMidiMelodic = boombap::BoomBapEngine::kSynthChannel;
     LabeledSlider bpm, swing, master, dustRate, glueThreshold;
     juce::ToggleButton dustToggle { "Dust (S950)" }, glueToggle { "Glue" };
     GrMeter glueBar;
