@@ -232,6 +232,10 @@ private:
     // learn overlay's spots honest, and persist map changes.
     void buildMidiTargets();
     void refreshLearnOverlay();
+    // The learnable spots (component -> target), shared by the LEARN
+    // overlay and the right-click MIDI Learn menu (item 147 fix).
+    std::vector<boombap::LearnGlowOverlay::Spot> buildLearnSpotMap();
+    void handleLearnContextClick (const juce::MouseEvent& e);
     void onMidiMapChanged();
     void saveDeviceState();
     std::unique_ptr<juce::XmlElement> loadDeviceStateXml();
@@ -367,6 +371,20 @@ private:
     std::unique_ptr<boombap::LearnGlowOverlay> learnOverlay;
     bool learnOverlayOn = false;
     int lastMidiMelodic = boombap::BoomBapEngine::kSynthChannel;
+    // Item 147 fix: right-clicks anywhere in the window are offered
+    // to handleLearnContextClick (it only acts on learnable spots;
+    // pads and keys run their own menus and are skipped there).
+    struct LearnContextListener : public juce::MouseListener
+    {
+        MainComponent* owner = nullptr;
+        void mouseDown (const juce::MouseEvent& e) override
+        {
+            if (owner != nullptr && e.mods.isPopupMenu())
+                owner->handleLearnContextClick (e);
+        }
+    };
+    LearnContextListener learnContextListener;
+    bool visualNoteShown[128] = {};   // board lights already mirrored
     LabeledSlider bpm, swing, master, dustRate, glueThreshold;
     juce::ToggleButton dustToggle { "Dust (S950)" }, glueToggle { "Glue" };
     GrMeter glueBar;

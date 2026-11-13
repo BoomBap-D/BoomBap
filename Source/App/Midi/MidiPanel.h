@@ -13,6 +13,9 @@
 // window (they light up - MainComponent's learn overlay), then
 // wiggle a knob / fader / pad on the controller. The bind lands in
 // the layer chosen here; a stolen binding shows a notice.
+// Item 147 fix: the same capture can be armed from the app itself -
+// right-click a pad, a key, or any learnable control and choose
+// MIDI Learn; that arm is one-shot (it disarms when the bind lands).
 // =====================================================================
 
 namespace boombap
@@ -64,6 +67,10 @@ public:
         addAndMakeVisible (presetCombo);
         setupLabel (presetNote, "");
         presetNote.setColour (juce::Label::textColourId, juce::Colour (0xffb9b2a4));
+        // Item 147 fix (c): the Mini's 8 physical pads are two banks
+        // of BoomBap's 16 - say so where the preset is chosen.
+        setupLabel (bankHintLabel, "");
+        bankHintLabel.setColour (juce::Label::textColourId, juce::Colour (0xffe8b23a));
 
         setupToggle (recArmToggle, "REC INPUT - record controller hits into the pattern");
         recArmToggle.onClick = [this]
@@ -79,9 +86,12 @@ public:
         };
         setupLabel (cursorLabel, "Step cursor: 1");
 
-        setupToggle (learnToggle, "LEARN - then click a control in the main window and wiggle the controller");
+        setupToggle (learnToggle, "LEARN - click a control (or right-click a pad / key / control) then wiggle the controller");
         learnToggle.onClick = [this]
         {
+            // The toggle is the stay-on flow; a right-click arm is
+            // one-shot and never survives a manual toggle.
+            service.oneShotLearn.store (false);
             service.learnArmed.store (learnToggle.getToggleState());
             if (! learnToggle.getToggleState()) service.cancelPendingTarget();
             changed();
@@ -148,6 +158,8 @@ public:
     juce::ToggleButton& learnToggleButton() { return learnToggle; }
     juce::ToggleButton& recArmToggleButton() { return recArmToggle; }
     juce::ComboBox& deviceComboBox() { return deviceCombo; }
+    juce::ComboBox& presetComboBox() { return presetCombo; }
+    juce::String bankHintText() const { return bankHintLabel.getText(); }
 
     void paint (juce::Graphics& g) override
     {
@@ -180,6 +192,7 @@ public:
         presetLabel.setBounds (r.removeFromTop (18));
         presetCombo.setBounds (r.removeFromTop (26));
         presetNote.setBounds (r.removeFromTop (30));
+        bankHintLabel.setBounds (r.removeFromTop (18));
         r.removeFromTop (4);
         recArmToggle.setBounds (r.removeFromTop (24));
         auto stepRow = r.removeFromTop (24);
@@ -285,6 +298,14 @@ private:
         presetNote.setText (idx > 0 && idx <= (int) presets.size()
                                 ? presets[(size_t) idx - 1].setupNote : "",
                             juce::dontSendNotification);
+        // The Bank A/B hint rides the Mini presets (mk1 + MK2): both
+        // put BoomBap pads 1-8 on Bank A and 9-16 on Bank B.
+        const bool isMini = idx > 0 && idx <= (int) presets.size()
+                         && presets[(size_t) idx - 1].name.contains ("MPK Mini");
+        bankHintLabel.setText (isMini
+                                   ? "8 physical pads - Bank A = BoomBap pads 1-8, Bank B = pads 9-16"
+                                   : "",
+                               juce::dontSendNotification);
     }
     void deleteSelected()
     {
@@ -375,6 +396,7 @@ private:
 
     MidiService& service;
     juce::Label titleLabel, deviceLabel, presetLabel, presetNote, hostNote,
+                bankHintLabel,
                 cursorLabel, layerLabel, pendingLabel, noticeLabel,
                 monitorTitle, monitorLabel, listTitle;
     juce::ComboBox deviceCombo, presetCombo, layerCombo;

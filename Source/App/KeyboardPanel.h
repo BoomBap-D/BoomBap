@@ -170,6 +170,24 @@ public:
     std::function<int()> getSelectedChannel;
     std::function<void (int, int, float)> onNoteOn;  // (channel, midiNote, velocity)
     std::function<void (int, int)> onNoteOff;        // (channel, midiNote)
+    // MIDI Learn fix (item 147): right-clicking a key offers MIDI
+    // Learn for that key ("key:<note>", the note it plays at the
+    // current octave shift) - the owner arms the one-shot capture.
+    std::function<void (int)> onKeyMidiLearn;
+
+    // Correspondence (item 147): a pitch the CONTROLLER is holding
+    // lights its key without the panel pressing it - no onNoteOn, no
+    // step-write, display only. Driven by the owner from the MIDI
+    // service's held-pitch state.
+    void showRemoteNote (int note, bool on)
+    {
+        if (on) { if (remoteHeldNotes.insert (note).second) repaint(); }
+        else if (remoteHeldNotes.erase (note) > 0) repaint();
+    }
+    bool isNoteLit (int note) const
+    {
+        return isNoteHeld (note) || remoteHeldNotes.count (note) > 0;
+    }
 
     bool isWriteArmed() const { return writeToggle.getToggleState(); }
     // Test seam (the Round 4 button-seam pattern): the real toggle.
@@ -306,6 +324,25 @@ public:
     void mouseDown (const juce::MouseEvent& e) override
     {
         grabKeyboardFocus();
+        // Item 147 fix: a right-click on a key is its menu (MIDI
+        // Learn for this key), never a press.
+        if (e.mods.isPopupMenu())
+        {
+            float yFrac = 0.0f;
+            const int note = noteAt (e.getPosition(), yFrac);
+            if (note >= 0 && onKeyMidiLearn)
+            {
+                juce::PopupMenu m;
+                m.addItem (1, "MIDI Learn");
+                m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (this),
+                                 [this, note] (int choice)
+                                 {
+                                     if (choice == 1 && onKeyMidiLearn)
+                                         onKeyMidiLearn (note);
+                                 });
+            }
+            return;
+        }
         pressAt (e.getPosition());
     }
     void mouseDrag (const juce::MouseEvent& e) override { pressAt (e.getPosition()); }
@@ -407,7 +444,7 @@ public:
         {
             if (isBlackKey (n)) continue;
             auto r = keyRect (n);
-            const bool held = isNoteHeld (n);
+            const bool held = isNoteLit (n);
             const bool centre = n == lowestNote() + 12; // the Q row's C (C4 at shift 0)
             // Round 6 (item 123): a white key reads as a KEY, not a
             // slice of one charcoal block - a real seam (the panel
@@ -454,7 +491,7 @@ public:
         {
             if (! isBlackKey (n)) continue;
             auto r = keyRect (n);
-            const bool held = isNoteHeld (n);
+            const bool held = isNoteLit (n);
             // Round 6 (item 123): the black keys get the same
             // treatment - their own near-black gradient, a lit top
             // edge, and a faintly lit front (bottom) edge, the way a
@@ -551,6 +588,7 @@ private:
     int octaveShift = 0;
     int mouseNote = -1;
     std::map<int, int> heldNotes;              // midi note -> channel it started on
+    std::set<int> remoteHeldNotes;             // pitches the controller holds (display only)
     std::map<juce::juce_wchar, int> qwertyHeld; // character -> midi note it started
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KeyboardPanel)

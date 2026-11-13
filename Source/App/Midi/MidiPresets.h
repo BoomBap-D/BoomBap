@@ -2,7 +2,7 @@
 #include "MidiLearn.h"
 
 // =====================================================================
-// The three factory controller presets (MIDI-CONTROLLERS-REFERENCE
+// The factory controller presets (MIDI-CONTROLLERS-REFERENCE
 // Part 5). HONESTY RULE, kept from the reference: only the MPK Mini
 // mk1's Program 1 is a true factory layout (decoded from Akai's
 // preset files). Akai and M-Audio publish NO factory CC tables for
@@ -73,6 +73,29 @@ inline MidiPreset mpkMiniPreset()
     for (int i = 0; i < 8; ++i)
         p.bindings.push_back (ccBind (10, bank2[i],
                                       "actPattern:" + juce::String (i)));
+    return p;
+}
+
+// ---------------------------------------------------------------------
+// Akai MPK Mini MK2 - factory Program 1 (item 147 fix). This is D's
+// test unit. Program 1's pads send the same chromatic 36-51 the mk1
+// sends (Bank A 36-43, Bank B 44-51), so they play BoomBap's pads
+// through the router's fixed map with zero setup - the preset needs
+// no pad bindings, and it carries NO knob bindings either: Akai
+// publishes no factory knob-CC table for the MK2 (assignments live
+// in the unit's Editor), so nothing is invented here. The knobs are
+// bound per unit with right-click MIDI Learn - which is exactly the
+// flow item 147 exists for. The preset's job is the correct NAME
+// and the honest note, plus the MIDI window's Bank A/B hint.
+// ---------------------------------------------------------------------
+inline MidiPreset mpkMiniMk2Preset()
+{
+    MidiPreset p;
+    p.name = juce::String::fromUTF8 ("Akai MPK Mini MK2 \xe2\x80\x94 factory Program 1");
+    p.setupNote = "Ships on the unit: pads already play BoomBap's pads "
+                  "(notes 36-51). Akai publishes no factory knob table "
+                  "for the MK2 - right-click any control and choose "
+                  "MIDI Learn to bind the knobs.";
     return p;
 }
 
@@ -218,7 +241,11 @@ inline MidiPreset triggerFingerProPreset()
 
 inline std::vector<MidiPreset> allMidiPresets()
 {
-    return { mpkMiniPreset(), mpk49Preset(), triggerFingerProPreset() };
+    // Order is the preset menu's order - and saved preset indices
+    // point into it, so new presets join at the END of their family
+    // only with care. The MK2 sits beside the mk1 it supersedes on
+    // D's desk (noted in MIDI-LEARN-FIX-NOTES: indices 3/4 shifted).
+    return { mpkMiniPreset(), mpkMiniMk2Preset(), mpk49Preset(), triggerFingerProPreset() };
 }
 
 } // namespace boombap

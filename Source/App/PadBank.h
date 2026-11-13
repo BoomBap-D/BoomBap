@@ -768,19 +768,28 @@ public:
     // Round 6 (item 110): the pad menu's CLEAR PAD - the owner empties
     // the pad as one undoable gesture.
     std::function<void (int)> onPadClearRequest;
+    // MIDI Learn fix (item 147): the pad menu's MIDI LEARN - the owner
+    // arms the one-shot learn capture for this pad ("pad:N"), so the
+    // next pad hit on the controller becomes this pad. Pads are
+    // learnable targets: per-pad learn is how a 16-pad map gets built
+    // on hardware whose factory layout does not match.
+    std::function<void (int)> onPadMidiLearn;
 
     // Round 6 (item 110): the pad's right-click menu.
+    // MIDI Learn fix (item 147): the menu carries MIDI Learn.
     void showPadMenu (int pad)
     {
         selectPad (pad, false);
         juce::PopupMenu m;
         m.addItem (1, "Load sample...");
         m.addItem (2, "Clear pad", engine.padHasSample (pad));
+        m.addItem (3, "MIDI Learn", onPadMidiLearn != nullptr);
         m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&pads[pad]),
                          [this, pad] (int choice)
                          {
                              if (choice == 1 && onLoad) onLoad (pad);
                              else if (choice == 2 && onPadClearRequest) onPadClearRequest (pad);
+                             else if (choice == 3 && onPadMidiLearn) onPadMidiLearn (pad);
                          });
     }
 

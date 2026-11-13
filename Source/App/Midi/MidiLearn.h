@@ -99,6 +99,32 @@ struct MidiBinding
     }
 };
 
+// ---- pad / key learn targets (FEEDBACK item 147) --------------------
+// Pads and keys are learnable targets in their own right: binding a
+// note to "pad:N" makes that note play pad N; binding one to "key:M"
+// makes it play pitch M on the melodic channel. Their behaviour lives
+// in the MidiRouter (audio thread, engine-clock timing) through the
+// snapshot the service rebuilds from this map - the registry entries
+// exist so Learn can name them and the mapping list can show them.
+inline juce::String midiPadTargetId (int pad)  { return "pad:" + juce::String (pad); }
+inline juce::String midiKeyTargetId (int note) { return "key:" + juce::String (note); }
+inline bool parseMidiPadTarget (const juce::String& id, int& padOut)
+{
+    if (! id.startsWith ("pad:")) return false;
+    const auto rest = id.substring (4);
+    if (rest.isEmpty() || ! rest.containsOnly ("0123456789")) return false;
+    padOut = rest.getIntValue();
+    return padOut >= 0 && padOut < 16;
+}
+inline bool parseMidiKeyTarget (const juce::String& id, int& noteOut)
+{
+    if (! id.startsWith ("key:")) return false;
+    const auto rest = id.substring (4);
+    if (rest.isEmpty() || ! rest.containsOnly ("0123456789")) return false;
+    noteOut = rest.getIntValue();
+    return noteOut >= 0 && noteOut <= 127;
+}
+
 enum class MidiLayer { Factory, Global, Project };
 
 class MidiMap

@@ -470,6 +470,10 @@ void MainComponent::openPadBank()
         padBank->onSelectPad = [this] (int ch) { selectChannel (ch); };
         padBank->onPadCopyRequest = [this] (int from, int to) { copyPadToPad (from, to); };
         padBank->onPadClearRequest = [this] (int pad) { clearPad (pad); }; // item 110
+        padBank->onPadMidiLearn = [this] (int pad) // item 147: pads are learnable
+        {
+            if (midi != nullptr) midi->armLearnCaptureFor (boombap::midiPadTargetId (pad));
+        };
         padWindow = std::make_unique<PadWindow> ("BoomBap Pad Bank", boombap::ui::bg());
         padWindow->setLookAndFeel (&lookAndFeel);
         padWindow->setContentNonOwned (padBank.get(), false); // the unique_ptr owns it - the window must not delete it too

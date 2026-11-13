@@ -37,6 +37,11 @@ public:
         router.onEvent = [this] (const MidiRouteEvent& ev) { noteMonitor (ev); };
         router.onControl = [this] (const MidiRouteEvent& ev) { queueControl (ev); };
         router.onLearnCapture = [this] (const MidiRouteEvent& ev) { return tryLearnCapture (ev); };
+        router.onVisualNote = [this] (int note, bool on)
+        {
+            if (note >= 0 && note < 128) visualNote[note].store (on);
+        };
+        for (int n = 0; n < 128; ++n) visualNote[n].store (false);
     }
     ~MidiService() override { closeDevices(); }
 
@@ -146,6 +151,59 @@ public:
         return hasPendingTarget.load() ? juce::String (pendingTargetBuf) : juce::String();
     }
     void cancelPendingTarget() { hasPendingTarget.store (false); }
+    // Item 147's grammar: right-click a pad / key / control -> MIDI
+    // Learn arms the capture for THAT target alone. The next
+    // controller hit binds it, then Learn disarms itself (one-shot) -
+    // the panel's LEARN toggle is the stay-on flow and never sets this.
+    std::atomic<bool> oneShotLearn { false };
+    void armLearnCaptureFor (const juce::String& targetId)
+    {
+        setPendingTarget (targetId);
+        oneShotLearn.store (true);
+        learnArmed.store (true);
+    }
+    // Correspondence for the UI: is this pitch currently held from
+    // the controller (the board lights it - display only)?
+    bool visualNoteState (int note) const
+    {
+        return note >= 0 && note < 128 && visualNote[note].load();
+    }
+
+    // Rebuild the router's learned-note snapshot from the map (see
+    // MidiRouter's snapshot note). Message thread; called when binds
+    // land and whenever a layer is (re)loaded or edited.
+    void syncRouterSnapshot()
+    {
+        router.clearLearnedNotes();
+        for (int ch = 1; ch <= 16; ++ch)
+            for (int note = 0; note < 128; ++note)
+            {
+                // The effective binding for this source: the first
+                // note binding that matches, layers in priority order
+                // - the same winner MidiMap::findEffective returns.
+                for (auto layer : { MidiLayer::Project, MidiLayer::Global, MidiLayer::Factory })
+                {
+                    const MidiBinding* hit = nullptr;
+                    for (const auto& b : map.layerBindings (layer))
+                    {
+                        if (b.sourceType != MidiBinding::NoteSource || b.number != note)
+                            continue;
+                        if (b.channel != 0 && b.channel != ch) continue;
+                        hit = &b;
+                        break;
+                    }
+                    if (hit == nullptr) continue;   // try the next layer
+                    int pad = -1, key = -1;
+                    if (parseMidiPadTarget (hit->targetId, pad))
+                        router.setLearnedNote (true, ch, note, pad);
+                    else if (parseMidiKeyTarget (hit->targetId, key))
+                        router.setLearnedNote (false, ch, note, key);
+                    break;   // effective binding found, whatever its kind
+                }
+            }
+        lastSyncedRevision = map.revision();
+    }
+    int lastSyncedRevision = -1;
     // Bumped when a bind happened; the string carries the notice
     // ("CC 16 now drives Glue Threshold - it was bound to ...").
     int learnNoticeCount() const { return learnNoticeCountA.load(); }
@@ -182,11 +240,13 @@ public:
     bool drainActions()
     {
         bool changed = false;
+        bool bound = false;
         // Learn binds first, so the wiggle that made them does not
         // also drive the control it just bound.
         PendingBind pb;
         while (bindFifo.read (pb))
         {
+            bound = true;
             MidiBinding b;
             b.sourceType = pb.isNote ? MidiBinding::NoteSource : MidiBinding::CCSource;
             b.channel = pb.channel;
@@ -220,6 +280,18 @@ public:
                     changed = true;
             }
         }
+        // The router's snapshot follows the map: refresh it when
+        // binds landed here, and when the panel edited the map
+        // directly (delete / clear / preset all bump the revision).
+        if (bound || map.revision() != lastSyncedRevision)
+            syncRouterSnapshot();
+        // A one-shot (right-click) arm ends with its bind.
+        if (bound && oneShotLearn.load())
+        {
+            oneShotLearn.store (false);
+            learnArmed.store (false);
+            cancelPendingTarget();
+        }
         return changed;
     }
 
@@ -252,6 +324,7 @@ public:
             else if (devId.isNotEmpty()) openDevice (devId);
         }
         router.recArm.store (props->getBoolValue ("midiRecArm", false));
+        syncRouterSnapshot();
     }
     void saveState()
     {
@@ -277,6 +350,7 @@ public:
                                   presets[(size_t) idx - 1].bindings);
         else
             map.setLayerBindings (MidiLayer::Factory, {});
+        syncRouterSnapshot();
     }
     juce::String projectLayerJson() const
     {
@@ -286,6 +360,7 @@ public:
     void setProjectLayerJson (const juce::String& json)
     {
         map.layerFromJson (MidiLayer::Project, json);
+        syncRouterSnapshot();
     }
 
 private:
@@ -391,6 +466,7 @@ private:
 
     std::atomic<bool> hasPendingTarget { false };
     char pendingTargetBuf[64] = {};
+    std::atomic<bool> visualNote[128];   // controller-held pitches (UI lights)
     juce::String lastLearnNotice;               // message thread
     std::atomic<int> learnNoticeCountA { 0 };
 

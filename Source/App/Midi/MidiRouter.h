@@ -31,7 +31,15 @@ struct MidiRouteEvent
 class MidiRouter
 {
 public:
-    explicit MidiRouter (BoomBapEngine& e) : engine (e) {}
+    explicit MidiRouter (BoomBapEngine& e) : engine (e)
+    {
+        for (int ch = 1; ch <= 16; ++ch)
+            for (int n = 0; n < 128; ++n)
+            {
+                learnedPadSnap[ch][n].store (-1);
+                learnedKeySnap[ch][n].store (-1);
+            }
+    }
 
     // Arms / modes (set from the UI thread; read on the audio thread).
     std::atomic<bool> recArm { false };       // REC INPUT
@@ -52,6 +60,47 @@ public:
     // Learn capture: when it returns true the event is being bound
     // and must NOT play or record.
     std::function<bool (const MidiRouteEvent&)> onLearnCapture;
+    // Correspondence (item 147): a melodic pitch the controller is
+    // holding - the UI lights that key on the board (display only).
+    std::function<void (int, bool)> onVisualNote;
+
+    // -----------------------------------------------------------------
+    // Learned note routing (item 147 fix). The MidiMap lives on the
+    // message thread; the router runs on the audio thread, so the
+    // service rebuilds this snapshot whenever the map changes
+    // (MidiService::syncRouterSnapshot): for every (channel, note),
+    // the pad or key pitch the EFFECTIVE note binding (project >
+    // global > factory) drives, or -1. Bindings to CONTROLS never
+    // appear here - they keep the message-thread path they always had.
+    // -----------------------------------------------------------------
+    std::atomic<int> learnedPadSnap[17][128];
+    std::atomic<int> learnedKeySnap[17][128];
+
+    void clearLearnedNotes()
+    {
+        for (int ch = 1; ch <= 16; ++ch)
+            for (int n = 0; n < 128; ++n)
+            {
+                learnedPadSnap[ch][n].store (-1);
+                learnedKeySnap[ch][n].store (-1);
+            }
+    }
+    void setLearnedNote (bool isPad, int channel, int note, int value)
+    {
+        if (channel < 1 || channel > 16 || note < 0 || note > 127) return;
+        (isPad ? learnedPadSnap[channel][note] : learnedKeySnap[channel][note])
+            .store (value);
+    }
+    int learnedPadFor (int channel, int note) const
+    {
+        if (channel < 1 || channel > 16 || note < 0 || note > 127) return -1;
+        return learnedPadSnap[channel][note].load();
+    }
+    int learnedKeyFor (int channel, int note) const
+    {
+        if (channel < 1 || channel > 16 || note < 0 || note > 127) return -1;
+        return learnedKeySnap[channel][note].load();
+    }
 
     // MIDI velocities -> the pattern's step tiers (0 off / 90 normal
     // / 127 accent - the engine's own convention). Only hits quieter
@@ -124,48 +173,71 @@ private:
 
     void advanceCursor() { stepCursor.store (clampStep (stepCursor.load() + 1)); }
 
-    void noteOn (const MidiRouteEvent& ev)
+    // A pad hit, fixed or learned: trigger + (record | step-record)
+    // with the step resolved from the engine clock, never arrival.
+    void playPad (int pad, const MidiRouteEvent& ev)
     {
         const float vel = ev.value / 127.0f;
         const auto clk = engine.getMidiClock();
         const bool playingNow = clk.playing && ! clk.paused;
+        engine.triggerPad (pad, vel);
+        if (recArm.load() && playingNow)
+        {
+            const int step = resolveStep (clk, ev.sampleOffset);
+            if (step >= 0)
+                engine.recordPadStep (pad, step, velocityTier (ev.value));
+        }
+        else if (stepRecord.load() && ! clk.playing)
+        {
+            engine.stepRecordPadStep (pad, stepCursor.load(),
+                                      velocityTier (ev.value));
+            advanceCursor();
+        }
+    }
+
+    // A melodic note at a given pitch (the note itself, or the pitch
+    // a learned key binding maps it to). The pitch that SOUNDS is the
+    // pitch recorded and the pitch shown lit on the board.
+    void playMelodic (int pitch, const MidiRouteEvent& ev)
+    {
+        const float vel = ev.value / 127.0f;
+        const auto clk = engine.getMidiClock();
+        const bool playingNow = clk.playing && ! clk.paused;
+        const int ch = melodicChannel.load();
+        noteChannel[ev.number & 127] = ch;
+        notePitch[ev.number & 127] = pitch;
+        engine.liveNoteOn (ch, pitch, vel);
+        if (onVisualNote) onVisualNote (pitch, true);
+        if (recArm.load() && playingNow)
+        {
+            const int step = resolveStep (clk, ev.sampleOffset);
+            if (step >= 0)
+                engine.recordNoteAtStep (ch, pitch, vel, step);
+        }
+        else if (stepRecord.load() && ! clk.playing)
+        {
+            if (engine.stepRecordNoteAt (ch, pitch, vel, stepCursor.load()))
+                advanceCursor();
+        }
+    }
+
+    void noteOn (const MidiRouteEvent& ev)
+    {
+        // Item 147 fix: a LEARNED note plays what it was bound to - a
+        // pad or a key - in place of the fixed map below. A learned hit
+        // is consumed here: one source, one job, so it does not also
+        // fall through to the fixed routing or the control map.
+        const int lPad = learnedPadFor (ev.channel, ev.number);
+        if (lPad >= 0) { playPad (lPad, ev); return; }
+        const int lKey = learnedKeyFor (ev.channel, ev.number);
+        if (lKey >= 0) { playMelodic (lKey, ev); return; }
 
         if (ev.number >= 36 && ev.number <= 51)
-        {
             // Pads 1-16 on ANY channel (the MPK Mini mk1's factory
             // Program 1 layout - zero setup, reference Part 5.1).
-            const int pad = ev.number - 36;
-            engine.triggerPad (pad, vel);
-            if (recArm.load() && playingNow)
-            {
-                const int step = resolveStep (clk, ev.sampleOffset);
-                if (step >= 0)
-                    engine.recordPadStep (pad, step, velocityTier (ev.value));
-            }
-            else if (stepRecord.load() && ! clk.playing)
-            {
-                engine.stepRecordPadStep (pad, stepCursor.load(),
-                                          velocityTier (ev.value));
-                advanceCursor();
-            }
-        }
+            playPad (ev.number - 36, ev);
         else
-        {
-            const int ch = melodicChannel.load();
-            noteChannel[ev.number & 127] = ch;
-            engine.liveNoteOn (ch, ev.number, vel);
-            if (recArm.load() && playingNow)
-            {
-                const int step = resolveStep (clk, ev.sampleOffset);
-                if (step >= 0)
-                    engine.recordNoteAtStep (ch, ev.number, vel, step);
-            }
-            else if (stepRecord.load() && ! clk.playing)
-            {
-                if (engine.stepRecordNoteAt (ch, ev.number, vel, stepCursor.load()))
-                    advanceCursor();
-            }
-        }
+            playMelodic (ev.number, ev);
         // A bound note (mute, Play, pattern...) fires as well as
         // playing - unless Learn swallowed it above.
         if (onControl) onControl (ev);
@@ -173,21 +245,41 @@ private:
 
     void noteOff (const MidiRouteEvent& ev)
     {
-        if (ev.number >= 36 && ev.number <= 51) return; // pads are one-shots
-        const int ch = noteChannel[ev.number & 127];
-        engine.liveNoteOff (ch >= 0 ? ch : melodicChannel.load(), ev.number);
+        const int idx = ev.number & 127;
+        if (learnedPadFor (ev.channel, ev.number) >= 0)
+            return; // a learned pad is a one-shot, like a fixed pad
+        if (noteChannel[idx] >= 0)
+        {
+            // Release the pitch this note actually started (a learned
+            // key may have remapped it), on the channel it started on.
+            const int pitch = notePitch[idx] >= 0 ? notePitch[idx] : ev.number;
+            engine.liveNoteOff (noteChannel[idx], pitch);
+            if (onVisualNote) onVisualNote (pitch, false);
+            noteChannel[idx] = -1;
+            notePitch[idx] = -1;
+            if (onControl) onControl (ev);
+            return;
+        }
+        if (ev.number >= 36 && ev.number <= 51) return; // fixed pads are one-shots
+        engine.liveNoteOff (melodicChannel.load(), ev.number);
+        if (onVisualNote) onVisualNote (ev.number, false);
         if (onControl) onControl (ev);
     }
 
     BoomBapEngine& engine;
-    // Which channel each held note was started on, so its note-off
-    // lands right even if the selection moves mid-hold.
+    // Which channel (and pitch) each held note was started on, so its
+    // note-off lands right even if the selection - or the learned map
+    // - moves mid-hold.
     int noteChannel[128];
-    struct NoteChannelInit
+    int notePitch[128];
+    struct NoteMapInit
     {
-        NoteChannelInit (int* p) { for (int i = 0; i < 128; ++i) p[i] = -1; }
+        NoteMapInit (int* a, int* b)
+        {
+            for (int i = 0; i < 128; ++i) { a[i] = -1; b[i] = -1; }
+        }
     };
-    NoteChannelInit noteChannelInit { noteChannel };
+    NoteMapInit noteMapInit { noteChannel, notePitch };
 };
 
 } // namespace boombap

@@ -411,6 +411,10 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     mpcPanel->onSelectPad = [this] (int ch) { selectChannel (ch); };
     mpcPanel->onPadCopyRequest = [this] (int from, int to) { copyPadToPad (from, to); };
     mpcPanel->onPadClearRequest = [this] (int pad) { clearPad (pad); }; // item 110
+    mpcPanel->onPadMidiLearn = [this] (int pad) // item 147: pads are learnable
+    {
+        if (midi != nullptr) midi->armLearnCaptureFor (boombap::midiPadTargetId (pad));
+    };
     mpcPanel->setDockedMode (true); // item 111a: the docked bank's pads run bigger
     // Item 59: hidden tabs are added as CHILD components, never via
     // addAndMakeVisible (which un-hides them) - updateTabChrome below is
@@ -441,6 +445,10 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     keyboardPanel->getSelectedChannel = [this] { return selectedChannel; };
     keyboardPanel->onNoteOn = [this] (int ch, int note, float vel) { keyboardNoteOn (ch, note, vel); };
     keyboardPanel->onNoteOff = [this] (int ch, int note) { engine.liveNoteOff (ch, note); };
+    keyboardPanel->onKeyMidiLearn = [this] (int note) // item 147: keys are learnable
+    {
+        if (midi != nullptr) midi->armLearnCaptureFor (boombap::midiKeyTargetId (note));
+    };
     addChildComponent (keyboardPanel.get());
     keyboardPanel->setVisible (false);
     updateTabChrome();
@@ -611,11 +619,17 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         if (midi != nullptr) midi->setPendingTarget (targetId);
     };
     addChildComponent (learnOverlay.get());
+    // Item 147 fix: right-click on any learnable control offers MIDI
+    // Learn for it (the pads and keys carry the same entry in their
+    // own menus and are excluded there).
+    learnContextListener.owner = this;
+    addMouseListener (&learnContextListener, true);
     startTimerHz (30);
 }
 
 MainComponent::~MainComponent()
 {
+    removeMouseListener (&learnContextListener);
     setLookAndFeel (nullptr);
     stopTimer();
     // MIDI build (item 25): the window + panel die before the
@@ -1390,6 +1404,19 @@ void MainComponent::timerCallback()
             }
         }
         if (learnOverlayOn) refreshLearnOverlay();
+        // Correspondence (item 147): pitches the controller holds
+        // light their keys on the board - display only, the panel
+        // never "presses" them.
+        if (keyboardPanel != nullptr)
+            for (int n = 0; n < 128; ++n)
+            {
+                const bool on = midi->visualNoteState (n);
+                if (on != visualNoteShown[n])
+                {
+                    visualNoteShown[n] = on;
+                    keyboardPanel->showRemoteNote (n, on);
+                }
+            }
     }
 
     if (++dirtyTick >= 8) { dirtyTick = 0; updateProjectLabel(); }
@@ -1578,7 +1605,10 @@ void MainComponent::setExternalMidiService (boombap::MidiService* svc)
 void MainComponent::onMidiMapChanged()
 {
     if (midi != nullptr)
+    {
+        midi->syncRouterSnapshot(); // panel edits reach the router too (item 147)
         midi->saveState();
+    }
     fireMediaChanged(); // the project layer rides ProjectData (plugin state + dirty checks)
 }
 
@@ -1700,6 +1730,24 @@ void MainComponent::buildMidiTargets()
     tog ("stepRecMidi", "STEP-RECORD Mode", "MIDI",
          [this] { return midi != nullptr && midi->router.stepRecord.load(); },
          [this] (bool on) { if (midi != nullptr) midi->router.stepRecord.store (on); });
+
+    // ---- pads + keys (item 147 fix): learnable note targets ---------
+    // A note bound to one of these plays the pad / the key THROUGH THE
+    // ROUTER - audio thread, engine-clock record timing - via the
+    // snapshot the service rebuilds from the map. The trigger here is
+    // deliberately empty: the registry entry names the target and
+    // carries the binding; it never fires it from the message thread
+    // (that would double the hit and lose the timing).
+    for (int p = 0; p < 16; ++p)
+        act (boombap::midiPadTargetId (p), "Pad " + String (p + 1), "Pads",
+             [] {});
+    // Every pitch the board can show across its octave shifts
+    // (C1..C8 at shifts -2..+2 around the C3..C6 home range).
+    for (int n = 24; n <= 108; ++n)
+        act (boombap::midiKeyTargetId (n),
+             "Key " + MidiMessage::getMidiNoteName (n, true, true, 4)
+                 + " (" + String (n) + ")",
+             "Keys", [] {});
 
     // ---- drums + instruments + vocal (slider faces) ------------------
     sliderT (kickTune, "kickTune", "Kick Tune", "Drums");
@@ -1925,14 +1973,15 @@ void MainComponent::buildMidiTargets()
              [] (MpcPads::PadParams& p, float v) { p.tuneSemitones = v; });
 }
 
-// While LEARN is armed, rebuild the overlay's spot list from the
-// controls actually on screen. Called on the timer, so a view that
-// opens or a row that appears joins the list on its own.
-void MainComponent::refreshLearnOverlay()
+// The learnable spots: every control on screen that Learn can bind,
+// mapped to its target. The LEARN overlay outlines them while Learn
+// is armed; the right-click MIDI Learn menu (item 147 fix) resolves
+// the clicked component through the same table.
+std::vector<boombap::LearnGlowOverlay::Spot> MainComponent::buildLearnSpotMap()
 {
-    if (learnOverlay == nullptr || midi == nullptr)
-        return;
     std::vector<boombap::LearnGlowOverlay::Spot> spots;
+    if (midi == nullptr)
+        return spots;
     auto add = [this, &spots] (juce::Component* comp, const String& targetId)
     {
         if (comp == nullptr || ! comp->isVisible()) return;
@@ -2009,8 +2058,50 @@ void MainComponent::refreshLearnOverlay()
                 add (f, "chanGain:" + String (c));
         }
     }
-    learnOverlay->spots = std::move (spots);
+    return spots;
+}
+
+// While LEARN is armed, rebuild the overlay's spot list from the
+// controls actually on screen. Called on the timer, so a view that
+// opens or a row that appears joins the list on its own.
+void MainComponent::refreshLearnOverlay()
+{
+    if (learnOverlay == nullptr || midi == nullptr)
+        return;
+    learnOverlay->spots = buildLearnSpotMap();
     learnOverlay->repaint();
+}
+
+// Item 147 fix: right-click a learnable control -> "MIDI Learn" for
+// that control. The pads and the keyboard run their own menus (both
+// carry the entry), so clicks inside them are left alone; clicks
+// that resolve to no learnable spot are left alone too - this only
+// ever ADDS the one menu where the grammar asks for it.
+void MainComponent::handleLearnContextClick (const juce::MouseEvent& e)
+{
+    if (midi == nullptr || e.eventComponent == nullptr)
+        return;
+    for (auto* c = e.eventComponent; c != nullptr; c = c->getParentComponent())
+        if (c == static_cast<juce::Component*> (mpcPanel.get())
+            || c == static_cast<juce::Component*> (keyboardPanel.get())
+            || (padBank != nullptr && c == static_cast<juce::Component*> (padBank.get())))
+            return;
+    const auto spots = buildLearnSpotMap();
+    for (auto* c = e.eventComponent; c != nullptr && c != this; c = c->getParentComponent())
+        for (const auto& s : spots)
+            if (s.comp == c)
+            {
+                const auto targetId = s.targetId;
+                juce::PopupMenu m;
+                m.addItem (1, "MIDI Learn - " + s.name);
+                m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (c),
+                                 [this, targetId] (int choice)
+                                 {
+                                     if (choice == 1 && midi != nullptr)
+                                         midi->armLearnCaptureFor (targetId);
+                                 });
+                return;
+            }
 }
 
 //==============================================================================
