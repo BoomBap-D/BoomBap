@@ -54,6 +54,13 @@ static MidiRouteEvent cc (int ch, int num, int val)
     e.channel = ch; e.number = num; e.value = val;
     return e;
 }
+static MidiBinding noteBind (int ch, int note, const juce::String& target)
+{
+    MidiBinding b;
+    b.sourceType = MidiBinding::NoteSource;
+    b.channel = ch; b.number = note; b.targetId = target;
+    return b;
+}
 
 struct MidiTestSuite : public juce::UnitTest
 {
@@ -318,7 +325,19 @@ struct MidiTestSuite : public juce::UnitTest
             const auto tfp = triggerFingerProPreset();
             expect (tfp.setupNote.contains ("BoomBap-assigned")
                     && tfp.setupNote.contains ("no factory"));
-            expect ((int) allMidiPresets().size() == 3);
+            // Item 147 fix: D's actual unit gets its own entry - the
+            // correct name, the same 36-51 pad range (router-fixed,
+            // so no pad bindings), and NO invented knob CCs (Akai
+            // publishes no factory knob table for the MK2).
+            const auto mk2 = mpkMiniMk2Preset();
+            expect (mk2.name == juce::String (juce::CharPointer_UTF8 (
+                        "Akai MPK Mini MK2 \xe2\x80\x94 factory Program 1")),
+                    "the MK2 preset carries its correct name");
+            expect (mk2.setupNote.contains ("36-51"),
+                    "the MK2 note names the pad range it ships with");
+            expect (mk2.bindings.empty(),
+                    "no MK2 bindings are invented - pads are router-fixed, knobs are learned");
+            expect ((int) allMidiPresets().size() == 4);
         }
 
         // ---------------------------------------------------------
@@ -341,6 +360,98 @@ struct MidiTestSuite : public juce::UnitTest
                                      juce::File(), out2, err));
             expect (out2.midiLearnJson.isEmpty(),
                     "a file without the key loads with an empty project layer");
+        }
+
+        // ---------------------------------------------------------
+        beginTest ("item 147: learned notes route through the snapshot (per-pad + per-key)");
+        {
+            BoomBapEngine e;
+            e.prepare (44100.0);
+            e.setNumTracks (20);   // pad 6's row must exist for its step write
+            MidiService svc (e);
+            svc.manageDevices = false;
+            juce::String stolen;
+            // D's MK2 situation in miniature: his controller's note
+            // 62 becomes BoomBap pad 6; note 63 becomes the KEY C5.
+            svc.map.learnBind (MidiLayer::Global, noteBind (1, 62, "pad:5"), stolen);
+            svc.map.learnBind (MidiLayer::Global, noteBind (1, 63, "key:72"), stolen);
+            svc.syncRouterSnapshot();
+            auto& router = svc.router;
+            expect (router.learnedPadFor (1, 62) == 5);
+            expect (router.learnedKeyFor (1, 63) == 72);
+            expect (router.learnedPadFor (2, 62) == -1,
+                    "a channel-1 binding does not leak to channel 2");
+
+            e.loadPadSample (5, std::vector<float> (2000, 0.5f), 44100.0);
+            router.processEvent (noteOn (1, 62, 110));
+            e.consumePadActivityPeak();
+            render (e, 8192);
+            expect (e.lastTriggeredPad() == 5,
+                    "the learned note fires its pad, not the fixed map");
+
+            // Step-record: the learned pad writes a PAD step; the
+            // learned key writes the TARGET pitch on the melodic lane.
+            router.stepRecord.store (true);
+            router.setCursorStep (0);
+            router.melodicChannel.store (BoomBapEngine::kSynthChannel);
+            e.setStep (BoomBapEngine::Sample1 + 5, 0, 0);
+            e.setSynthStep (1, 0);
+            router.processEvent (noteOn (1, 62, 110));
+            expect (e.getStep (BoomBapEngine::Sample1 + 5, 0) == 127,
+                    "learned pad writes its pad step at the cursor");
+            expect (router.cursorStep() == 1);
+            router.processEvent (noteOn (1, 63, 100));
+            expect (e.getSynthStep (1) == 49,
+                    "learned key writes pitch 72 (lane value 49), not the source note 63");
+            expect (router.cursorStep() == 2);
+            expect (svc.visualNoteState (72),
+                    "the played pitch is the one shown lit");
+            router.processEvent (noteOff (1, 63));
+            expect (! svc.visualNoteState (72),
+                    "note-off releases the mapped pitch's light");
+
+            // An unlearned melodic note lights its own key.
+            router.processEvent (noteOn (1, 64, 100));
+            expect (svc.visualNoteState (64));
+            router.processEvent (noteOff (1, 64));
+            expect (! svc.visualNoteState (64));
+
+            // Priority: a control binding for the same source in a
+            // HIGHER layer wins - the note keeps its fixed routing.
+            svc.map.learnBind (MidiLayer::Project, noteBind (1, 62, "metroOn"), stolen);
+            svc.syncRouterSnapshot();
+            expect (router.learnedPadFor (1, 62) == -1,
+                    "the project-layer control binding shadows the global pad binding");
+        }
+
+        // ---------------------------------------------------------
+        beginTest ("item 147: right-click learn - arm, wiggle, bound, disarmed");
+        {
+            BoomBapEngine e;
+            e.prepare (44100.0);
+            MidiService svc (e);
+            svc.manageDevices = false;
+            svc.armLearnCaptureFor ("pad:3");
+            expect (svc.learnArmed.load(), "the menu choice arms Learn");
+            expect (svc.pendingTarget() == "pad:3");
+            juce::MidiBuffer buf;
+            buf.addEvent (juce::MidiMessage::noteOn (1, 70, (juce::uint8) 100), 0);
+            svc.processHostBuffer (buf);
+            expect (svc.drainActions(), "the wiggle lands a bind");
+            MidiMapEvent probe;
+            probe.type = MidiMapEvent::Note; probe.channel = 1; probe.number = 70;
+            const auto* eff = svc.map.findEffective (probe);
+            expect (eff != nullptr && eff->targetId == "pad:3",
+                    "note 70 now drives Pad 4");
+            expect (! svc.learnArmed.load(),
+                    "a one-shot (right-click) arm disarms when the bind lands");
+            // ...and the bound note plays pad 4 through the router.
+            e.loadPadSample (3, std::vector<float> (2000, 0.5f), 44100.0);
+            svc.router.processEvent (noteOn (1, 70, 110));
+            e.consumePadActivityPeak();
+            render (e, 8192);
+            expect (e.lastTriggeredPad() == 3,
+                    "the freshly bound note fires pad 4 straight away");
         }
 
         // ---------------------------------------------------------
@@ -374,6 +485,25 @@ struct MidiTestSuite : public juce::UnitTest
             probe.channel = 10; probe.number = 35;
             eff = svc.map.findEffective (probe);
             expect (eff != nullptr && eff->targetId == "actPattern:4");
+
+            // Item 147 fix (b)+(c): choosing the MK2 in the panel
+            // shows the Bank A/B hint; a non-Mini preset hides it.
+            auto* panel = main.midiPanelComponent();
+            expect (panel != nullptr);
+            // Pick the mk1 first: if a previous run's saved state
+            // already left the combo on the MK2, selecting it again
+            // would be a no-op and applyPreset would never fire.
+            panel->presetComboBox().setSelectedId (2, juce::sendNotificationSync);
+            panel->presetComboBox().setSelectedId (3, juce::sendNotificationSync);   // MK2 entry
+            expect (svc.presetIndex == 2, "the MK2 is preset 2 in the menu");
+            expect (panel->bankHintText().contains ("Bank A = BoomBap pads 1-8")
+                    && panel->bankHintText().contains ("Bank B = pads 9-16"),
+                    "the MIDI window spells out the Mini's two pad banks");
+            panel->presetComboBox().setSelectedId (4, juce::sendNotificationSync);   // MPK49 entry
+            expect (panel->bankHintText().isEmpty(),
+                    "the bank hint belongs to the Mini presets only");
+            panel->presetComboBox().setSelectedId (2, juce::sendNotificationSync);   // back to the mk1
+            expect (svc.presetIndex == 1);
 
             // Learn: arm, pick the Glue Threshold, wiggle CC 44.
             svc.learnArmed.store (true);
