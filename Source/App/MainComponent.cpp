@@ -177,8 +177,9 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     stopButton.setGlyph (TransportButton::Glyph::Stop);
     ffButton.setGlyph (TransportButton::Glyph::Forward);
     toEndButton.setGlyph (TransportButton::Glyph::ToEnd);
+    recButton.setGlyph (TransportButton::Glyph::Record);
     for (auto* b : { &toStartButton, &rewButton, &pauseButton, &playButton,
-                     &stopButton, &ffButton, &toEndButton })
+                     &stopButton, &ffButton, &toEndButton, &recButton })
         addAndMakeVisible (b);
     addAndMakeVisible (clearButton);
     addAndMakeVisible (resetButton);
@@ -186,6 +187,13 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     rewButton.onClick     = [this] { navRewind(); };
     pauseButton.onClick   = [this] { pauseTransport(); };
     playButton.onClick    = [this] { startTransport(); };
+    recButton.onClick  = [this]
+    {
+        // Item 167: the transport's REC is the router recArm's second
+        // face - the MIDI panel's REC INPUT toggle is the other one;
+        // both read and write the same atomic.
+        if (midi != nullptr) midi->router.recArm.store (! midi->router.recArm.load());
+    };
     stopButton.onClick    = [this] { stopTransport(); };
     ffButton.onClick      = [this] { navForward(); };
     toEndButton.onClick   = [this] { navToEnd(); };
@@ -199,7 +207,8 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     redoButton.onClick = [this] { redoProject(); };
     undoButton.setEnabled (false);
     redoButton.setEnabled (false);
-    // the project bar's compact clock - the Station's big clock's twin
+    // Item 167: the clock lives centred in the project bar, always
+    // visible whatever tab is up; a click still cycles the format.
     mainClock.onCycleFormat = [this] { setClockFormat ((clockFormat + 1) % 3); };
     addAndMakeVisible (mainClock);
     // Round 4 (item 99b): PATTERN / SONG mode buttons on the main page.
@@ -370,6 +379,9 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         };
         // Round 5 (item 107): a committed rename is one undoable edit.
         scb.onRenameTrack = [this] (int t, const juce::String& name) { commitTrackRename (t, name); };
+        // Patterns build (item 160): the GROOVE selector's pick is
+        // applied to the current pattern slot as one undoable action.
+        scb.onGrooveChosen = [this] (int idx) { applyDrumGroove (idx); };
         // item 87: the row's visible X runs the same guarded, undoable
         // delete as the menu (item 69) - one action, two doors.
         scb.onDeleteRow = [this] (int t) { deleteSequencerRow (t); };
@@ -392,6 +404,7 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
         sequencerPanel = std::make_unique<SequencerPanel> (engine, scb);
     }
     sequencerPanel->setLookAndFeel (&lookAndFeel);
+    sequencerPanel->setGrooveNames (boombap::drumGrooveNames()); // item 160
     addAndMakeVisible (sequencerPanel.get());
     sequencerPanel->setSelectedRow (selectedChannel); // item 86: the initial light (channel 0)
     {
@@ -415,6 +428,9 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     {
         if (midi != nullptr) midi->armLearnCaptureFor (boombap::midiPadTargetId (pad));
     };
+    // Bank build (items 158/179): the docked bank's kit selector.
+    mpcPanel->setFactoryKitNames (factoryKitNames());
+    mpcPanel->onFactoryKitChosen = [this] (int kit) { loadFactoryKit (kit); };
     mpcPanel->setDockedMode (true); // item 111a: the docked bank's pads run bigger
     // Item 59: hidden tabs are added as CHILD components, never via
     // addAndMakeVisible (which un-hides them) - updateTabChrome below is
@@ -449,6 +465,23 @@ MainComponent::MainComponent (boombap::BoomBapEngine& eng, bool useOwnAudioDevic
     {
         if (midi != nullptr) midi->armLearnCaptureFor (boombap::midiKeyTargetId (note));
     };
+    // Bank build (items 158/179): the keyboard's source selector - the
+    // instruments, and the factory kits. A kit loads into the bank and
+    // the keys aim at the first pad row, which the live-note funnel
+    // pitch-plays (each pad row is then a key-playable kit sound).
+    keyboardPanel->setFactoryKitNames (factoryKitNames());
+    // Patterns build (item 160): the BASSLINE selector - a pick is
+    // written into the selected instrument's roll lane as one
+    // undoable action (applyBassline decides the lane).
+    keyboardPanel->setBasslineNames (boombap::basslineNames());
+    keyboardPanel->onBasslineChosen = [this] (int idx) { applyBassline (idx); };
+    keyboardPanel->onInstrumentChosen = [this] (int which) { selectInstrument (which); };
+    keyboardPanel->onFactoryKitChosen = [this] (int kit)
+    {
+        loadFactoryKit (kit);
+        selectChannel (boombap::BoomBapEngine::Sample1);
+    };
+    keyboardPanel->showInstrument (shownInstrument);
     addChildComponent (keyboardPanel.get());
     keyboardPanel->setVisible (false);
     updateTabChrome();
@@ -1371,6 +1404,8 @@ void MainComponent::timerCallback()
     // PLAY lit while playing, PAUSE lit while paused.
     playButton.setLit (engine.isPlaying() && ! engine.isPaused());
     pauseButton.setLit (engine.isPaused());
+    // Item 167: REC's light follows the router's record arm.
+    recButton.setLit (midi != nullptr && midi->router.recArm.load());
     lastPlayingState = engine.isPlaying();
     // Round 6 (item 118): the UNDO/REDO pair follows the history.
     undoButton.setEnabled (canUndoProject());
@@ -1672,6 +1707,7 @@ void MainComponent::buildMidiTargets()
     // ---- transport + session actions --------------------------------
     act ("actPlay", "Play", "Transport", [this] { if (playButton.onClick) playButton.onClick(); });
     act ("actStop", "Stop", "Transport", [this] { if (stopButton.onClick) stopButton.onClick(); });
+    act ("actRecord", "Record", "Transport", [this] { if (recButton.onClick) recButton.onClick(); });
     act ("actPause", "Pause", "Transport", [this] { if (pauseButton.onClick) pauseButton.onClick(); });
     act ("actToStart", "To Start", "Transport", [this] { if (toStartButton.onClick) toStartButton.onClick(); });
     act ("actToEnd", "To End", "Transport", [this] { if (toEndButton.onClick) toEndButton.onClick(); });
@@ -2001,6 +2037,7 @@ std::vector<boombap::LearnGlowOverlay::Spot> MainComponent::buildLearnSpotMap()
     add (&recordButton, "actRec");
     add (&undoButton, "actUndo");
     add (&redoButton, "actRedo");
+    add (&recButton, "actRecord");
     add (&stationButton, "actFlipStation");
     add (&patternModeButton, "songMode");
     add (&songModeButton, "songMode");
@@ -2246,32 +2283,34 @@ void MainComponent::resized()
     audioButton.setBounds (RB (408, 6, 80, 28));
     midiButton.setBounds (RB (1458, 6, 92, 28));   // MIDI build (item 25): the project bar's right end
     if (learnOverlay != nullptr) learnOverlay->setBounds (getLocalBounds());
-    projectName.setBounds (RB (500, 6, 540, 28)); // Round 6: the clock moved to the transport row (item 115) - the name takes its old room
+    projectName.setBounds (RB (496, 6, 128, 28)); // item 167: the name keeps the left; the clock takes the centre
+    mainClock.setBounds (RB (630, 2, 300, 38)); // item 167: centred in the project bar, between the name and STATION - always visible, as big as the bar allows
     stationButton.setBounds (RB (1058, 6, 86, 28));
     pianoButton.setBounds (RB (1150, 6, 96, 28));
     playlistButton.setBounds (RB (1254, 6, 88, 28));
     padBankButton.setBounds (RB (1350, 6, 100, 28));
 
     // transport row A (item 93's navigation, Round 6 item 115's
-    // family-A keys): the seven keys in D's order with the FRAMED
-    // clock in the middle of the row, PLAY the middle key; then the
-    // pattern helpers, the UNDO/REDO pair (item 118), tempo, swing,
-    // master, pad activity.
+    // family-A keys): the keys in D's order, then the pattern
+    // helpers, the UNDO/REDO pair (item 156), tempo, swing, master,
+    // pad activity. Item 167: the clock left this row for the
+    // project-bar centre; REC sits right of PLAY; the row reflows
+    // left to close the clock's old room.
     toStartButton.setBounds (RB (20, 54, 48, 50));
     rewButton.setBounds (RB (73, 54, 42, 50));
     pauseButton.setBounds (RB (120, 54, 42, 50));
-    mainClock.setBounds (RB (167, 54, 150, 50)); // item 115: centred, large, framed
-    playButton.setBounds (RB (322, 54, 56, 50));
-    stopButton.setBounds (RB (383, 54, 48, 50));
-    ffButton.setBounds (RB (436, 54, 42, 50));
-    toEndButton.setBounds (RB (483, 54, 48, 50));
-    clearButton.setBounds (RB (537, 54, 48, 50));
-    resetButton.setBounds (RB (590, 54, 48, 50));
-    undoButton.setBounds (RB (644, 54, 60, 50));
-    redoButton.setBounds (RB (709, 54, 60, 50));
-    bpm.slider.setBounds (RB (790, 54, 180, 50));
-    swing.slider.setBounds (RB (1004, 54, 160, 50));
-    master.slider.setBounds (RB (1214, 54, 150, 50));
+    playButton.setBounds (RB (167, 54, 56, 50));
+    recButton.setBounds (RB (228, 54, 48, 50)); // item 167: right of PLAY
+    stopButton.setBounds (RB (281, 54, 48, 50));
+    ffButton.setBounds (RB (334, 54, 42, 50));
+    toEndButton.setBounds (RB (381, 54, 48, 50));
+    clearButton.setBounds (RB (437, 54, 48, 50));
+    resetButton.setBounds (RB (490, 54, 48, 50));
+    undoButton.setBounds (RB (558, 54, 40, 50)); // item 156 pair: narrowed + packed together (D, Nov 13: "closer together")
+    redoButton.setBounds (RB (602, 54, 40, 50));
+    bpm.slider.setBounds (RB (700, 54, 180, 50));
+    swing.slider.setBounds (RB (914, 54, 160, 50));
+    master.slider.setBounds (RB (1124, 54, 150, 50));
     padLight.setBounds (RB (1376, 61, 32, 32));
     padMeter.setBounds (RB (1416, 65, 124, 28));
 

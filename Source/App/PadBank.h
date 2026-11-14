@@ -431,6 +431,27 @@ public:
         repaint();
     }
 
+    // Patterns build (item 201, carrying item 151c): the envelope
+    // rides OVER the selected pad's waveform as line-work - no panel
+    // of its own, no shaded area, no labels. In overlay mode the view
+    // is transparent and only the curve's neighbourhood takes the
+    // mouse (see hitTest), so the waveform's own gestures - the trim
+    // pull bars, the click to audition - keep working everywhere else.
+    void setOverlayMode (bool o) { overlayMode = o; repaint(); }
+    bool isOverlayMode() const { return overlayMode; }
+
+    bool hitTest (int x, int y) override
+    {
+        if (! overlayMode) return true;
+        const auto p = juce::Point<float> ((float) x, (float) y);
+        for (int i = 0; i < (int) pts.size(); ++i)
+            if (pointComponentPos (i).getDistanceFrom (p) <= 11.0f) return true;
+        const float w = juce::jmax (1.0f, (float) getWidth());
+        const float curveY = (1.0f - levelAt (juce::jlimit (0.0f, 1.0f, (float) x / w)))
+                           * juce::jmax (1.0f, (float) getHeight());
+        return std::abs ((float) y - curveY) <= 9.0f;
+    }
+
     // What the engine should hold: nothing while the shape is still
     // the untouched default, the real points once it has been shaped.
     std::vector<std::pair<float, float>> pointsToStore() const
@@ -454,16 +475,19 @@ public:
     {
         using namespace boombap::ui;
         auto b = getLocalBounds().toFloat();
-        g.setColour (panelAlt().darker (0.25f));
-        g.fillRoundedRectangle (b, 6.0f);
-        g.setColour (border().withAlpha (0.6f));
-        g.drawRoundedRectangle (b.reduced (0.5f), 6.0f, 1.0f);
-
-        g.setColour (border().withAlpha (0.30f));
-        for (float f : { 0.25f, 0.5f, 0.75f })
+        if (! overlayMode)
         {
-            const float y = b.getY() + f * b.getHeight();
-            g.drawLine (b.getX() + 4.0f, y, b.getRight() - 4.0f, y, 1.0f);
+            g.setColour (panelAlt().darker (0.25f));
+            g.fillRoundedRectangle (b, 6.0f);
+            g.setColour (border().withAlpha (0.6f));
+            g.drawRoundedRectangle (b.reduced (0.5f), 6.0f, 1.0f);
+
+            g.setColour (border().withAlpha (0.30f));
+            for (float f : { 0.25f, 0.5f, 0.75f })
+            {
+                const float y = b.getY() + f * b.getHeight();
+                g.drawLine (b.getX() + 4.0f, y, b.getRight() - 4.0f, y, 1.0f);
+            }
         }
 
         if (pts.size() >= 2)
@@ -476,10 +500,13 @@ public:
                 if (x == 0) { curve.startNewSubPath (b.getX(), y); fill.startNewSubPath (b.getX(), b.getBottom()); fill.lineTo (b.getX(), y); }
                 else { curve.lineTo (b.getX() + (float) x, y); fill.lineTo (b.getX() + (float) x, y); }
             }
-            fill.lineTo (b.getRight(), b.getBottom());
-            fill.closeSubPath();
-            g.setColour (accent().withAlpha (implicit ? 0.08f : 0.18f));
-            g.fillPath (fill);
+            if (! overlayMode)
+            {
+                fill.lineTo (b.getRight(), b.getBottom());
+                fill.closeSubPath();
+                g.setColour (accent().withAlpha (implicit ? 0.08f : 0.18f));
+                g.fillPath (fill);
+            }
             g.setColour (accent().withAlpha (implicit ? 0.55f : 1.0f));
             g.strokePath (curve, juce::PathStrokeType (1.8f));
 
@@ -494,12 +521,15 @@ public:
             }
         }
 
-        g.setColour (muted());
-        g.setFont (juce::Font (10.5f, juce::Font::bold));
-        g.drawText ("ENVELOPE", 8, 3, 90, 12, juce::Justification::left);
-        g.setFont (juce::Font (9.5f));
-        g.drawText ("drag points - double-click adds - right-click a point removes",
-                    (int) b.getRight() - 308, 3, 300, 12, juce::Justification::right);
+        if (! overlayMode)
+        {
+            g.setColour (muted());
+            g.setFont (juce::Font (10.5f, juce::Font::bold));
+            g.drawText ("ENVELOPE", 8, 3, 90, 12, juce::Justification::left);
+            g.setFont (juce::Font (9.5f));
+            g.drawText ("drag points - double-click adds - right-click a point removes",
+                        (int) b.getRight() - 308, 3, 300, 12, juce::Justification::right);
+        }
     }
 
     void mouseDown (const juce::MouseEvent& e) override
@@ -577,6 +607,7 @@ private:
 
     std::vector<std::pair<float, float>> pts = defaultPoints();
     bool implicit = true;
+    bool overlayMode = false; // item 201: line-work over the waveform
     int dragIndex = -1;
 };
 
@@ -654,6 +685,7 @@ public:
         envView.onGestureStart = [this] { if (onBeforeChange) onBeforeChange(); };
         envView.onGestureEnd   = [this] { if (onAfterChange) onAfterChange(); };
         envView.onChange       = [this] { pushEditor(); };
+        envView.setOverlayMode (true); // item 201: lines over the wave (item 151c)
         addAndMakeVisible (envView);
 
         // Items 80/101 (restating item 72's exception): Start/End are
@@ -686,6 +718,16 @@ public:
             if (onAfterChange) onAfterChange();
         };
         addAndMakeVisible (muteGroupBox);
+
+        // Bank build (items 158/179): the factory-kit selector on the
+        // editor's top line - one choice fills all sixteen pads.
+        kitBox.setTextWhenNothingSelected ("Factory kit...");
+        kitBox.onChange = [this]
+        {
+            const int id = kitBox.getSelectedId();
+            if (id > 0 && onFactoryKitChosen) onFactoryKitChosen (id - 1);
+        };
+        addAndMakeVisible (kitBox);
 
         // Item 100: the wording that used to sit UNDER THE PADS (where
         // it cost the pads their size, item 71) lives under the knobs
@@ -774,6 +816,26 @@ public:
     // learnable targets: per-pad learn is how a 16-pad map gets built
     // on hardware whose factory layout does not match.
     std::function<void (int)> onPadMidiLearn;
+    // Bank build (items 158/179): the top line's kit selector - the
+    // owner loads the chosen factory kit into the bank as one
+    // undoable action (the sounds live in the binaries, FactoryBank).
+    std::function<void (int)> onFactoryKitChosen;
+
+    // Bank build: the owner hands over the factory kit names once;
+    // the selector then offers them on the bank's top line.
+    void setFactoryKitNames (const juce::StringArray& names)
+    {
+        kitBox.clear (juce::dontSendNotification);
+        for (int i = 0; i < names.size(); ++i)
+            kitBox.addItem (names[i], i + 1);
+    }
+    // Show a kit as the selector's current choice WITHOUT firing the
+    // load (the two bank instances and the keyboard's selector keep
+    // each other honest through the owner).
+    void showFactoryKit (int kit)
+    {
+        kitBox.setSelectedId (kit + 1, juce::dontSendNotification);
+    }
 
     // Round 6 (item 110): the pad's right-click menu.
     // MIDI Learn fix (item 147): the menu carries MIDI Learn.
@@ -799,6 +861,7 @@ public:
     void setDockedMode (bool d) { if (dockedMode != d) { dockedMode = d; resized(); repaint(); } }
     bool isDockedMode() const { return dockedMode; }
     SegmentedLevelMeter& bankMeterComponent() { return bankMeter; }
+    juce::ComboBox& kitBoxComponent()              { return kitBox; }
 
     // ---- Round 3: drag + inspection doors (the same objects the mouse
     // drives; the waveform panel's drag and the regression tests both
@@ -837,55 +900,54 @@ public:
             g.drawRoundedRectangle (r, 12.0f, 1.0f);
         };
         const auto lay = layout();
-        // Round 3: the name strip spans the top (it is its own
-        // component, painted above this); the two panels sit below it.
-        // Round 6: the editor panel stops short of the bank meter's
-        // strip on the right edge.
-        panel (8, 44, lay.gridRight + 8, getHeight() - 52);                    // pad grid
-        panel (lay.editorX - 12, 44, getWidth() - lay.editorX - 10, getHeight() - 52); // editor
+        // Item 201: three panels under the name strip and the top
+        // line - the pad grid (at least half the window wide), the
+        // waveform column, and the controls' side strip. All stop
+        // short of the bank meter's strip on the right edge.
+        panel (8, 58, lay.gridRight - 6, getHeight() - 66);                    // pad grid
+        const int waveBottom = lay.gridY + lay.waveH
+                             + (guidance.isVisible() ? guidance.getHeight() + 8 : 0);
+        panel (lay.waveX - 6, 58, lay.waveW + 6, waveBottom - 58 + 8);         // waveform
+        panel (lay.stripX - 6, 58, lay.stripW + 12, getHeight() - 66);         // side strip
     }
 
     void resized() override
     {
-        // Item 30: the grid grows with the window (pads keep their
-        // proportions); the editor takes the rest of the width, so
-        // every control scales with the window too.
+        // Item 201 (carrying items 151/166): the grid takes at least
+        // half the window's width and the pads fill their cells -
+        // elongated is fine, size first (item 151a). The waveform
+        // gets its own column at real height with the envelope as
+        // lines over it; every other pad control lives in the side
+        // strip. The name strip stays on top; the kit selector stays
+        // on the top line.
         const auto lay = layout();
         const int W = getWidth(), H = getHeight();
 
         // Item 88: the visual-mix strip spans the whole top (stopping
         // short of the bank meter's strip on the right).
-        nameStrip.setBounds (16, 10, W - 62, 24);
+        nameStrip.setBounds (16, 8, W - 62, 22);
 
         // Item 112b: the bank meter runs the whole right side.
         bankMeter.setBounds (W - 24, 44, 16, H - 52);
 
-        const int gridY = 50;
+        // The top line: the selected pad's letterbox over the grid,
+        // the kit selector at the right (bank build, item 158).
+        title.setBounds (16, 34, lay.gridW, 20);
+        kitBox.setBounds (W - 246, 32, 200, 24);
+
+        const int gridY = lay.gridY;
         for (int i = 0; i < 16; ++i)
             pads[i].setBounds (16 + (i % 4) * (lay.padW + 8), gridY + (i / 4) * (lay.padH + 8),
                                lay.padW, lay.padH);
 
-        const int ex = lay.editorX;
-        const int colW = juce::jmax (200, W - ex - 16 - 30); // the meter's strip is not the editor's
-        title.setBounds (ex, 48, colW, 20);
+        // The waveform column: the tall wave, the envelope view laid
+        // over it at the same bounds (overlay mode - line-work only).
+        waveView.setBounds (lay.waveX, gridY, lay.waveW, lay.waveH);
+        envView.setBounds (lay.waveX, gridY, lay.waveW, lay.waveH);
 
-        // The editor stack, top to bottom: waveform / ENVELOPE (item
-        // 101) / Start-End SLIDERS (item 80) / knobs / footer /
-        // guidance (item 100). The waveform takes what is left; when
-        // the column runs short the knobs give up size before the
-        // wave starves.
-        // Round 6 (item 111b): the envelope's share grows, the knobs
-        // shrink to a supporting size, and Reverse / Mute Group /
-        // None ALWAYS get a footer row of their own - the wide-editor
-        // fold that stacked them into the knob row's spare cells (the
-        // corner pile in D's photo) is gone.
-        const int envH = juce::jlimit (56, 130, (H - 96) / 4);
-        const int sliderRowH = 40;
-        const int footerH = 24;
         // Item 100: the guidance editor WRAPS - measure the paragraph
-        // at this column width so the info block is exactly as tall as
-        // the wrapped words need (the waveform absorbs the difference
-        // through stackFor below).
+        // at the wave column's width; it shows under the wave when
+        // the bank is tall enough (item 111's rule).
         int guidanceH = 0;
         if (H >= 400)
         {
@@ -893,59 +955,39 @@ public:
             measured.setText (guidanceText);
             measured.setFont (juce::Font (11.0f));
             juce::TextLayout tl;
-            tl.createLayout (measured, (float) juce::jmax (120, colW - 8));
+            tl.createLayout (measured, (float) juce::jmax (120, lay.waveW - 8));
             guidanceH = juce::jlimit (28, 120, (int) std::ceil (tl.getHeight()) + 6);
         }
-        const int infoH = H >= 400 ? guidanceH : 0; // item 111: guidance only - the duplicate strip is gone
         guidance.setVisible (H >= 400);
-        int knobSize = juce::jlimit (44, 72, colW / 3 - 30);
-        auto stackFor = [&] (int ks)
-        {
-            return 70 + envH + sliderRowH + (16 + ks + 18) + footerH + infoH + 4 * 7 + 10;
-        };
-        int waveH = H - stackFor (knobSize);
-        if (waveH < 56)
-        {
-            knobSize = juce::jmax (40, knobSize - (56 - waveH));
-            waveH = H - stackFor (knobSize);
-        }
-        waveH = juce::jmax (32, waveH);
+        guidance.setBounds (lay.waveX, gridY + lay.waveH + 8, lay.waveW, juce::jmax (0, guidanceH));
 
-        const int waveY = 70;
-        waveView.setBounds (ex, waveY, colW, waveH);
-        const int envY = waveY + waveH + 7;
-        envView.setBounds (ex, envY, colW, envH);
-
-        // Start/End: two half-width slider cells (label over slider).
-        const int sliderY = envY + envH + 7;
-        startRow.label.setBounds (ex, sliderY, colW / 2 - 6, 13);
-        startRow.slider.setBounds (ex, sliderY + 15, colW / 2 - 6, 24);
-        endRow.label.setBounds (ex + colW / 2 + 6, sliderY, colW - colW / 2 - 6, 13);
-        endRow.slider.setBounds (ex + colW / 2 + 6, sliderY + 15, colW - colW / 2 - 6, 24);
-
-        const int knobY = sliderY + sliderRowH + 7;
+        // The side strip, top to bottom: Start / End SLIDERS (item
+        // 80), the three knobs, then the footer - Reverse and Mute
+        // Group below the knobs, never stacked in a corner (item
+        // 111b's law stands).
+        const int sx = lay.stripX, sw = lay.stripW;
+        int y = gridY;
+        startRow.label.setBounds (sx, y, sw, 13);
+        startRow.slider.setBounds (sx, y + 15, sw, 24);
+        y += 46;
+        endRow.label.setBounds (sx, y, sw, 13);
+        endRow.slider.setBounds (sx, y + 15, sw, 24);
+        y += 46;
         Row* knobs[] = { &tuneRow, &gainRow, &velRow };
-        const int cellW = colW / 3;
+        const int cellW = sw / 3;
+        const int knobSize = juce::jlimit (44, 64, cellW - 22);
         for (int i = 0; i < 3; ++i)
         {
-            const int cellX = ex + i * cellW;
-            knobs[i]->label.setBounds (cellX, knobY, cellW, 14);
-            knobs[i]->slider.setBounds (cellX + (cellW - knobSize) / 2, knobY + 16,
+            const int cellX = sx + i * cellW;
+            knobs[i]->label.setBounds (cellX, y, cellW, 14);
+            knobs[i]->slider.setBounds (cellX + (cellW - knobSize) / 2, y + 16,
                                         knobSize, knobSize + 16);
         }
-        const int knobRowH = 16 + knobSize + 18;
-
-        // Item 111b: the footer row - Reverse, Mute Group and its
-        // None-first box, side by side in the open, at every width.
-        const int footY = knobY + knobRowH + 4;
-        reverseToggle.setBounds (ex, footY, 130, 24);
-        muteLabel.setBounds (ex + 142, footY + 2, 84, 20);
-        muteGroupBox.setBounds (ex + 230, footY, 110, 24);
-
-        // Item 100's guidance, under the footer (the duplicate info
-        // strip that shared this block is gone - item 111).
-        const int infoY = footY + footerH + 4;
-        guidance.setBounds (ex, infoY, colW, juce::jmax (0, infoH));
+        y += 16 + knobSize + 16 + 8;
+        reverseToggle.setBounds (sx, y, 110, 24);
+        muteLabel.setBounds (sx + 118, y + 2, 84, 20);
+        y += 30;
+        muteGroupBox.setBounds (sx, y, 130, 24);
     }
 
 private:
@@ -957,32 +999,41 @@ private:
 
     struct Layout
     {
-        int padW = 104, padH = 74, gridRight = 456, editorX = 484;
+        int padW = 104, padH = 74;
+        int gridY = 66, gridW = 456, gridRight = 472;
+        int waveX = 488, waveW = 300, waveH = 110;
+        int stripX = 800, stripW = 252;
     };
 
     Layout layout() const
     {
         Layout lay;
-        // Round 3: the wording under the pads is GONE (item 100 - it
-        // lives in the info panel now), so the grid's height budget is
-        // the strip at the top and nothing else; and the pads sit a
-        // touch squarer (1.25), closer to the hardware they evoke.
-        // Both moves make the pads BIGGER at every window size the
-        // bank opens at (item 100: "a tiny bit bigger still").
-        // Round 6: 30 px on the right belongs to the bank meter
-        // (item 112b) in both homes of the bank; the grid's share
-        // rises 55 -> 56 so the pads keep the size item 100 won them
-        // (the meter's strip comes out of the editor's side instead).
-        const int availW = juce::jmax (320, ((getWidth() - 30) * 56) / 100 - 24);
-        const int availH = juce::jmax (160, getHeight() - 60);
-        const int cellW = (availW - 24) / 4, cellH = (availH - 24) / 4;
-        // Item 111a: docked pads run squarer (1.12) - bigger in the
-        // tab's fixed height; the pop-out keeps its 1.25 letterbox.
-        const float aspect = dockedMode ? 1.12f : 1.25f;
-        lay.padW = juce::jmin (cellW, (int) (cellH * aspect));
-        lay.padH = (int) (lay.padW / aspect);
-        lay.gridRight = 16 + 4 * lay.padW + 3 * 8;
-        lay.editorX = lay.gridRight + 28;
+        // Item 201 (the pad-enlargement rider, carrying items
+        // 151/166): the GRID owns at least half the window - 54% of
+        // the bank's width - and the pads fill their cells outright
+        // (item 151a: elongated pads are fine; size first). This
+        // supersedes item 111a's squarer-docked geometry: at the
+        // tab's fixed height, half the screen and square cannot both
+        // be true, and D's Nov 14 ruling chose the half screen.
+        // The waveform keeps a working width even in a small pop-out:
+        // the grid's share yields before the wave starves.
+        const int W = getWidth(), H = getHeight();
+        lay.gridY = 66;
+        const int zoneH = juce::jmax (120, H - lay.gridY - 6);
+        lay.stripW = W >= 1300 ? 252 : 208;
+        int gridW = (W * 54) / 100;
+        gridW = juce::jmin (gridW, W - 16 - 16 - 150 - 12 - lay.stripW - 32);
+        lay.gridW = juce::jmax (280, gridW);
+        lay.padW = (lay.gridW - 24) / 4;
+        lay.padH = (zoneH - 24) / 4;
+        lay.gridRight = 16 + lay.gridW;
+        lay.waveX = lay.gridRight + 16;
+        lay.stripX = W - 32 - lay.stripW;
+        lay.waveW = juce::jmax (80, lay.stripX - 12 - lay.waveX);
+        // The wave at real height: roughly double the old editor's
+        // squeezed strip (~50 px at the tab's height), capped so a
+        // tall pop-out still leaves the strip its room.
+        lay.waveH = juce::jlimit (88, 160, (zoneH * 45) / 100);
         return lay;
     }
 
@@ -1148,6 +1199,7 @@ private:
     Row startRow, endRow, tuneRow, gainRow, velRow;
     juce::ToggleButton reverseToggle { "Reverse" };
     juce::ComboBox muteGroupBox;
+    juce::ComboBox kitBox; // bank build: the factory-kit selector
 
     // item 100 drag state (pad -> pad; the waveform panel's drag is
     // the owner's, and lands through padAtScreenPosition just the same)

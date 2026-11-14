@@ -134,6 +134,30 @@ public:
         writeToggle.onClick = [this] { refreshWriteUi(); };
         addAndMakeVisible (writeToggle);
 
+        // Bank build: the source selector (see onInstrumentChosen).
+        sourceBox.setTextWhenNothingSelected ("Sound...");
+        sourceBox.addItem ("Synth", 1);
+        sourceBox.addItem ("Piano", 2);
+        sourceBox.onChange = [this]
+        {
+            const int id = sourceBox.getSelectedId();
+            if (id == 1 || id == 2) { if (onInstrumentChosen) onInstrumentChosen (id - 1); }
+            else if (id >= 101)     { if (onFactoryKitChosen) onFactoryKitChosen (id - 101); }
+        };
+        addAndMakeVisible (sourceBox);
+
+        // Patterns build (item 160): the BASSLINE selector, same
+        // grammar - pick one and the owner writes it into the selected
+        // instrument's piano-roll lane (and sets the tempo), one
+        // undoable action.
+        basslineBox.setTextWhenNothingSelected ("Bassline...");
+        basslineBox.onChange = [this]
+        {
+            const int id = basslineBox.getSelectedId();
+            if (id > 0 && onBasslineChosen) onBasslineChosen (id - 1);
+        };
+        addAndMakeVisible (basslineBox);
+
         octDownButton.onClick = [this] { setOctaveShift (octaveShift - 1); };
         octUpButton.onClick   = [this] { setOctaveShift (octaveShift + 1); };
         addAndMakeVisible (octDownButton);
@@ -145,7 +169,7 @@ public:
 
         hintLabel.setColour (juce::Label::textColourId, boombap::ui::muted());
         hintLabel.setFont (juce::Font (11.5f));
-        hintLabel.setText ("Keys + two QWERTY rows play here - lower on a key hits harder.",
+        hintLabel.setText ("Lower on a key hits harder.",
                            juce::dontSendNotification);
         addAndMakeVisible (hintLabel);
 
@@ -174,6 +198,41 @@ public:
     // Learn for that key ("key:<note>", the note it plays at the
     // current octave shift) - the owner arms the one-shot capture.
     std::function<void (int)> onKeyMidiLearn;
+    // Bank build (items 158/179): the header's source selector - the
+    // instruments (owner's selectInstrument) and the factory kits.
+    // Choosing a kit loads it into the pad bank (owner's one-gesture
+    // load) and aims the keys at the pad rows, which the live-note
+    // funnel already pitch-plays.
+    std::function<void (int)> onInstrumentChosen;   // 0 = synth, 1 = piano
+    std::function<void (int)> onFactoryKitChosen;   // kit index
+    // Patterns build (item 160): a preset bassline was picked - the
+    // owner applies it (see onBasslineChosen wiring in MainComponent).
+    std::function<void (int)> onBasslineChosen;     // bassline index
+
+    void setFactoryKitNames (const juce::StringArray& names)
+    {
+        sourceBox.clear (juce::dontSendNotification);
+        sourceBox.addItem ("Synth", 1);
+        sourceBox.addItem ("Piano", 2);
+        sourceBox.addSeparator();
+        for (int i = 0; i < names.size(); ++i)
+            sourceBox.addItem ("Kit: " + names[i], 101 + i);
+    }
+    void showInstrument (int which)  { sourceBox.setSelectedId (which + 1, juce::dontSendNotification); }
+    void showFactoryKit (int kit)    { sourceBox.setSelectedId (101 + kit, juce::dontSendNotification); }
+    // Test seam (the writeButtonForTest pattern): the real selector.
+    juce::ComboBox& sourceBoxComponent() { return sourceBox; }
+
+    // Patterns build (item 160): the owner hands over the bassline
+    // names once; the header selector then offers them.
+    void setBasslineNames (const juce::StringArray& names)
+    {
+        basslineBox.clear (juce::dontSendNotification);
+        for (int i = 0; i < names.size(); ++i)
+            basslineBox.addItem (names[i], i + 1);
+    }
+    // Test seam: the real bassline selector.
+    juce::ComboBox& basslineBoxComponent() { return basslineBox; }
 
     // Correspondence (item 147): a pitch the CONTROLLER is holding
     // lights its key without the panel pressing it - no onNoteOn, no
@@ -525,8 +584,10 @@ public:
     void resized() override
     {
         titleLabel.setBounds (8, 4, 92, 26);
-        targetLabel.setBounds (104, 4, 560, 26);
-        hintLabel.setBounds (getWidth() / 2 - 60, 4, getWidth() / 2 - 380, 26);
+        targetLabel.setBounds (104, 4, 336, 26);
+        sourceBox.setBounds (448, 4, 200, 26); // bank build: the source selector
+        basslineBox.setBounds (656, 4, 260, 26); // patterns build: the bassline selector
+        hintLabel.setBounds (924, 4, juce::jmax (0, getWidth() - 412 - 932), 26);
         octDownButton.setBounds (getWidth() - 300, 4, 58, 26);
         octLabel.setBounds (getWidth() - 238, 4, 118, 26);
         octUpButton.setBounds (getWidth() - 116, 4, 58, 26);
@@ -585,6 +646,8 @@ private:
     juce::Label titleLabel, targetLabel, octLabel, hintLabel;
     juce::TextButton octDownButton { "OCT -" }, octUpButton { "OCT +" };
     juce::ToggleButton writeToggle;
+    juce::ComboBox sourceBox; // bank build: instruments + factory kits
+    juce::ComboBox basslineBox; // patterns build (item 160): preset basslines
     int octaveShift = 0;
     int mouseNote = -1;
     std::map<int, int> heldNotes;              // midi note -> channel it started on

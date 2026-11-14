@@ -20,9 +20,11 @@ boombap::ProjectData MainComponent::makeProjectData() const
     // Round 6 (item 109): pads and sequencer rows carry SEPARATE file
     // references now - all sixteen pads, and the rows' own array.
     for (size_t i = 0; i < padFiles.size(); ++i)
-        d.padPaths[i] = padFiles[i] == File() ? String() : padFiles[i].getFullPathName();
+        d.padPaths[i] = padFactoryRef[i].isNotEmpty() ? padFactoryRef[i]
+                        : padFiles[i] == File() ? String() : padFiles[i].getFullPathName();
     for (size_t i = 0; i < rowPadFiles.size(); ++i)
-        d.rowPadPaths[i] = rowPadFiles[i] == File() ? String() : rowPadFiles[i].getFullPathName();
+        d.rowPadPaths[i] = rowFactoryRef[i].isNotEmpty() ? rowFactoryRef[i]
+                        : rowPadFiles[i] == File() ? String() : rowPadFiles[i].getFullPathName();
     d.hasRowPadPaths = true;
     for (size_t t = 0; t < rowFiles.size(); ++t)
         d.rowSamplePaths[t] = rowFiles[t] == File() ? String() : rowFiles[t].getFullPathName();
@@ -102,6 +104,8 @@ void MainComponent::newProject()
 {
     const boombap::ProjectData fresh; // defaults: the boom-bap starter pattern, no samples
     engine.applySettings (fresh.settings);
+    padFactoryRef.fill (juce::String()); // bank build: no factory identity in a fresh project
+    rowFactoryRef.fill (juce::String());
     for (int i = 0; i < 3; ++i)
     {
         engine.clearSample (boombap::BoomBapEngine::Sample1 + i);
@@ -240,9 +244,19 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         const String path = rowPathFor (i);
         engine.clearSample (track);
         rowPadFiles[(size_t) i] = File();
+        rowFactoryRef[(size_t) i] = {};
         if (i < 3) samplePaths[(size_t) i] = File();
         if (path.isEmpty())
             continue;
+
+        // Bank build: a factory row's "path" is its bank identity -
+        // the sound is decoded from the binaries, never from a file.
+        int fk = -1, fp = -1;
+        if (boombap::parseFactoryRef (path, fk, fp))
+        {
+            loadFactoryPadAt (fk, fp, i, false, true);
+            continue;
+        }
 
         const File f (path);
         if (f.existsAsFile())
@@ -262,8 +276,17 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
         const String path = padPathFor (i);
         engine.clearPad (i);
         padFiles[(size_t) i] = File();
+        padFactoryRef[(size_t) i] = {};
         if (path.isEmpty())
             continue;
+
+        // Bank build: a factory pad's "path" is its bank identity.
+        int fk = -1, fp = -1;
+        if (boombap::parseFactoryRef (path, fk, fp))
+        {
+            loadFactoryPadAt (fk, fp, i, true, false);
+            continue;
+        }
 
         const File f (path);
         if (f.existsAsFile())

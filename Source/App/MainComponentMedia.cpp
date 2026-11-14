@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "PadBank.h"
+#include "KeyboardPanel.h"
 #include "PianoRoll.h"
 #include "Playlist.h"
 #include "Multitrack.h"
@@ -224,6 +225,7 @@ void MainComponent::loadSampleFile (int track, const File& file)
         // the pad bank is never touched from the row side, in either
         // direction. Pads change only by explicit pad action.
         rowPadFiles[(size_t) row] = file;
+        rowFactoryRef[(size_t) row] = {}; // bank build: a real file replaces any factory identity
         if (row < 3)
         {
             waveData[(size_t) row] = mono;
@@ -269,6 +271,7 @@ void MainComponent::loadPadFile (int pad, const File& file)
     // waveform panel's record, or a track name.
     engine.loadPadSample (pad, std::move (mono), fileSr);
     padFiles[(size_t) pad] = file;
+    padFactoryRef[(size_t) pad] = {}; // bank build: a real file replaces any factory identity
     if (padBank != nullptr) padBank->refreshPad (pad);
     if (mpcPanel != nullptr) mpcPanel->refreshPad (pad);
     fireMediaChanged();
@@ -287,9 +290,190 @@ void MainComponent::clearPad (int pad)
     beginUndoGesture();
     engine.clearPad (pad);
     padFiles[(size_t) pad] = File();
+    padFactoryRef[(size_t) pad] = {}; // bank build
     if (padBank != nullptr) padBank->refreshPad (pad);
     if (mpcPanel != nullptr) mpcPanel->refreshPad (pad);
     fireMediaChanged();
+    endUndoGesture();
+}
+
+//==============================================================================
+// Bank build (items 82/158/179): the factory kits. The sounds live in
+// the binaries (FactoryBank); a kit load fills the pads AND their
+// sequencer rows, because the kit is one instrument with two doors.
+juce::StringArray MainComponent::factoryKitNames() const
+{
+    juce::StringArray names;
+    for (int k = 0; k < boombap::factoryKitCount(); ++k)
+        names.add (boombap::factoryKitName (k));
+    return names;
+}
+
+bool MainComponent::loadFactoryPadAt (int kit, int srcPad, int destIndex, bool toPads, bool toRows)
+{
+    if (destIndex < 0 || destIndex >= 16) return false;
+    std::vector<float> mono;
+    double fileSr = 44100.0;
+    if (! boombap::decodeFactoryPad (kit, srcPad, mono, fileSr)) return false;
+    if (toPads)
+    {
+        engine.loadPadSample (destIndex, mono, fileSr);
+        padFiles[(size_t) destIndex] = File();
+        padFactoryRef[(size_t) destIndex] = boombap::factoryRef (kit, srcPad);
+    }
+    if (toRows)
+    {
+        engine.loadSample (boombap::BoomBapEngine::Sample1 + destIndex, std::move (mono), fileSr);
+        rowPadFiles[(size_t) destIndex] = File();
+        rowFactoryRef[(size_t) destIndex] = boombap::factoryRef (kit, srcPad);
+        syncTrackName (boombap::BoomBapEngine::Sample1 + destIndex);
+    }
+    return true;
+}
+
+void MainComponent::fillFactoryKitNow (int kit)
+{
+    if (kit < 0 || kit >= boombap::factoryKitCount()) return;
+    // All-or-nothing: the whole kit must decode before anything lands.
+    for (int pad = 0; pad < 16; ++pad)
+    {
+        std::vector<float> probe;
+        double sr = 0.0;
+        if (! boombap::decodeFactoryPad (kit, pad, probe, sr)) return;
+    }
+    for (int pad = 0; pad < 16; ++pad)
+        loadFactoryPadAt (kit, pad, pad, true, true);
+    if (padBank != nullptr)  { padBank->refreshAll();  padBank->showFactoryKit (kit); }
+    if (mpcPanel != nullptr) { mpcPanel->refreshAll(); mpcPanel->showFactoryKit (kit); }
+    if (keyboardPanel != nullptr) keyboardPanel->showFactoryKit (kit);
+    fireMediaChanged();
+}
+
+void MainComponent::loadFactoryKit (int kit)
+{
+    if (kit < 0 || kit >= boombap::factoryKitCount()) return;
+    beginUndoGesture(); // Pass 2 item 38: the kit is ONE undoable action
+    fillFactoryKitNow (kit);
+    endUndoGesture();
+}
+
+//==============================================================================
+// Patterns build (item 160): the preset grooves + basslines. The data
+// lives in the binaries (PatternBank); a pick fills the CURRENT pattern
+// slot and sets the project tempo, as ONE undoable action.
+
+int MainComponent::grooveRowForVoice (const juce::String& needle, bool preferClosed) const
+{
+    using E = boombap::BoomBapEngine;
+    int firstHat = -1;
+    for (int i = 0; i < 16; ++i)
+    {
+        const int row = E::Sample1 + i;
+        const juce::String name = juce::String (engine.displayTrackName (row)).toLowerCase();
+        if (! name.contains (needle)) continue;
+        if (preferClosed)
+        {
+            if (name.contains ("closed")) return row;
+            if (firstHat < 0) firstHat = row;
+        }
+        else return row;
+    }
+    if (preferClosed && firstHat >= 0) return firstHat;
+    // The built-in rows are the fallback (they always have voices).
+    if (needle == "kick")  return E::Kick;
+    if (needle == "snare") return E::Snare;
+    if (needle == "hat")   return E::ClosedHat;
+    return -1;
+}
+
+void MainComponent::applyDrumGroove (int pickerIndex)
+{
+    using E = boombap::BoomBapEngine;
+    const auto* groove = boombap::drumGrooveAt (pickerIndex);
+    if (groove == nullptr || groove->hits.empty()) return; // refused
+
+    beginUndoGesture(); // the whole pick is ONE undoable action
+
+    // A groove needs voices: with nothing on the pad rows, Kit 1
+    // (the generic kit of item 160) loads as part of the same action.
+    bool anyRowLoaded = false;
+    for (int i = 0; i < 16; ++i)
+        if (engine.rowHasSample (E::Sample1 + i)) anyRowLoaded = true;
+    if (! anyRowLoaded) fillFactoryKitNow (0);
+
+    const int kickRow  = grooveRowForVoice ("kick", false);
+    const int snareRow = grooveRowForVoice ("snare", false);
+    const int hatRow   = grooveRowForVoice ("hat", true);
+
+    // The pick REPLACES the pattern slot's drum voices: the mapped
+    // rows are cleared, then the hits land with their velocities.
+    for (int row : { kickRow, snareRow, hatRow })
+        if (row >= 0)
+            for (int s = 0; s < kSteps; ++s) engine.setStep (row, s, 0);
+    for (const auto& hit : groove->hits)
+    {
+        // The verified pack map (PatternBank.h): 36 kick, 38 snare,
+        // 40 closed hat. Note 41 is deliberately NOT mapped - its
+        // role is unverified and D's ear decides it later.
+        int row = -1;
+        if (hit.note == 36) row = kickRow;
+        else if (hit.note == 38) row = snareRow;
+        else if (hit.note == 40) row = hatRow;
+        if (row >= 0) engine.setStep (row, hit.step32, hit.velocity);
+    }
+
+    engine.setBpm ((float) groove->bpm);
+    bpm.slider.setValue (groove->bpm, juce::dontSendNotification);
+    refreshGrid();
+    endUndoGesture();
+}
+
+void MainComponent::applyBassline (int index)
+{
+    using E = boombap::BoomBapEngine;
+    const auto* bass = boombap::basslineAt (index);
+    if (bass == nullptr || bass->notes.empty()) return; // refused
+
+    // The lane: the instrument the user has selected - the piano when
+    // the piano channel (or the piano instrument view) is selected,
+    // the synth otherwise (the default).
+    int target = shownInstrument;
+    if (selectedChannel == E::kSynthChannel) target = 0;
+    else if (selectedChannel == E::kPianoChannel) target = 1;
+    const int root = target == 1 ? 60 : 48; // piano C4, synth C3
+
+    beginUndoGesture(); // ONE undoable action, tempo included
+
+    // The pick REPLACES the lane's pattern: clear, then write the
+    // notes across their lengths - a later note cuts an earlier one's
+    // tail (the lanes are monophonic steps-as-notes, item 99a).
+    for (int s = 0; s < kSteps; ++s)
+    {
+        if (target == 1) engine.setPianoStep (s, 0);
+        else             engine.setSynthStep (s, 0);
+    }
+    auto notes = bass->notes;
+    std::sort (notes.begin(), notes.end(),
+               [] (const boombap::BassNoteData& a, const boombap::BassNoteData& b)
+               { return a.step < b.step; });
+    for (size_t i = 0; i < notes.size(); ++i)
+    {
+        const auto& n = notes[i];
+        const int value = (n.pitch - root) + 25; // the lane encoding
+        if (value < 1) continue;
+        int end = n.step + n.lengthSteps;
+        if (i + 1 < notes.size()) end = juce::jmin (end, notes[i + 1].step);
+        end = juce::jmin (end, kSteps);
+        for (int s = n.step; s < end; ++s)
+        {
+            if (target == 1) engine.setPianoStep (s, value);
+            else             engine.setSynthStep (s, value);
+        }
+    }
+
+    engine.setBpm ((float) bass->bpm);
+    bpm.slider.setValue (bass->bpm, juce::dontSendNotification);
+    if (pianoRoll != nullptr) pianoRoll->refreshFromEngine();
     endUndoGesture();
 }
 
@@ -307,6 +491,10 @@ void MainComponent::openPadChooser (int pad)
 
 String MainComponent::padDisplayName (int pad) const
 {
+    // Bank build: a factory pad's name is the kit's name for the sound.
+    int kit = -1, src = -1;
+    if (boombap::parseFactoryRef (padFactoryRef[(size_t) pad], kit, src))
+        return boombap::factoryPadName (kit, src);
     const File f = padFiles[(size_t) pad]; // item 109: every pad has its own file
     return f == File() ? String() : f.getFileName();
 }
@@ -327,7 +515,16 @@ void MainComponent::syncTrackName (int track)
     else if (track < E::kFirstOwnRow)
         f = rowPadFiles[(size_t) (track - E::Sample1)]; // item 109: the ROW's file, never the pad's
     else f = rowFiles[(size_t) track];
-    engine.setTrackContentName (track, f == File() ? std::string()
+    // Bank build: a factory row wears the kit's name for the sound.
+    juce::String factoryName;
+    if (track > E::Clap && track < E::kFirstOwnRow)
+    {
+        int kit = -1, src = -1;
+        if (boombap::parseFactoryRef (rowFactoryRef[(size_t) (track - E::Sample1)], kit, src))
+            factoryName = boombap::factoryPadName (kit, src);
+    }
+    engine.setTrackContentName (track, factoryName.isNotEmpty() ? factoryName.toStdString()
+                                                  : f == File() ? std::string()
                                                   : f.getFileNameWithoutExtension().toStdString());
     if (sequencerPanel != nullptr) sequencerPanel->refreshRowName (track);
 }
@@ -349,21 +546,27 @@ void MainComponent::copyPadToPad (int fromPad, int toPad)
 {
     using E = boombap::BoomBapEngine;
     if (fromPad == toPad || fromPad < 0 || fromPad >= 16 || toPad < 0 || toPad >= 16) return;
-    const File file = padFiles[(size_t) fromPad]; // item 109: every pad has its own file
-    if (file == File() || ! file.existsAsFile()) return;
     if (! engine.padHasSample (fromPad)) return;
+    const File file = padFiles[(size_t) fromPad]; // item 109: every pad has its own file
+    // Bank build: a factory pad copies from the bank, not from a file.
+    int kit = -1, src = -1;
+    const bool fromFactory = boombap::parseFactoryRef (padFactoryRef[(size_t) fromPad], kit, src);
+    if (! fromFactory && (file == File() || ! file.existsAsFile())) return;
 
     const auto snapshot = engine.getPadParams (fromPad); // the copy's settings, frozen first
 
     std::vector<float> mono;
     double fileSr = 44100.0;
-    if (! decodeSampleFile (file, mono, fileSr)) return;
+    const bool decoded = fromFactory ? boombap::decodeFactoryPad (kit, src, mono, fileSr)
+                                     : decodeSampleFile (file, mono, fileSr);
+    if (! decoded) return;
 
     beginUndoGesture();
     // Round 6 (item 109): the copy lands on the pad only - no row,
     // waveform record or track name is written from the pad side.
     engine.loadPadSample (toPad, std::move (mono), fileSr);
-    padFiles[(size_t) toPad] = file;
+    padFiles[(size_t) toPad] = fromFactory ? File() : file;
+    padFactoryRef[(size_t) toPad] = fromFactory ? boombap::factoryRef (kit, src) : juce::String();
     engine.setPadParams (toPad, snapshot);
     if (padBank != nullptr) padBank->refreshPad (toPad);
     if (mpcPanel != nullptr) mpcPanel->refreshPad (toPad);
@@ -474,6 +677,21 @@ void MainComponent::openPadBank()
         {
             if (midi != nullptr) midi->armLearnCaptureFor (boombap::midiPadTargetId (pad));
         };
+        // Bank build: the pop-out bank's kit selector, same as the tab's.
+        padBank->setFactoryKitNames (factoryKitNames());
+        padBank->onFactoryKitChosen = [this] (int kit) { loadFactoryKit (kit); };
+        {
+            // The selector tells the truth when the bank IS one kit.
+            int uniform = -1;
+            for (int p = 0; p < 16; ++p)
+            {
+                int k = -1, s = -1;
+                if (! boombap::parseFactoryRef (padFactoryRef[(size_t) p], k, s) || s != p) { uniform = -2; break; }
+                if (uniform == -1) uniform = k;
+                else if (uniform != k) { uniform = -2; break; }
+            }
+            if (uniform >= 0) padBank->showFactoryKit (uniform);
+        }
         padWindow = std::make_unique<PadWindow> ("BoomBap Pad Bank", boombap::ui::bg());
         padWindow->setLookAndFeel (&lookAndFeel);
         padWindow->setContentNonOwned (padBank.get(), false); // the unique_ptr owns it - the window must not delete it too

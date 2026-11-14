@@ -5,6 +5,8 @@
 #include <cmath>
 #include "Engine/BoomBapEngine.h"
 #include "Engine/OfflineRender.h"
+#include "FactoryBank.h"
+#include "PatternBank.h"
 #include "ProjectFile.h"
 #include "BoomBapLookAndFeel.h"
 #include "RecentProjects.h"
@@ -249,6 +251,27 @@ private:
     void openPadChooser (int pad);
     void loadPadFile (int pad, const juce::File& file);
     void clearPad (int pad); // Round 6 (item 110): the pad menu's CLEAR PAD
+    // Bank build (items 82/158/179): load a factory kit - all sixteen
+    // pads (and their sequencer rows) filled as ONE undoable action.
+    void loadFactoryKit (int kit);
+    // The kit fill itself, gesture-free: loadFactoryKit wraps it in
+    // the undo gesture, and the groove apply (item 160) calls it
+    // inside its own gesture when no kit is loaded yet.
+    void fillFactoryKitNow (int kit);
+    juce::StringArray factoryKitNames() const;
+    // Patterns build (item 160): apply a preset drum groove / bassline
+    // from the selectors - each is ONE undoable action that also sets
+    // the project tempo. An out-of-range pick is refused silently.
+    void applyDrumGroove (int pickerIndex);
+    void applyBassline (int index);
+    // The pad row a groove voice lands on: the loaded kit's rows are
+    // searched by name ("kick" / "snare" / "hat", closed hat first);
+    // the built-in rows are the fallback. -1 when nothing matches.
+    int grooveRowForVoice (const juce::String& needle, bool preferClosed) const;
+    // One factory pad into the pad store and/or the row store, with
+    // its factory identity recorded (the project-load path's door;
+    // loadFactoryKit is the UI's). No gesture of its own.
+    bool loadFactoryPadAt (int kit, int srcPad, int destIndex, bool toPads, bool toRows);
     // Round 3 (item 88): track names derive from the file bound to the
     // row - these keep the engine's content names (and the sequencer's
     // first column) in step with the file arrays.
@@ -328,16 +351,18 @@ private:
     // Round 6 (item 115): the row itself is family A "Studio Console"
     // keys now (chunky charcoal, amber glyphs, amber ring on PLAY) in
     // D's order - TO START / REW / PAUSE / PLAY / STOP / FF / TO END -
-    // PLAY dead centre of the seven, the framed clock in the middle
-    // of the row. PAUSE is new: it freezes the playhead where it
-    // stands, and PLAY from pause resumes there.
+    // PLAY dead centre of the seven. PAUSE is new: it freezes the
+    // playhead where it stands, and PLAY from pause resumes there.
+    // Item 167 (Nov 13): the clock left this row for the project-bar
+    // centre, and REC sits right of PLAY.
     TransportButton toStartButton, rewButton, pauseButton, playButton,
                     stopButton, ffButton, toEndButton;
+    TransportButton recButton;
     juce::TextButton clearButton { "Clear" }, resetButton { "Reset" };
-    // Round 6 (item 118): the main window's own UNDO / REDO buttons -
-    // the snapshot history has run since Pass 2 (the Station has had
-    // its pair all along); this is its face on the main screen.
-    juce::TextButton undoButton { "UNDO" }, redoButton { "REDO" };
+    // Round 6 (item 118) placed the main window's own UNDO / REDO pair;
+    // item 156 (ruled Nov 12) sets their face: no box, no word - curved
+    // arrows, the available one glowing. Landed Nov 13 at D's word.
+    boombap::ui::CurvedArrowButton undoButton { false }, redoButton { true };
     boombap::TransportNav transportNav;
     TimeClock mainClock;
     int clockFormat = 0;
@@ -443,6 +468,10 @@ private:
     // references - rows and pads are separate stores now, each with
     // its own array (index 0 = row Sample1).
     std::array<juce::File, 16> rowPadFiles;
+    // Bank build: factory identity per pad / per row ("factory:k:p",
+    // empty for file-loaded sounds). Written into the project file in
+    // place of a path, so factory sounds survive save/load and undo.
+    std::array<juce::String, 16> padFactoryRef, rowFactoryRef;
     std::unique_ptr<PadBankComponent> padBank;
     std::unique_ptr<PadWindow> padWindow;
 

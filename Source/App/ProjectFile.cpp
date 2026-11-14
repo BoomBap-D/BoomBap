@@ -38,6 +38,22 @@ Array<var> melodyNotes (const ProjectSettings& s, int pattern)
 {
     return laneNotes (s.patMelody[pattern]);
 }
+
+// Bank build: a factory pad's stored "path" is its bank identity
+// ("factory:<kit>:<pad>" - the grammar is owned by FactoryBank's
+// parseFactoryRef) - an identity, not a file. It must round-trip
+// verbatim: never absolutized on write, never resolved against the
+// disk on read. (The full range validation happens in parseFactoryRef
+// at load time; this shape check only guards the path machinery.)
+bool isFactoryRefString (const String& s)
+{
+    if (! s.startsWith ("factory:")) return false;
+    const String rest = s.substring (8);
+    const int colon = rest.indexOfChar (':');
+    if (colon <= 0 || colon >= rest.length() - 1) return false;
+    return rest.substring (0, colon).containsOnly ("0123456789")
+        && rest.substring (colon + 1).containsOnly ("0123456789");
+}
 } // namespace
 
 String projectToJson (const ProjectData& d, const File& projectFile)
@@ -130,11 +146,20 @@ String projectToJson (const ProjectData& d, const File& projectFile)
             // Round 6 (item 109): every pad carries its own path now -
             // pads 1-3 are no longer implied by the sample tracks.
             // (Older readers ignore a path on pads 0-2; harmless.)
-            const File f (d.padPaths[(size_t) i]);
-            const String rel = projectFile == File() ? f.getFullPathName()
-                                                     : f.getRelativePathFrom (projectFile.getParentDirectory());
-            o->setProperty ("path", f.getFullPathName());
-            if (! File::isAbsolutePath (rel)) o->setProperty ("relativePath", rel);
+            // Bank build: a factory ref is stored verbatim (see
+            // isFactoryRefString) - the File machinery never sees it.
+            if (isFactoryRefString (d.padPaths[(size_t) i]))
+            {
+                o->setProperty ("path", d.padPaths[(size_t) i]);
+            }
+            else
+            {
+                const File f (d.padPaths[(size_t) i]);
+                const String rel = projectFile == File() ? f.getFullPathName()
+                                                         : f.getRelativePathFrom (projectFile.getParentDirectory());
+                o->setProperty ("path", f.getFullPathName());
+                if (! File::isAbsolutePath (rel)) o->setProperty ("relativePath", rel);
+            }
         }
         padArr.add (var (o));
     }
@@ -146,13 +171,21 @@ String projectToJson (const ProjectData& d, const File& projectFile)
     for (int i = 0; i < ProjectSettings::kPads; ++i)
     {
         if (d.rowPadPaths[(size_t) i].isEmpty()) continue;
-        const File f (d.rowPadPaths[(size_t) i]);
-        const String rel = projectFile == File() ? f.getFullPathName()
-                                                 : f.getRelativePathFrom (projectFile.getParentDirectory());
         auto* o = new DynamicObject();
         o->setProperty ("row", i);
-        o->setProperty ("path", f.getFullPathName());
-        if (! File::isAbsolutePath (rel)) o->setProperty ("relativePath", rel);
+        // Bank build: factory refs verbatim, as with the pads above.
+        if (isFactoryRefString (d.rowPadPaths[(size_t) i]))
+        {
+            o->setProperty ("path", d.rowPadPaths[(size_t) i]);
+        }
+        else
+        {
+            const File f (d.rowPadPaths[(size_t) i]);
+            const String rel = projectFile == File() ? f.getFullPathName()
+                                                     : f.getRelativePathFrom (projectFile.getParentDirectory());
+            o->setProperty ("path", f.getFullPathName());
+            if (! File::isAbsolutePath (rel)) o->setProperty ("relativePath", rel);
+        }
         rowPadArr.add (var (o));
     }
 
@@ -492,6 +525,14 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
             const String abs = item.getProperty ("path", var()).toString();
             if (rel.isEmpty() && abs.isEmpty()) continue;
 
+            // Bank build: a factory ref comes back verbatim - it is
+            // never resolved against the disk.
+            if (isFactoryRefString (abs))
+            {
+                d.padPaths[(size_t) idx] = abs;
+                continue;
+            }
+
             File resolved;
             if (rel.isNotEmpty())
             {
@@ -518,6 +559,12 @@ bool projectFromJson (const String& text, const File& projectFile, ProjectData& 
                 const String rel = item.getProperty ("relativePath", var()).toString();
                 const String abs = item.getProperty ("path", var()).toString();
                 if (rel.isEmpty() && abs.isEmpty()) continue;
+                // Bank build: factory refs verbatim, as with the pads.
+                if (isFactoryRefString (abs))
+                {
+                    d.rowPadPaths[(size_t) idx] = abs;
+                    continue;
+                }
                 File resolved;
                 if (rel.isNotEmpty())
                 {

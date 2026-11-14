@@ -42,6 +42,10 @@ public:
         // Round 5 (item 107): a rename committed in the inline editor
         // (already trimmed; empty = clear the override).
         std::function<void (int, const juce::String&)> onRenameTrack;
+        // Patterns build (item 160): a preset drum groove was picked
+        // from the header's GROOVE selector - the owner applies it to
+        // the current pattern slot as one undoable action.
+        std::function<void (int)> onGrooveChosen;
     };
 
     SequencerPanel (boombap::BoomBapEngine& eng, Callbacks cb)
@@ -77,6 +81,22 @@ public:
             if (callbacks.onAfterChange) callbacks.onAfterChange();
         };
         addAndMakeVisible (addTrackButton);
+
+        // Patterns build (item 160): the GROOVE selector - the house
+        // selector grammar (item 158) on the sequencer's own header:
+        // pick a preset groove and the owner fills the current pattern
+        // slot with it (and sets the tempo), one undoable action.
+        grooveLabel.setText ("GROOVE", juce::dontSendNotification);
+        grooveLabel.setColour (juce::Label::textColourId, boombap::ui::muted());
+        grooveLabel.setFont (juce::Font (11.0f, juce::Font::bold));
+        addAndMakeVisible (grooveLabel);
+        grooveBox.setTextWhenNothingSelected ("Groove...");
+        grooveBox.onChange = [this]
+        {
+            const int id = grooveBox.getSelectedId();
+            if (id > 0 && callbacks.onGrooveChosen) callbacks.onGrooveChosen (id - 1);
+        };
+        addAndMakeVisible (grooveBox);
 
         // Round 4 (item 99a): the ghost roll's switch. The strip itself
         // is laid out by layoutRows (it borrows height only when the
@@ -251,6 +271,17 @@ public:
     const Callbacks& callbacksForTest() const { return callbacks; }
     juce::Component& rowNameComponent (int t) { return rows[juce::jlimit (0, kTracks - 1, t)].name; }
 
+    // Patterns build (item 160): the owner hands over the preset
+    // groove names once; the header selector then offers them.
+    void setGrooveNames (const juce::StringArray& names)
+    {
+        grooveBox.clear (juce::dontSendNotification);
+        for (int i = 0; i < names.size(); ++i)
+            grooveBox.addItem (names[i], i + 1);
+    }
+    // Test seam: the real selector, driven the way a click drives it.
+    juce::ComboBox& grooveBoxComponent() { return grooveBox; }
+
     void refreshPatternUi()
     {
         const int cur = engine.getEditPattern();
@@ -369,8 +400,8 @@ public:
         using namespace boombap::ui;
         g.setColour (muted());
         g.setFont (11.0f);
-        g.drawText ("Click a step: normal, accent, off.  Drag paints steps on - right-drag erases.  Steps 1-16 = bar 1, 17-32 = bar 2.",
-                    getWidth() / 3, 6, getWidth() / 3 + 130, 22, juce::Justification::centredRight);
+        g.drawText ("Click a step cycles: normal, accent, off. Drag paints - right-drag erases.",
+                    800, 6, 416, 22, juce::Justification::centredRight);
 
         // bar/beat numbers over the step columns, aligned with the grid
         g.setFont (12.0f);
@@ -397,6 +428,8 @@ public:
         patternLabel.setBounds (RB (12, 4, 70, 24));
         for (int i = 0; i < 8; ++i)
             patternButtons[(size_t) i].setBounds (RB (88 + i * 40, 4, 36, 24));
+        grooveLabel.setBounds (RB (416, 4, 64, 24));
+        grooveBox.setBounds (RB (484, 4, 300, 24));
         addTrackButton.setBounds (RB (1396, 4, 132, 24));
         ghostToggle.setBounds (RB (1224, 4, 160, 24));
         viewport.setBounds (RB (8, 50, 1528, 282));
@@ -671,6 +704,8 @@ private:
     Callbacks callbacks;
 
     juce::Label patternLabel;
+    juce::Label grooveLabel;   // patterns build (item 160)
+    juce::ComboBox grooveBox;  // patterns build (item 160)
     std::array<juce::TextButton, 8> patternButtons;
     juce::TextButton addTrackButton { "+ TRACK" };
     juce::ToggleButton ghostToggle;

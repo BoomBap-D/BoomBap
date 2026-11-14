@@ -148,6 +148,101 @@ inline void drawSegmentedMeter (juce::Graphics& g, juce::Rectangle<float> area,
         }
     }
 }
+// Item 156 (ruled Nov 12, 2026; pulled forward Nov 13 at D's word):
+// UNDO / REDO wear NO box and NO word - a curved arrow only. The
+// available direction glows amber; the unavailable one sits dim.
+// mirrored = true draws the counterclockwise (undo) arrow.
+class CurvedArrowButton : public juce::TextButton
+{
+public:
+    explicit CurvedArrowButton (bool mirrorX) : juce::TextButton (juce::String {}), mirrored (mirrorX)
+    {
+        setTooltip (mirrored ? "Redo" : "Undo");
+        setTitle (mirrored ? "Redo" : "Undo");
+    }
+
+    void paintButton (juce::Graphics& g, bool shouldDrawButtonAsHighlighted,
+                      bool shouldDrawButtonAsDown) override
+    {
+        const auto b = getLocalBounds().toFloat();
+        const float cx = b.getCentreX(), cy = b.getCentreY();
+        const float r = b.getHeight() * 0.16f; // D, Nov 13: sized twice down at his word (0.30 -> 0.20 -> 0.16); height-based so the pair can narrow without shrinking the glyph twice
+        const bool live = isEnabled();
+
+        const float deg = juce::MathConstants<float>::pi / 180.0f;
+        const float start = 350.0f * deg, sweep = 280.0f * deg;
+        auto pointAt = [&] (float t) {
+            const float a = start + sweep * t;
+            const float x = std::cos (a), y = std::sin (a);
+            return juce::Point<float> (cx + (mirrored ? x : -x) * r, cy + y * r);
+        };
+        auto tangentAt = [&] (float t) {
+            const float a = start + sweep * t;
+            juce::Point<float> tan (-std::sin (a), std::cos (a));
+            if (! mirrored) tan.x = -tan.x;
+            return tan;
+        };
+
+        juce::Path arc;
+        const int segs = 28;
+        for (int i = 0; i <= segs; ++i)
+        {
+            const auto p = pointAt ((float) i / (float) segs);
+            if (i == 0) arc.startNewSubPath (p); else arc.lineTo (p);
+        }
+        const auto tipP = pointAt (1.0f);
+        const auto tan = tangentAt (1.0f);
+        const juce::Point<float> nrm (-tan.y, tan.x);
+        juce::Path head;
+        const auto tip = tipP + tan * (r * 0.62f);
+        const auto c1 = tipP - tan * (r * 0.30f) + nrm * (r * 0.46f);
+        const auto c2 = tipP - tan * (r * 0.30f) - nrm * (r * 0.46f);
+        head.startNewSubPath (tip); head.lineTo (c1); head.lineTo (c2); head.closeSubPath();
+
+        const juce::Colour amber (0xffe8b23a);
+        const juce::Colour hot (0xffffd27a);
+        const juce::Colour dim (0xff4c4c55);
+        if (live)
+        {
+            const auto col = shouldDrawButtonAsDown ? hot : amber;
+            juce::PathStrokeType glowStroke (5.0f, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded);
+            juce::Path arcGlow = arc;
+            glowStroke.createStrokedPath (arcGlow, arc);
+            g.setColour (col.withAlpha (0.22f));
+            g.fillPath (arcGlow);
+            juce::Path headGlow = head;
+            g.setColour (col.withAlpha (0.22f));
+            juce::PathStrokeType headGlowStroke (4.0f, juce::PathStrokeType::curved,
+                                                 juce::PathStrokeType::rounded);
+            headGlowStroke.createStrokedPath (headGlow, headGlow);
+            g.fillPath (headGlow);
+            juce::PathStrokeType mainStroke (2.2f, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded);
+            juce::Path stroked = arc;
+            mainStroke.createStrokedPath (stroked, arc);
+            g.setColour (col);
+            g.fillPath (stroked);
+            g.fillPath (head);
+        }
+        else
+        {
+            juce::PathStrokeType mainStroke (2.2f, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded);
+            juce::Path stroked = arc;
+            mainStroke.createStrokedPath (stroked, arc);
+            g.setColour (dim);
+            g.fillPath (stroked);
+            g.fillPath (head);
+        }
+        juce::ignoreUnused (shouldDrawButtonAsHighlighted);
+    }
+
+private:
+    bool mirrored = false;
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (CurvedArrowButton)
+};
+
 } // namespace ui
 } // namespace boombap
 
@@ -549,7 +644,7 @@ public:
         g.setColour (accentHi());
         const float h = b.getHeight();
         g.setFont (juce::Font (juce::Font::getDefaultMonospacedFontName(),
-                               juce::jmin (23.0f, h * 0.58f), juce::Font::bold));
+                               juce::jmin (28.0f, h * 0.66f), juce::Font::bold));
         g.drawText (text, getLocalBounds(), juce::Justification::centred);
     }
 
@@ -753,7 +848,7 @@ private:
 class TransportButton : public juce::Component
 {
 public:
-    enum class Glyph { ToStart, Rewind, Pause, Play, Stop, Forward, ToEnd };
+    enum class Glyph { ToStart, Rewind, Pause, Play, Stop, Forward, ToEnd, Record };
     std::function<void()> onClick;
 
     TransportButton() = default; // the leak-detector macro's deleted copy ctor suppresses the implicit one
@@ -776,6 +871,11 @@ public:
         {
             g.setColour (boombap::ui::accent());
             g.drawRoundedRectangle (b.reduced (2.0f), 4.0f, lit ? 2.2f : 1.2f);
+        }
+        else if (glyph == Glyph::Record && lit)
+        {
+            g.setColour (juce::Colour (0xffe5484d));
+            g.drawRoundedRectangle (b.reduced (2.0f), 4.0f, 2.2f);
         }
         else if (lit)
         {
@@ -818,6 +918,10 @@ private:
             case Glyph::ToEnd:
                 tri (cx - s * 0.25f, false);
                 g.fillRect (cx + s * 0.71f, cy - s, s * 0.34f, s * 2.0f);
+                break;
+            case Glyph::Record:
+                g.setColour (juce::Colour (0xffe5484d).withAlpha (lit ? 1.0f : 0.55f));
+                g.fillEllipse (cx - s * 0.8f, cy - s * 0.8f, s * 1.6f, s * 1.6f);
                 break;
         }
     }

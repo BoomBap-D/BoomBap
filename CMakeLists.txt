@@ -12,6 +12,11 @@ FetchContent_Declare(JUCE
     GIT_SHALLOW    TRUE)
 FetchContent_MakeAvailable(JUCE)
 
+# ---- factory bank data (bank build, Nov 14, 2026: the four factory
+# kits - 64 synthesized WAVs concatenated in FactoryKitData.bin - ship
+# inside the binaries; FactoryBank.cpp reads them back out) ----
+juce_add_binary_data(BoomBapBinaryData SOURCES Source/App/FactoryKitData.bin Source/App/PatternData.bin)
+
 # ---- standalone app ----
 juce_add_gui_app(BoomBap
     PRODUCT_NAME "BoomBap"
@@ -38,6 +43,12 @@ target_sources(BoomBap PRIVATE
     Source/App/UndoHistory.h
     Source/App/ProjectFile.cpp
     Source/App/ProjectFile.h
+    Source/App/FactoryBank.cpp
+    Source/App/FactoryBank.h
+    Source/App/FactoryKitData.h
+    Source/App/PatternBank.cpp
+    Source/App/PatternBank.h
+    Source/App/PatternData.h
     Source/App/Engine/BoomBapEngine.h)
 
 target_compile_definitions(BoomBap PRIVATE
@@ -48,6 +59,7 @@ target_compile_definitions(BoomBap PRIVATE
 
 target_link_libraries(BoomBap PRIVATE
     juce::juce_audio_utils
+    BoomBapBinaryData
     juce::juce_gui_extra
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags
@@ -93,6 +105,12 @@ target_sources(BoomBapPlugin PRIVATE
     Source/App/UndoHistory.h
     Source/App/ProjectFile.cpp
     Source/App/ProjectFile.h
+    Source/App/FactoryBank.cpp
+    Source/App/FactoryBank.h
+    Source/App/FactoryKitData.h
+    Source/App/PatternBank.cpp
+    Source/App/PatternBank.h
+    Source/App/PatternData.h
     Source/App/Engine/BoomBapEngine.h)
 
 target_compile_definitions(BoomBapPlugin PRIVATE
@@ -102,6 +120,7 @@ target_compile_definitions(BoomBapPlugin PRIVATE
 
 target_link_libraries(BoomBapPlugin PRIVATE
     juce::juce_audio_utils
+    BoomBapBinaryData
     juce::juce_audio_processors
     juce::juce_gui_extra
     juce::juce_recommended_config_flags
@@ -144,9 +163,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(EditorLifecycleTest PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(EditorLifecycleTest PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1)
     if(UNIX AND NOT APPLE)
@@ -164,9 +185,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(PluginRenderTest PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(PluginRenderTest PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1)
     if(UNIX AND NOT APPLE)
@@ -184,9 +207,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(UndoTest PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(UndoTest PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1)
     if(UNIX AND NOT APPLE)
@@ -206,9 +231,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(DockBackTest PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(DockBackTest PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -229,9 +256,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(WindowFramesTest PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(WindowFramesTest PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -266,9 +295,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(PadLoadTest PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(PadLoadTest PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -290,9 +321,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(FixPass3Test PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(FixPass3Test PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -317,9 +350,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(Round1Test PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(Round1Test PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -342,9 +377,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(Round2Test PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(Round2Test PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -367,9 +404,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(Round3Test PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(Round3Test PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -391,9 +430,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(Round4Test PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(Round4Test PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -415,9 +456,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(Round5Test PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(Round5Test PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -439,9 +482,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(Round6Test PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(Round6Test PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -460,9 +505,11 @@ if(BOOMBAP_BUILD_TESTS)
         Source/App/MainComponentMedia.cpp
         Source/App/MainComponentProject.cpp
         Source/App/UiComponents.cpp
-        Source/App/ProjectFile.cpp)
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
     target_link_libraries(MidiTest PRIVATE
-        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra)
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
     target_compile_definitions(MidiTest PRIVATE
         JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
         JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -476,4 +523,38 @@ if(BOOMBAP_BUILD_TESTS)
     target_link_libraries(RecentProjectsTest PRIVATE juce::juce_gui_extra juce::juce_gui_basics)
     target_compile_definitions(RecentProjectsTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
     add_test(NAME recent_files COMMAND RecentProjectsTest)
+
+    # factory bank test (bank build: every kit decodes from the
+    # bundled BinaryData and fills an engine's pads + pad rows)
+    add_executable(FactoryBankTest
+        Tests/FactoryBankTest.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
+    target_link_libraries(FactoryBankTest PRIVATE juce::juce_audio_formats BoomBapBinaryData)
+    target_compile_definitions(FactoryBankTest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    add_test(NAME factory_bank COMMAND FactoryBankTest)
+
+    # pattern bank test (item 160: the bundled preset grooves and
+    # basslines - picker contents, the note-41 holdout, and the two
+    # applies driven through the real selectors in the real app)
+    add_executable(PatternBankTest
+        Tests/PatternBankTest.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
+    target_link_libraries(PatternBankTest PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
+    target_compile_definitions(PatternBankTest PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(PatternBankTest PRIVATE X11)
+    endif()
+    add_test(NAME pattern_bank COMMAND PatternBankTest)
 endif()
