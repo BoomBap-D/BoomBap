@@ -557,4 +557,28 @@ if(BOOMBAP_BUILD_TESTS)
         target_link_libraries(PatternBankTest PRIVATE X11)
     endif()
     add_test(NAME pattern_bank COMMAND PatternBankTest)
+
+    # record-fix test (item 185: takes stay where they were recorded,
+    # clips own their audio through every settings re-apply, and the
+    # on-screen keys record under the transport REC / step recorder)
+    add_executable(RecordFixTest
+        Tests/RecordFixTest.cpp
+        Source/App/PluginProcessor.cpp
+        Source/App/PluginEditor.cpp
+        Source/App/MainComponent.cpp
+        Source/App/MainComponentMedia.cpp
+        Source/App/MainComponentProject.cpp
+        Source/App/UiComponents.cpp
+        Source/App/ProjectFile.cpp
+        Source/App/FactoryBank.cpp
+        Source/App/PatternBank.cpp)
+    target_link_libraries(RecordFixTest PRIVATE
+        juce::juce_audio_utils juce::juce_audio_processors juce::juce_gui_basics juce::juce_gui_extra BoomBapBinaryData)
+    target_compile_definitions(RecordFixTest PRIVATE
+        JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0 JUCE_PLUGINHOST_VST3=1
+        JUCE_MODAL_LOOPS_PERMITTED=1)
+    if(UNIX AND NOT APPLE)
+        target_link_libraries(RecordFixTest PRIVATE X11)
+    endif()
+    add_test(NAME record_fix COMMAND RecordFixTest)
 endif()

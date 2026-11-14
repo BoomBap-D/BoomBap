@@ -935,14 +935,31 @@ void MainComponent::commitTrackRename (int track, const juce::String& text)
 // Round 5 (item 105): the keyboard tab's ONE note door on the owner
 // side. Every note-on - mouse or QWERTY, they converge in the panel
 // before they get here - sounds through the engine's live-note
-// funnel, and, while WRITE is armed and the transport plays, also
-// lands in the playing pattern at the playhead (the engine's
-// stepWriteNote, the Round 4 lane model). Audition-only while WRITE
-// is off or the transport is stopped.
+// funnel. The write side has three doors, one per record mode, all
+// sharing the step-write undo gesture - and the REC and step-record
+// doors are the SAME doors a controller walks through in
+// MidiRouter::playMelodic (item 185c: the on-screen keys used to
+// consult only the panel's WRITE toggle, so with the transport REC
+// armed - the way the pads and controllers record - the keys wrote
+// nothing at all):
+//  - WRITE (the panel's own toggle): while the transport plays, the
+//    note lands at the playhead (the engine's stepWriteNote).
+//  - REC (the router's recArm - the transport REC button and the
+//    MIDI panel's REC INPUT drive this one atomic): while the
+//    transport plays, the note lands at the step the ENGINE CLOCK
+//    says is sounding (MidiRouter::resolveStep), never arrival time.
+//  - STEP RECORD (the router's stepRecord): while the transport is
+//    stopped, the note writes at the step recorder's cursor, which
+//    then advances - the controller behaviour, key for key.
+// Audition-only while every door is closed.
 void MainComponent::keyboardNoteOn (int channel, int note, float velocity)
 {
     engine.liveNoteOn (channel, note, velocity);
-    if (keyboardPanel != nullptr && keyboardPanel->isWriteArmed() && engine.isPlaying())
+    const bool writeArmed = keyboardPanel != nullptr && keyboardPanel->isWriteArmed();
+    const bool recArmed   = midi != nullptr && midi->router.recArm.load();
+    const bool stepRec    = midi != nullptr && midi->router.stepRecord.load();
+
+    if (writeArmed && engine.isPlaying())
     {
         if (! stepGestureOpen)
         {
@@ -952,6 +969,29 @@ void MainComponent::keyboardNoteOn (int channel, int note, float velocity)
         }
         if (engine.stepWriteNote (channel, note, velocity))
             lastStepWriteStep = engine.currentStep();
+    }
+    else if (recArmed && engine.isPlaying() && ! engine.isPaused())
+    {
+        if (! stepGestureOpen)
+        {
+            beginUndoGesture();
+            stepGestureOpen = history.gestureIsOpen();
+            lastStepWriteStep = -1;
+        }
+        const int step = boombap::MidiRouter::resolveStep (engine.getMidiClock(), 0);
+        if (step >= 0 && engine.recordNoteAtStep (channel, note, velocity, step))
+            lastStepWriteStep = step;
+    }
+    else if (stepRec && ! engine.isPlaying())
+    {
+        if (! stepGestureOpen)
+        {
+            beginUndoGesture();
+            stepGestureOpen = history.gestureIsOpen();
+        }
+        auto& router = midi->router;
+        if (engine.stepRecordNoteAt (channel, note, velocity, router.cursorStep()))
+            router.setCursorStep (router.cursorStep() + 1);
     }
 }
 
@@ -966,8 +1006,12 @@ void MainComponent::updateStepWriteGesture()
 {
     if (! stepGestureOpen) return;
     bool close = false;
+    // Item 185c: a gesture opened by the transport REC stays open
+    // while REC is armed, not only while the panel's WRITE is.
+    const bool anyDoorArmed = (keyboardPanel != nullptr && keyboardPanel->isWriteArmed())
+                           || (midi != nullptr && midi->router.recArm.load());
     if (! engine.isPlaying()) close = true;
-    else if (keyboardPanel == nullptr || ! keyboardPanel->isWriteArmed()) close = true;
+    else if (! anyDoorArmed) close = true;
     else
     {
         const int s = engine.currentStep();

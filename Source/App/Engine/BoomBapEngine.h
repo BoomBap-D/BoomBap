@@ -517,12 +517,15 @@ public:
             audioMuteA[(size_t) i].store (p.audioMute[i]);
             audioSoloA[(size_t) i].store (p.audioSolo[i]);
         }
-        {
-            // clip buffers never travel in settings - clear them so a stale
-            // buffer can never sit under a freshly applied region
-            std::lock_guard<std::mutex> lock (sampleMutex);
-            for (auto& d : clipData) d.clear();
-        }
+        // Item 185b: settings carry clip REGIONS only - the audio a
+        // clip owns never travels in settings and is never cleared by
+        // an apply. This function runs on every undo/redo apply and on
+        // every multitrack gesture's snapshot cycle; clearing buffers
+        // here is what let the next restore pass overwrite every
+        // lane's audio with the single current take. Genuine project
+        // changes clear buffers explicitly (clearAllClipBuffers)
+        // BEFORE the restore pass runs.
+
         {
             std::lock_guard<std::mutex> lock (stationMutex);
             for (int ch = 0; ch < kNumChannels; ++ch) station.strips[(size_t) ch] = p.strips[ch];
@@ -545,8 +548,12 @@ public:
         dirty.store (true);
     }
 
-    // After a project load: every clip on the audio track was cut from the
-    // take, so each active clip's buffer is the take's audio.
+    // After a project load into a fresh engine: every clip on the
+    // audio track was cut from the take, so each active clip's buffer
+    // is the take's audio. Item 185b: only slots whose buffer is
+    // EMPTY take the take's audio - a clip that already owns its
+    // audio is never overwritten (this pass also runs after undo
+    // applies, where overwriting is exactly the lane-aliasing bug).
     void restoreClipBuffersFromTake()
     {
         std::lock_guard<std::mutex> lock (sampleMutex);
@@ -554,7 +561,8 @@ public:
         for (int i = 0; i < kMaxAudioClips; ++i)
             if (clipsA[(size_t) i].active.load())
             {
-                clipData[(size_t) i] = takeData;
+                if (clipData[(size_t) i].empty())
+                    clipData[(size_t) i] = takeData;
                 anyActive = true;
             }
         // Item 61: if the restored project already homes this take in
@@ -1056,7 +1064,10 @@ public:
         takeData.assign (recData.begin(), recData.begin() + n);
         takeData.resize ((size_t) quantized, 0.0f);
         takeLenAtomic.store (quantized);
-        takeStartPosA.store (takeStartPosA.load() % std::max (1LL, std::llround (barSamples)));
+        // Item 185a: the take's start position is ABSOLUTE and stays
+        // exactly where the recording began. (This line used to reduce
+        // it modulo one bar, which is why every finished take zipped
+        // to bar 1 on stop - in pattern and song mode alike.)
         builtForGen = captureGen.load();
         takeSerial = ++takeSerialSource;
         // The raw take does NOT start looping on its own (item 56): it
@@ -1475,13 +1486,24 @@ public:
     void clearAudioClip (int slot)
     {
         if (slot < 0 || slot >= kMaxAudioClips) return;
-        {
-            std::lock_guard<std::mutex> lock (sampleMutex);
-            clipData[(size_t) slot].clear();
-        }
+        // Item 185b: deleting a clip retires its REGION, not its
+        // audio - the buffer stays owned by the slot so undoing the
+        // delete (a settings re-apply that reactivates the region)
+        // brings the clip back whole. Placing a new clip into the
+        // slot overwrites the buffer wholesale.
         clipsA[(size_t) slot].active.store (false);
         clipsA[(size_t) slot].length.store (0);
         clipRevision.fetch_add (1);
+    }
+
+    // The one place clip audio is destroyed in bulk: a genuine
+    // project change (open / session recovery / host state restore),
+    // called before restoreClipBuffersFromTake fills the fresh
+    // regions from the take the load brought with it.
+    void clearAllClipBuffers()
+    {
+        std::lock_guard<std::mutex> lock (sampleMutex);
+        for (auto& d : clipData) d.clear();
     }
 
     void clearAllAudioClips()

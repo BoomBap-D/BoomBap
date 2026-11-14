@@ -112,6 +112,12 @@ public:
     SequencerPanel* sequencerPanelComponent() { return sequencerPanel.get(); }
     // Round 5: the keyboard tab's panel, for the suite + the shots.
     KeyboardPanel* keyboardPanelComponent() { return keyboardPanel.get(); }
+    // Item 185: the record-fix suite plays the on-screen keys through
+    // the exact callback the panel raises (the record paths live here).
+    void driveKeyboardNoteOn (int channel, int note, float velocity)
+    {
+        keyboardNoteOn (channel, note, velocity);
+    }
     void driveMinimiseCoupling (bool minimised) { updateMinimiseCoupling (minimised); }
     int auxWindowsHiddenByMinimise() const { return (int) hiddenByMinimise.size(); }
     void driveLoadWaveformSample (int slot, const juce::File& f)

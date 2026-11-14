@@ -327,9 +327,15 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
     // name says so while the alert below says the file is gone.
     syncAllTrackNames();
 
-    if (preserveEngineTake && d.vocalTakePath.isEmpty())
+    if (preserveEngineTake)
     {
-        // plugin state sync: the take lives in the engine and has no file yet - keep it
+        // Item 185b: a history apply or a plugin/editor sync restores
+        // REGIONS and settings only. The engine's live take - and the
+        // audio every clip owns - is not part of a snapshot and is
+        // never swapped out from under the transport. (The old code
+        // reloaded the take from its file whenever the snapshot named
+        // one, and the restore pass below then pushed that take into
+        // every clip: one nudge rewrote the other lane's recording.)
         takeDirty = false;
         refreshTakeUi();
     }
@@ -357,9 +363,12 @@ void MainComponent::loadProjectData (const boombap::ProjectData& d, bool reportM
     }
     takeDirty = false;
     refreshTakeUi();
+    // A genuine project change: the previous project's clip audio
+    // dies here, before the restore pass fills the fresh regions.
+    engine.clearAllClipBuffers();
     }
 
-    engine.restoreClipBuffersFromTake(); // clip regions came from the file; their audio is the take
+    engine.restoreClipBuffersFromTake(); // fresh regions only: clips that already own audio keep it (item 185b)
 
     // Item 61: NO INVISIBLE AUDIO. A take that arrives with a project or a
     // host state restore and has no clip home yet gets one here, exactly

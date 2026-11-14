@@ -120,6 +120,7 @@ void BoomBapProcessor::setStateInformation (const void* data, int sizeInBytes)
 void BoomBapProcessor::applyState (const boombap::ProjectData& d)
 {
     engine.applySettings (d.settings);
+    engine.clearAllClipBuffers(); // item 185b: a host state restore is a genuine project change
     setMediaData (d);
 
     std::vector<float> mono;
