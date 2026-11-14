@@ -325,8 +325,13 @@ public:
             const auto dockedPad = bank.padBounds (0);
             expect (dockedPad.getHeight() >= 60,
                     "111a: the docked pads stand tall on a 17-inch screen (" + juce::String (dockedPad.getHeight()) + " px)");
-            expect (dockedPad.getWidth() * 100 < dockedPad.getHeight() * 125,
-                    "111a: the docked pads are squarer (more MPC) than the pop-out shape");
+            // Item 201 (Nov 14, 2026) supersedes 111a's squarer-pads
+            // geometry: D ruled the grid takes at least half the
+            // screen, elongated pads and all (item 151a). At the
+            // tab's fixed height both could not be true; the half
+            // screen won. The height law above stands untouched.
+            expect (bank.padBounds (3).getRight() - dockedPad.getX() >= bank.getWidth() / 2,
+                    "201: the docked grid spans at least half the bank's width");
             expect (bank.bankMeterComponent().getHeight() > 240,
                     "112b: the segmented meter runs the bank's whole right side");
 

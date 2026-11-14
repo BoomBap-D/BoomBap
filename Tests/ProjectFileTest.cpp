@@ -288,6 +288,28 @@ int main()
            && ! fp1.settings.masterLimiterOn,
            "older files load with default station state");
 
+    // Bank build regression: a factory kit pad's stored "path" is its
+    // bank identity ("factory:<kit>:<pad>"), not a file. It must
+    // round-trip VERBATIM through the JSON - the first bank build
+    // shipped it through the File machinery, which absolutized it
+    // against the working directory and wiped the kit on the undo
+    // history's snapshot re-apply.
+    {
+        ProjectData fd;
+        fd.padPaths[0] = "factory:1:0";
+        fd.padPaths[15] = "factory:3:15";
+        fd.rowPadPaths[0] = "factory:1:0";
+        fd.rowPadPaths[7] = "factory:2:7";
+        fd.hasRowPadPaths = true;
+        ProjectData fback;
+        check (projectFromJson (projectToJson (fd, projectA), projectA, fback, err),
+               "factory-ref project parses");
+        check (fback.padPaths[0] == "factory:1:0" && fback.padPaths[15] == "factory:3:15",
+               "factory pad refs round-trip verbatim");
+        check (fback.rowPadPaths[0] == "factory:1:0" && fback.rowPadPaths[7] == "factory:2:7",
+               "factory row refs round-trip verbatim");
+    }
+
     root.deleteRecursively();
     std::printf (failures == 0 ? "project file checks passed\n" : "%d CHECK(S) FAILED\n", failures);
     return failures == 0 ? 0 : 1;
